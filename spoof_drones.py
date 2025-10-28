@@ -262,22 +262,20 @@ class DroneSpoofer:
         packet_batch_count = 0
         
         try:
-            with self._socket_context() as sock:
-                while True:
-                    if datetime.now() >= next_send:
-                        packets = []
-                        # Update drone positions and send packets
-                        for drone in drones:
-                            drone.update_location(10000)
-                            packet = self.packet_builder.create_packet(drone)
-                            sendp(packet, iface=self.args.interface, verbose=False, count=1)
-                            time.sleep(0.2)
-#                            sock.send(packet)
-                        
-                        packet_batch_count += 1
-                        logging.info(f"Sent batch {packet_batch_count} ({len(drones)} packets)")
-                        next_send = datetime.now() + timedelta(seconds=self.args.interval)
-                    time.sleep(self.args.interval)  # Prevent busy waiting
+            while True:
+                if datetime.now() >= next_send:
+                    packets = []
+                    # Update drone positions and send packets
+                    for drone in drones:
+                        drone.update_location(10000)
+                        packet = self.packet_builder.create_packet(drone)
+                        sendp(packet, iface=self.args.interface, verbose=False, count=1)
+                        time.sleep(0.2)
+                    
+                    packet_batch_count += 1
+                    logging.info(f"Sent batch {packet_batch_count} ({len(drones)} packets)")
+                    next_send = datetime.now() + timedelta(seconds=self.args.interval)
+                time.sleep(self.args.interval)  # Prevent busy waiting
                     
         except KeyboardInterrupt:
             logging.info(f"Automatic mode stopped. Sent {packet_batch_count} batches total")
