@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import select
 import struct
@@ -31,6 +32,12 @@ class DroneState:
     lng: int
     mac_address: str
     direction: int = 0
+    mode: str = "random"
+    end_time: Optional[datetime] = None
+    active: bool = True
+    waypoints: Optional[List[Tuple[int, int, int]]] = None
+    waypoint_index: int = 0
+    next_waypoint_time: Optional[datetime] = None
 
     def update_location(self, step: int) -> None:
         """Update drone location randomly within step range."""
@@ -55,23 +62,23 @@ class ParseLocationAction(argparse.Action):
     """Parse location values during argument parsing"""
 
     def __call__(self, parser, namespace, values, option_string=None):
-        coords = self.parse_location(values[0], values[1])
+        coords = parse_location(values[0], values[1])
         setattr(namespace, self.dest, coords)
 
-    def parse_location(self, latitude: str, longitude: str) -> Tuple[int, int]:
-        """Parse and validate location coordinates."""
-        try:
-            lat = float(latitude)
-            lng = float(longitude)
-        except ValueError:
-            raise argparse.ArgumentTypeError(f"Invalid coordinate format: {latitude}, {longitude}")
-        
-        if not (-90 < lat < 90):
-            raise argparse.ArgumentTypeError(f"Latitude must be between -90 and 90, got: {lat}")
-        if not (-180 < lng < 180):
-            raise argparse.ArgumentTypeError(f"Longitude must be between -180 and 180, got: {lng}")
-        
-        return int(lat * 10**7), int(lng * 10**7)
+def parse_location(latitude: str, longitude: str) -> Tuple[int, int]:
+    """Parse and validate location coordinates."""
+    try:
+        lat = float(latitude)
+        lng = float(longitude)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid coordinate format: {latitude}, {longitude}")
+    
+    if not (-90 < lat < 90):
+        raise argparse.ArgumentTypeError(f"Latitude must be between -90 and 90, got: {lat}")
+    if not (-180 < lng < 180):
+        raise argparse.ArgumentTypeError(f"Longitude must be between -180 and 180, got: {lng}")
+    
+    return int(lat * 10**7), int(lng * 10**7)
 
 def generate_random_mac() -> str:
     """Generate a random MAC address."""
@@ -158,6 +165,7 @@ class DroneSpoofer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.packet_builder = DronePacketBuilder()
+        self.base_location = args.location
         self._setup_logging()
         
     def _setup_logging(self) -> None:
@@ -229,11 +237,13 @@ class DroneSpoofer:
 
     def run_automatic_mode(self) -> None:
         """Run automatic drone spoofing with random movement."""
-        n_drones = max(1, self.args.random)
-        logging.info(f"Starting AUTOMATIC MODE - spoofing {n_drones} drones")
-        
-        # Initialize drones
-        drones = self._create_drones(n_drones)
+        if self.args.drones_config:
+            drones = self._create_drones_from_config(self.args.drones_config)
+            logging.info(f"Starting AUTOMATIC MODE - spoofing {len(drones)} drones from config")
+        else:
+            n_drones = max(1, self.args.random)
+            logging.info(f"Starting AUTOMATIC MODE - spoofing {n_drones} drones")
+            drones = self._create_drones(n_drones)
         
         # Run spoofing loop
         self._run_automatic_loop(drones)
@@ -241,7 +251,7 @@ class DroneSpoofer:
     def _create_drones(self, count: int) -> List[DroneState]:
         """Create specified number of drones with random properties."""
         drones = []
-        base_lat, base_lng = self.args.location
+        base_lat, base_lng = self.base_location
         
         for i in range(count):
             serial = get_random_serial_number()
@@ -256,6 +266,66 @@ class DroneSpoofer:
             
         return drones
 
+    def _create_drones_from_config(self, drones_config: List[dict]) -> List[DroneState]:
+        """Create drones from config entries."""
+        drones = []
+        base_lat, base_lng = self.base_location
+        allowed_modes = {"random", "static", "waypoints"}
+
+        for entry in drones_config:
+            mode = entry.get("mode", "random")
+            if mode not in allowed_modes:
+                raise ValueError(f"Invalid drone mode '{mode}'. Allowed: {sorted(allowed_modes)}")
+
+            waypoints = None
+            if mode == "waypoints":
+                waypoints = self._parse_waypoints(entry.get("waypoints", []))
+                if not waypoints:
+                    raise ValueError("waypoints mode requires a non-empty 'waypoints' list")
+
+            start_location = entry.get("start_location")
+            if start_location:
+                if len(start_location) != 2:
+                    raise ValueError("start_location must have two values: [lat, lng]")
+                lat, lng = parse_location(str(start_location[0]), str(start_location[1]))
+            else:
+                if waypoints:
+                    lat, lng, _ = waypoints[0]
+                else:
+                    lat, lng = random_location(base_lat, base_lng, 50000)
+
+            pilot_location = entry.get("pilot_location")
+            if pilot_location:
+                if len(pilot_location) != 2:
+                    raise ValueError("pilot_location must have two values: [lat, lng]")
+                pilot_lat, pilot_lng = parse_location(str(pilot_location[0]), str(pilot_location[1]))
+                pilot_loc = (pilot_lat, pilot_lng)
+            else:
+                pilot_loc = get_random_pilot_location(lat, lng)
+
+            serial = entry.get("serial")
+            serial_bytes = serial.encode() if serial else get_random_serial_number()
+            mac_addr = entry.get("mac") or generate_random_mac()
+            lifespan_seconds = entry.get("lifespan_seconds", 0)
+            end_time = None
+            if lifespan_seconds and lifespan_seconds > 0:
+                end_time = datetime.now() + timedelta(seconds=lifespan_seconds)
+
+            drone = DroneState(
+                serial=serial_bytes,
+                pilot_location=pilot_loc,
+                lat=lat,
+                lng=lng,
+                mac_address=mac_addr,
+                mode=mode,
+                end_time=end_time,
+                waypoints=waypoints,
+            )
+            drones.append(drone)
+            logging.info(f"Drone {serial_bytes.decode()} created with MAC {mac_addr} mode={mode}")
+
+        return drones
+
     def _run_automatic_loop(self, drones: List[DroneState]) -> None:
         """Main loop for automatic drone spoofing."""
         next_send = datetime.now()
@@ -264,21 +334,75 @@ class DroneSpoofer:
         try:
             while True:
                 if datetime.now() >= next_send:
-                    packets = []
+                    now = datetime.now()
                     # Update drone positions and send packets
                     for drone in drones:
-                        drone.update_location(10000)
+                        if drone.end_time and now >= drone.end_time:
+                            if drone.active:
+                                logging.info(f"Drone {drone.serial.decode()} expired; stopping transmission")
+                                drone.active = False
+                            continue
+                        if not drone.active:
+                            continue
+                        if drone.mode == "random":
+                            drone.update_location(10000)
+                        elif drone.mode == "waypoints":
+                            self._update_waypoints(drone, now)
                         packet = self.packet_builder.create_packet(drone)
                         sendp(packet, iface=self.args.interface, verbose=False, count=1)
                         time.sleep(0.2)
                     
                     packet_batch_count += 1
-                    logging.info(f"Sent batch {packet_batch_count} ({len(drones)} packets)")
+                    active_count = sum(1 for drone in drones if drone.active)
+                    logging.info(f"Sent batch {packet_batch_count} ({active_count} packets)")
+                    if active_count == 0:
+                        logging.info("All drones expired; stopping automatic mode")
+                        break
                     next_send = datetime.now() + timedelta(seconds=self.args.interval)
                 time.sleep(self.args.interval)  # Prevent busy waiting
                     
         except KeyboardInterrupt:
             logging.info(f"Automatic mode stopped. Sent {packet_batch_count} batches total")
+
+    def _parse_waypoints(self, raw_waypoints: List[list]) -> List[Tuple[int, int, int]]:
+        """Parse waypoint list into scaled coordinates and hold seconds."""
+        waypoints: List[Tuple[int, int, int]] = []
+        for entry in raw_waypoints:
+            if not isinstance(entry, list) or len(entry) < 2:
+                raise ValueError("Each waypoint must be [lat, lng, hold_seconds?]")
+            if len(entry) > 3:
+                raise ValueError("Each waypoint must be [lat, lng, hold_seconds?]")
+            lat, lng = parse_location(str(entry[0]), str(entry[1]))
+            hold = int(entry[2]) if len(entry) == 3 else 0
+            if hold < 0:
+                raise ValueError("hold_seconds must be >= 0")
+            waypoints.append((lat, lng, hold))
+        return waypoints
+
+    def _update_waypoints(self, drone: DroneState, now: datetime) -> None:
+        """Advance or hold a drone along its waypoint list."""
+        if not drone.waypoints:
+            return
+
+        if drone.next_waypoint_time is None:
+            lat, lng, hold = drone.waypoints[0]
+            drone.lat = lat
+            drone.lng = lng
+            drone.next_waypoint_time = now + timedelta(seconds=hold)
+            return
+
+        if now < drone.next_waypoint_time:
+            return
+
+        if drone.waypoint_index < len(drone.waypoints) - 1:
+            drone.waypoint_index += 1
+            lat, lng, hold = drone.waypoints[drone.waypoint_index]
+            drone.lat = lat
+            drone.lng = lng
+            drone.next_waypoint_time = now + timedelta(seconds=hold)
+        else:
+            # Stay at final waypoint
+            drone.next_waypoint_time = now + timedelta(seconds=3600)
 
 def get_random_serial_number() -> bytes:
     """Generate a random serial number for spoofed drones."""
@@ -313,20 +437,22 @@ def parse_args() -> argparse.Namespace:
         description=description
     )
     
-    parser.add_argument("-i", "--interface", default="wlan1",
-                       help="Network interface name (default: wlan1)")
+    parser.add_argument("-i", "--interface", default=None,
+                       help="Network interface name")
     parser.add_argument("-m", "--manual", action="store_true",
                        help="Manual mode with keyboard control")
-    parser.add_argument("-r", "--random", type=int, default=1,
-                       help="Number of random drones to spoof (default: 1)")
+    parser.add_argument("-r", "--random", type=int, default=None,
+                       help="Number of random drones to spoof")
     parser.add_argument("-s", "--serial", type=str,
                        help="Custom serial number (max 20 chars). Only for ")
-    parser.add_argument("-n", "--interval", type=float, default=1.0,
-                       help="Interval between transmission of packets (default: 1.0)")
+    parser.add_argument("-n", "--interval", type=float, default=None,
+                       help="Interval between transmission of packets")
     parser.add_argument("-l", "--location", nargs=2, 
                        metavar=("LATITUDE", "LONGITUDE"), 
                        action=ParseLocationAction,
                        help="Initial coordinates (decimal degrees)")
+    parser.add_argument("-c", "--config", type=str,
+                       help="Path to scenario config JSON")
     parser.add_argument("-v", "--verbose", action="store_true",
                        help="Enable verbose logging")
     
@@ -336,19 +462,44 @@ def parse_args() -> argparse.Namespace:
     if args.serial and len(args.serial) > 20:
         parser.error("Serial number must be 20 characters or less")
     
-    if args.random < 1:
+    if args.random is not None and args.random < 1:
         parser.error("Number of random drones must be at least 1")
         
     return args
 
+def load_config(path: str) -> dict:
+    """Load scenario config from JSON."""
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
 def main() -> None:
     """Main entry point."""
     try:
-        args = parse_args()        
-        # Set default location if not provided
-        if not args.location:
-            args.location = (DEFAULT_LAT, DEFAULT_LNG)
-            logging.info("Using default location (Zurich)")
+        args = parse_args()
+        config = {}
+        if args.config:
+            config = load_config(args.config)
+        config_global = config.get("global", {})
+        args.drones_config = config.get("drones", [])
+
+        if args.interface is None:
+            args.interface = config_global.get("interface", "wlan1")
+        if args.interval is None:
+            args.interval = config_global.get("interval", 1.0)
+        if args.random is None:
+            args.random = config_global.get("random", 1)
+        if args.location is None:
+            cfg_location = config_global.get("location")
+            if cfg_location:
+                if len(cfg_location) != 2:
+                    raise ValueError("global.location must have two values: [lat, lng]")
+                args.location = parse_location(str(cfg_location[0]), str(cfg_location[1]))
+            else:
+                args.location = (DEFAULT_LAT, DEFAULT_LNG)
+                logging.info("Using default location (Zurich)")
+
+        if args.random < 1:
+            raise ValueError("Number of random drones must be at least 1")
         
         logging.info(f"Interface: {args.interface}")
         logging.info(f"Location: {args.location}")

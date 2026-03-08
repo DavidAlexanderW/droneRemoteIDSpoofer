@@ -1,0 +1,29 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562],
+    "random": 1
+  },
+  "drones": [
+    {
+      "mode": "random",
+      "serial": "Spoofed_Serial_00001",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "start_location": [47.3764, 8.5313],
+      "pilot_location": [47.3762, 8.5311],
+      "lifespan_seconds": 30
+    },
+    {
+      "mode": "waypoints",
+      "waypoints": [
+        [47.3764, 8.5313, 2],
+        [47.3766, 8.5316, 2],
+        [47.3768, 8.5319, 2]
+      ]
+    },
+    {
+      "mode": "static"
+    }
+  ]
+}

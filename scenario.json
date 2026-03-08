@@ -1,0 +1,19 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562]
+  },
+  "drones": [
+    { "mode": "random" },
+    {
+      "mode": "waypoints",
+      "waypoints": [
+        [47.3764, 8.5313, 2],
+        [47.3766, 8.5316, 2],
+        [47.3768, 8.5319, 2]
+      ]
+    },
+    { "mode": "random" }
+  ]
+}

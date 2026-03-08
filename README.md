@@ -53,9 +53,19 @@ The script can be customized with the following parameters.
 | Flag short | Flag extended | Parameter                  | Default                                           | Description                                    |
 |------------|---------------|----------------------------|---------------------------------------------------|------------------------------------------------|
 | `-h`       | `--help`      | -                          | -                                                 | Displays help message                          |
-| `-i`       | `--interface` | `n`: str                   | wlx00c0ca99160d                                   | Interface name                                 |
+| `-i`       | `--interface` | `n`: str                   | config/global/interface or `wlan1`                | Interface name                                 |
 | `-m`       | `--manual`    | -                          | -                                                 | Spoof one drone and control its movement       |
-| `-r`       | `--random`    | `m`: int                   | 1                                                 | Spoof `m` drones that move automatically       |
-| `-n`       | `--seconds`   | `s`: int                   | 3                                                 | Time between sending packets                   |
-| `-l`       | `--location`  | `lat`: int <br> `lng`: int | 47.3763399, 8.5312562 <br/> Kasernenareal, Zurich | Latitude and Longitude of drone starting point |
+| `-r`       | `--random`    | `m`: int                   | config/global/random or `1`                       | Spoof `m` drones that move automatically       |
+| `-n`       | `--interval`  | `s`: float                 | config/global/interval or `1.0`                   | Time between sending packets                   |
+| `-l`       | `--location`  | `lat`: int <br> `lng`: int | config/global/location or Zurich                  | Latitude and Longitude of drone starting point |
+| `-c`       | `--config`    | `path`: str                | -                                                 | Path to scenario config JSON                   |
+| `-v`       | `--verbose`   | -                          | -                                                 | Enable verbose logging                         |
 
+### Scenario config (JSON)
+Quick start:
+```bash
+sudo python3 ./spoof_drones.py -c scenario.template.json
+```
+
+See `CONFIG.md` for full documentation and `scenario.template.json` for a
+copyable example. Any missing drone fields are generated randomly.
