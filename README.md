@@ -2,7 +2,7 @@
 
 
 
-A tool for crafting and transmitting spoofed drone Remote ID (RID) packets compliant with ASTM F3411-19/22, supporting WiFi Beacon and BLE. Built for **security researchers**, **drone detection system developers**, and anyone studying the robustness of the Remote ID protocol.
+A tool for crafting and transmitting spoofed drone Remote ID (RID) packets compliant with ASTM F3411-19/22, supporting WiFi Beacon and BLE. Built for **security researchers**, **drone detection system developers**, and anyone studying the robustness of the Remote ID protocol. The protocol itself does not provide authentication or cryptographic integrity, which makes it inherently vulnerable to message injection or impersonation in uncontrolled environments.
 
 It generates raw 802.11 beacon frames and BLE advertisements containing ASTM F3411 message payloads, making fake drones appear on any compliant receiver — OpenDroneID apps, DroneTag Rider, DJI AeroScope, and custom monitoring systems.
 
