@@ -1,7 +1,6 @@
-# Drone Remote ID Spoofer
+# Drone Remote ID Spoofer - Bluetooth and WiFi Beacon
 
-![Spoofed drones on OpenDroneID app](docs/images/opendroneid_screenshot.png)
-*Spoofed drones appearing on the OpenDroneID Android app*
+
 
 A tool for crafting and transmitting spoofed drone Remote ID (RID) packets compliant with ASTM F3411-19/22, supporting WiFi Beacon and BLE. Built for **security researchers**, **drone detection system developers**, and anyone studying the robustness of the Remote ID protocol.
 
@@ -66,8 +65,9 @@ sudo .venv/bin/python3 spoof_drones.py -i wlan1 -t both --ble-adapter hci0
 
 You should see the spoofed drone appear on any RID receiver within range.
 
-![Wireshark capture of spoofed RID beacon](docs/images/wireshark_capture.png)
-*Wireshark showing the crafted beacon frame with ASTM vendor-specific IE*
+<img src="./resources/images/spoofed_mobile_app.jpeg" alt="droneScanner app" width="200" style="margin-right:10px;"/><img src="./resources/images/spoofed_remote_id.png" alt="Remote Drone ID Receiver" width="450"/>
+
+*DroneTag application and RemoteIDReceiver spoofed with the tool*
 
 ---
 
@@ -199,7 +199,11 @@ Each drone can have its own mode (`random`, `static`, `waypoints`), serial, MAC,
 
 ## Disclaimer
 
-This repository was created as part of a thesis at the [Cyber-Defence Campus](https://www.cydcampus.admin.ch). It is a proof of concept for security research purposes. The authors do not take any responsibility or liability for the use of the software. Please exercise caution and use at your own risk.
+This repository was created as part of a thesis at the [Cyber-Defence Campus](https://www.cydcampus.admin.ch) and is intended solely for academic and security research purposes.
+
+The software provided here is a proof of concept and is not intended for operational or malicious use. The authors assume no responsibility or liability for any misuse, damage, or legal consequences resulting from the use of this code.
+
+By using this software, you agree to do so at your own risk and in compliance with all applicable laws and regulations.
 
 ## License
 
