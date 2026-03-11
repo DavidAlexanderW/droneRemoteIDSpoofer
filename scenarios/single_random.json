@@ -1,0 +1,10 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562]
+  },
+  "drones": [
+    { "mode": "random" }
+  ]
+}

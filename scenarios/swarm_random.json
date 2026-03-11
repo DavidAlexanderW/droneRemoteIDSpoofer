@@ -1,0 +1,14 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562]
+  },
+  "drones": [
+    { "mode": "random", "serial": "SWARM_01" },
+    { "mode": "random", "serial": "SWARM_02" },
+    { "mode": "random", "serial": "SWARM_03" },
+    { "mode": "random", "serial": "SWARM_04" },
+    { "mode": "random", "serial": "SWARM_05" }
+  ]
+}

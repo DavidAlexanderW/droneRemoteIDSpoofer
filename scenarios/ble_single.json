@@ -1,0 +1,19 @@
+{
+  "global": {
+    "transport": "ble",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562],
+    "ble": {
+      "adapter": "hci0",
+      "advertising_interval_ms": 200
+    }
+  },
+  "drones": [
+    
+    {
+      "mode": "random",
+      "serial": "BLE_DRONE_01",
+      "timestamp_offset_seconds": -10000
+    }
+  ]
+}

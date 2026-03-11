@@ -1,0 +1,23 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "transport": "both",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562],
+    "ble": {
+      "adapter": "hci0",
+      "advertising_interval_ms": 200
+    }
+  },
+  "drones": [
+    {
+      "mode": "waypoints",
+      "serial": "DUAL_01",
+      "waypoints": [
+        [47.3764, 8.5313, 5],
+        [47.3768, 8.5319, 5],
+        [47.3764, 8.5313, 5]
+      ]
+    }
+  ]
+}

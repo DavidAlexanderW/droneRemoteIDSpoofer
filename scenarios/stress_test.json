@@ -1,0 +1,29 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 0.5,
+    "location": [47.3763399, 8.5312562]
+  },
+  "drones": [
+    { "mode": "random", "serial": "STRESS_01" },
+    { "mode": "random", "serial": "STRESS_02" },
+    { "mode": "random", "serial": "STRESS_03" },
+    { "mode": "random", "serial": "STRESS_04" },
+    { "mode": "random", "serial": "STRESS_05" },
+    { "mode": "random", "serial": "STRESS_06" },
+    { "mode": "random", "serial": "STRESS_07" },
+    { "mode": "random", "serial": "STRESS_08" },
+    { "mode": "random", "serial": "STRESS_09" },
+    { "mode": "random", "serial": "STRESS_10" },
+    { "mode": "random", "serial": "STRESS_11" },
+    { "mode": "random", "serial": "STRESS_12" },
+    { "mode": "random", "serial": "STRESS_13" },
+    { "mode": "random", "serial": "STRESS_14" },
+    { "mode": "random", "serial": "STRESS_15" },
+    { "mode": "random", "serial": "STRESS_16" },
+    { "mode": "random", "serial": "STRESS_17" },
+    { "mode": "random", "serial": "STRESS_18" },
+    { "mode": "random", "serial": "STRESS_19" },
+    { "mode": "random", "serial": "STRESS_20" }
+  ]
+}

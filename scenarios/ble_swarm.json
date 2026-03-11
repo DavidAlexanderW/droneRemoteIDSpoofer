@@ -1,0 +1,18 @@
+{
+  "global": {
+    "transport": "ble",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562],
+    "ble": {
+      "adapter": "hci0",
+      "advertising_interval_ms": 200
+    }
+  },
+  "drones": [
+    { "mode": "random", "serial": "BLE_SWARM_01" },
+    { "mode": "random", "serial": "BLE_SWARM_02" },
+    { "mode": "random", "serial": "BLE_SWARM_03" },
+    { "mode": "random", "serial": "BLE_SWARM_04" },
+    { "mode": "random", "serial": "BLE_SWARM_05" }
+  ]
+}

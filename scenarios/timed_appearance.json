@@ -1,0 +1,24 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 1.0,
+    "location": [47.3763399, 8.5312562]
+  },
+  "drones": [
+    {
+      "mode": "random",
+      "serial": "SHORT_LIVED_01",
+      "lifespan_seconds": 15
+    },
+    {
+      "mode": "random",
+      "serial": "SHORT_LIVED_02",
+      "lifespan_seconds": 30
+    },
+    {
+      "mode": "static",
+      "serial": "PERSISTENT_01",
+      "start_location": [47.3765, 8.5315]
+    }
+  ]
+}

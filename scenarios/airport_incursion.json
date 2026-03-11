@@ -1,0 +1,27 @@
+{
+  "global": {
+    "interface": "wlan1",
+    "interval": 0.5,
+    "location": [47.4582, 8.5555]
+  },
+  "drones": [
+    {
+      "mode": "waypoints",
+      "serial": "INTRUDER_01",
+      "pilot_location": [47.4550, 8.5500],
+      "waypoints": [
+        [47.4560, 8.5520, 3],
+        [47.4570, 8.5540, 2],
+        [47.4580, 8.5555, 5],
+        [47.4585, 8.5570, 2],
+        [47.4570, 8.5540, 2],
+        [47.4560, 8.5520, 3]
+      ]
+    },
+    {
+      "mode": "random",
+      "serial": "LOITERER_01",
+      "start_location": [47.4575, 8.5530]
+    }
+  ]
+}

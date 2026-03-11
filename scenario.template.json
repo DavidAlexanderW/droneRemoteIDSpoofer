@@ -3,7 +3,12 @@
     "interface": "wlan1",
     "interval": 1.0,
     "location": [47.3763399, 8.5312562],
-    "random": 1
+    "random": 1,
+    "transport": "wifi",
+    "ble": {
+      "adapter": "hci0",
+      "advertising_interval_ms": 200
+    }
   },
   "drones": [
     {
@@ -12,10 +17,12 @@
       "mac": "aa:bb:cc:dd:ee:ff",
       "start_location": [47.3764, 8.5313],
       "pilot_location": [47.3762, 8.5311],
-      "lifespan_seconds": 30
+      "lifespan_seconds": 30,
+      "timestamp_offset_minutes": -2
     },
     {
       "mode": "waypoints",
+      "transport": "ble",
       "waypoints": [
         [47.3764, 8.5313, 2],
         [47.3766, 8.5316, 2],

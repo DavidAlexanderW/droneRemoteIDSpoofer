@@ -1,0 +1,33 @@
+{
+  "global": {
+    "transport": "ble",
+    "interval": 2.0,
+    "location": [47.3763399, 8.5312562],
+    "ble": {
+      "adapter": "hci0",
+      "advertising_interval_ms": 100
+    }
+  },
+  "drones": [
+    { "mode": "random", "serial": "BLE_STRESS_01" },
+    { "mode": "random", "serial": "BLE_STRESS_02" },
+    { "mode": "random", "serial": "BLE_STRESS_03" },
+    { "mode": "random", "serial": "BLE_STRESS_04" },
+    { "mode": "random", "serial": "BLE_STRESS_05" },
+    { "mode": "random", "serial": "BLE_STRESS_06" },
+    { "mode": "random", "serial": "BLE_STRESS_07" },
+    { "mode": "random", "serial": "BLE_STRESS_08" },
+    { "mode": "random", "serial": "BLE_STRESS_09" },
+    { "mode": "random", "serial": "BLE_STRESS_10" },
+    { "mode": "random", "serial": "BLE_STRESS_11" },
+    { "mode": "random", "serial": "BLE_STRESS_12" },
+    { "mode": "random", "serial": "BLE_STRESS_13" },
+    { "mode": "random", "serial": "BLE_STRESS_14" },
+    { "mode": "random", "serial": "BLE_STRESS_15" },
+    { "mode": "random", "serial": "BLE_STRESS_16" },
+    { "mode": "random", "serial": "BLE_STRESS_17" },
+    { "mode": "random", "serial": "BLE_STRESS_18" },
+    { "mode": "random", "serial": "BLE_STRESS_19" },
+    { "mode": "random", "serial": "BLE_STRESS_20" }
+  ]
+}
