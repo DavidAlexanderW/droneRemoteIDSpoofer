@@ -11,7 +11,7 @@ It generates raw 802.11 beacon frames and BLE advertisements containing ASTM F34
 - **Multi-transport** — Wi-Fi beacon frames and BLE advertisements, individually or simultaneously
 - **Multi-drone** — spoof several DroneIDs at once, each with unique serial, MAC, and flight behavior
 - **Flight modes** — random walk, static position, or predefined waypoint paths
-- **Scenario configs** — define complex multi-drone scenarios in JSON (10+ ready-to-use examples included)
+- **Scenario configs** — define multi-drone scenarios in JSON (10+ ready-to-use examples included)
 - **Manual control** — spoof a DroneID location in real-time with WASD keyboard input
 
 ### Use cases
@@ -19,7 +19,6 @@ It generates raw 802.11 beacon frames and BLE advertisements containing ASTM F34
 - Testing and validating drone detection / monitoring systems (see our [RemoteIDReceiver](https://github.com/cyber-defence-campus/RemoteIDReceiver) for WiFi beacon)
 - Security research on Remote ID protocol weaknesses
 - Stress-testing receiver capacity and performance
-- Academic research and CTF challenges
 - Developing and debugging RID-aware applications
 
 ---
@@ -196,6 +195,12 @@ Each drone can have its own mode (`random`, `static`, `waypoints`), serial, MAC,
 - [ASTM F3411-22a](https://www.astm.org/f3411-22a.html) — the Remote ID standard this tool implements
 
 ---
+
+## Credits
+
+- Fabia Müller, Zurich University of Applied Sciences
+- Sebastian Brunner,Zurich University of Applied Sciences
+- Llorenç Romá, Cyber-Defence Campus
 
 ## Disclaimer
 
