@@ -46,6 +46,7 @@ pip install scapy
 
 **Wi-Fi** — put your adapter in monitor mode, then:
 ```bash
+sudo chmod +x ./interface-monitor.sh
 sudo ./interface-monitor.sh <interface-name>
 sudo .venv/bin/python3 spoof_drones.py -i <interface-name>
 ```
