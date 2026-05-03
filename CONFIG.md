@@ -34,9 +34,17 @@ randomly (serial, MAC, and locations).
 - `lifespan_seconds` (int): stop transmitting after N seconds. Optional.
 - `transport` (string): per-drone transport override (`"wifi"`, `"ble"`, `"both"`). Optional.
 - `timestamp_offset_minutes` (number): shift the ASTM Location timestamp by this many minutes. Negative values produce timestamps in the past (e.g., `-5` = 5 minutes ago). Wraps within the hour. Default: `0`. Optional.
+- `speed` (number): horizontal speed in m/s. Default: random in `[0, 25]`. Optional.
+- `vertical_speed` (number): vertical speed in m/s, positive = climbing. Default: random in `[-5, 5]`. Optional.
+- `geodetic_altitude` (number): altitude above WGS-84 ellipsoid in m. Default: random in `[50, 400]`. Optional.
+- `pressure_altitude` (number): pressure altitude in m. Default: tracks `geodetic_altitude`. Optional.
+- `height` (number): height above takeoff/ground in m. Default: random in `[10, 120]`. Optional.
 - `waypoints` (list): required when `mode` is `"waypoints"`.
   - Each waypoint is `[lat, lng, hold_seconds?]`.
   - `hold_seconds` defaults to `0` when omitted.
+
+In `random` mode the kinematic values drift each tick within plausible bounds.
+In `static` and `waypoints` modes, the seeded values stay constant.
 
 ## Modes
 

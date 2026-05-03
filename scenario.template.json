@@ -18,7 +18,12 @@
       "start_location": [47.3764, 8.5313],
       "pilot_location": [47.3762, 8.5311],
       "lifespan_seconds": 30,
-      "timestamp_offset_minutes": -2
+      "timestamp_offset_minutes": -2,
+      "speed": 12.5,
+      "vertical_speed": -1.0,
+      "geodetic_altitude": 120.0,
+      "pressure_altitude": 118.0,
+      "height": 60.0
     },
     {
       "mode": "waypoints",

@@ -4,6 +4,8 @@ from typing import Tuple, List
 
 from drone_rid_spoofer.state import DroneState
 
+SELF_ID_DESCRIPTION = b"Spoofing test"
+
 
 def _transform_rotation(rotation: int) -> Tuple[int, int]:
     """Transform rotation value according to ASTM F3411-19."""
@@ -14,6 +16,21 @@ def _transform_rotation(rotation: int) -> Tuple[int, int]:
         return rotation - 180, 34
 
 
+def _encode_speed(speed_mps: float) -> int:
+    """Encode speed (m/s) as uint8 in 0.25 m/s units (multiplier bit assumed 0)."""
+    return max(0, min(255, int(round(speed_mps / 0.25))))
+
+
+def _encode_vertical_speed(vs_mps: float) -> int:
+    """Encode vertical speed (m/s) as int8 in 0.5 m/s units."""
+    return max(-127, min(127, int(round(vs_mps / 0.5))))
+
+
+def _encode_altitude(alt_m: float) -> int:
+    """Encode altitude/height (m) as uint16: (alt + 1000) * 2."""
+    return max(0, min(0xFFFF, int(round((alt_m + 1000.0) * 2))))
+
+
 def build_basic_id(serial: bytes) -> bytes:
     """Build Message Type 0 - Basic ID (25 bytes)."""
     serial_packed = struct.pack("<20s", serial)
@@ -21,6 +38,11 @@ def build_basic_id(serial: bytes) -> bytes:
 
 
 def build_location_vector(lat: int, lng: int, direction: int,
+                          speed: float = 0.0,
+                          vertical_speed: float = 0.0,
+                          pressure_altitude: float = 0.0,
+                          geodetic_altitude: float = 0.0,
+                          height: float = 0.0,
                           timestamp_offset: float = 0.0) -> bytes:
     """Build Message Type 1 - Location/Vector (25 bytes).
 
@@ -37,11 +59,13 @@ def build_location_vector(lat: int, lng: int, direction: int,
         struct.pack("<B", 0x10),
         struct.pack("<B", ew_dir),
         struct.pack("<B", dir_val),
-        b'\x00\x00',
+        struct.pack("<B", _encode_speed(speed)),
+        struct.pack("<b", _encode_vertical_speed(vertical_speed)),
         struct.pack("<i", lat),
         struct.pack("<i", lng),
-        b'\x00\x00\x00\x00',
-        struct.pack("<H", 0x07d0),
+        struct.pack("<H", _encode_altitude(pressure_altitude)),
+        struct.pack("<H", _encode_altitude(geodetic_altitude)),
+        struct.pack("<H", _encode_altitude(height)),
         b'\x00\x00',
         struct.pack("<H", tenth_seconds),
         b'\x00\x00'
@@ -61,6 +85,15 @@ def build_system(pilot_lat: int, pilot_lng: int) -> bytes:
     ])
 
 
+def build_self_id(description: bytes = SELF_ID_DESCRIPTION) -> bytes:
+    """Build Message Type 3 - Self ID (25 bytes).
+
+    Description type 0x00 = text. Body is 23 ASCII bytes (null-padded).
+    """
+    body = description[:23].ljust(23, b'\x00')
+    return b'\x30\x00' + body
+
+
 def build_operator_id() -> bytes:
     """Build Message Type 5 - Operator ID (25 bytes)."""
     return b'\x50' + b'\x00' * 24
@@ -70,8 +103,16 @@ def build_all_messages(drone: DroneState) -> List[bytes]:
     """Build all ASTM message payloads for a drone."""
     return [
         build_basic_id(drone.serial),
-        build_location_vector(drone.lat, drone.lng, drone.direction,
-                              drone.timestamp_offset),
+        build_location_vector(
+            drone.lat, drone.lng, drone.direction,
+            speed=drone.speed,
+            vertical_speed=drone.vertical_speed,
+            pressure_altitude=drone.pressure_altitude,
+            geodetic_altitude=drone.geodetic_altitude,
+            height=drone.height,
+            timestamp_offset=drone.timestamp_offset,
+        ),
+        build_self_id(),
         build_system(drone.pilot_location[0], drone.pilot_location[1]),
         build_operator_id(),
     ]

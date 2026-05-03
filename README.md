@@ -67,7 +67,11 @@ You should see the spoofed drone appear on any RID receiver within range.
 
 <img src="./resources/images/spoofed_mobile_app.jpeg" alt="droneScanner app" width="200" style="margin-right:10px;"/><img src="./resources/images/spoofed_remote_id.png" alt="Remote Drone ID Receiver" width="450"/>
 
-*DroneTag application and RemoteIDReceiver spoofed with the tool*
+*DroneTag iOS application and RemoteIDReceiver spoofed.*
+
+**Note**
+- On Google Pixel 9 we could only spoof the *OpenDroneID* app but not the *DroneTag* via BLE.
+
 
 ---
 

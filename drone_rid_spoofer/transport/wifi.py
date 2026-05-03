@@ -13,25 +13,37 @@ logger = logging.getLogger(__name__)
 class WifiBackend(TransportBackend):
     """Wi-Fi beacon frame transport for ASTM F3411-19 RID."""
 
-    HEADER = b'\x0d\x5d\xf0\x19\x04'
+    APP_CODE = 0x0D
+    # Message pack header: msg_type+ver (0xf0 = pack/v0), msg_size (0x19 = 25 bytes)
+    # Followed dynamically by the message count (one byte) per send.
+    PACK_HEADER_PREFIX = b'\xf0\x19'
     DEST_ADDR = 'ff:ff:ff:ff:ff:ff'
-    DRONE_SSID = 'AnafiThermal-Spoofed'
-    OUI = 16387004  # 0xFA0BBC
+    SSID_PREFIX = 'RID-'
+    SSID_MAX_LEN = 32
+    OUI = b'\xfa\x0b\xbc'
+    SUPPORTED_RATES = b'\x82\x84\x8b\x96\x24\x30\x48\x6c'
 
-    def __init__(self, interface: str):
+    def __init__(self, interface: str, ess: bool = False):
         self.interface = interface
+        self.ess = ess
+        # ODID message-pack counter: must increment per transmission so
+        # receivers treat each beacon as a fresh message rather than a duplicate.
+        self._counter = 0
 
     def send_messages(self, drone: DroneState, messages: List[bytes]) -> None:
         """Pack all messages into a single Wi-Fi beacon vendor-specific IE and send."""
-        vendor_data = self.HEADER + b''.join(messages)
+        msg_count = bytes([len(messages) & 0xFF])
+        header = bytes([self.APP_CODE, self._counter]) + self.PACK_HEADER_PREFIX + msg_count
+        self._counter = (self._counter + 1) & 0xFF
+        vendor_data = header + b''.join(messages)
 
-        ie_ssid = dot11.Dot11Elt(ID='SSID', len=len(self.DRONE_SSID), info=self.DRONE_SSID)
-        ie_vendor = dot11.Dot11EltVendorSpecific(
-            ID=221,
-            len=len(vendor_data),
-            oui=self.OUI,
-            info=vendor_data,
-        )
+        serial_str = drone.serial.decode('ascii', errors='replace')
+        ssid = (self.SSID_PREFIX + serial_str)[: self.SSID_MAX_LEN]
+        ie_ssid = dot11.Dot11Elt(ID='SSID', info=ssid)
+        ie_rates = dot11.Dot11Elt(ID='Rates', info=self.SUPPORTED_RATES)
+        # Build the vendor-specific IE as raw bytes so the element length
+        # covers both the OUI and the Remote ID payload.
+        ie_vendor = dot11.Dot11Elt(ID=221, info=self.OUI + vendor_data)
 
         packet = (
             dot11.RadioTap() /
@@ -41,8 +53,9 @@ class WifiBackend(TransportBackend):
                 addr2=drone.mac_address,
                 addr3=drone.mac_address,
             ) /
-            dot11.Dot11Beacon() /
+            dot11.Dot11Beacon(cap='ESS' if self.ess else 0) /
             ie_ssid /
+            ie_rates /
             ie_vendor
         )
 

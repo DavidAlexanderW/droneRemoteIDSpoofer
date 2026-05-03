@@ -6,14 +6,18 @@ import termios
 import time
 import tty
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
 from drone_rid_spoofer.helpers import (
     generate_random_mac,
     get_random_pilot_location,
     get_random_serial_number,
     parse_location,
+    random_altitude,
+    random_height,
     random_location,
+    random_speed,
+    random_vertical_speed,
 )
 from drone_rid_spoofer.messages import build_all_messages
 from drone_rid_spoofer.state import DroneState
@@ -51,6 +55,7 @@ class DroneSpoofer:
         mac_addr = generate_random_mac()
 
         drone = DroneState(serial, pilot_loc, lat, lng, mac_addr)
+        self._seed_kinematics(drone)
         logger.info(f"Drone {serial.decode()} created at [{lat}, {lng}] with MAC {mac_addr}")
 
         self._run_manual_control_loop(drone)
@@ -118,10 +123,28 @@ class DroneSpoofer:
             mac_addr = generate_random_mac()
 
             drone = DroneState(serial, pilot_loc, lat, lng, mac_addr)
+            self._seed_kinematics(drone)
             drones.append(drone)
             logger.info(f"Drone {serial.decode()} created with MAC {mac_addr}")
 
         return drones
+
+    def _seed_kinematics(self, drone: DroneState,
+                         overrides: Optional[dict] = None) -> None:
+        """Seed kinematic fields with random defaults, honoring optional overrides."""
+        overrides = overrides or {}
+        drone.speed = float(overrides.get("speed", random_speed()))
+        drone.vertical_speed = float(
+            overrides.get("vertical_speed", random_vertical_speed())
+        )
+        drone.geodetic_altitude = float(
+            overrides.get("geodetic_altitude", random_altitude())
+        )
+        # Pressure altitude defaults to geodetic ± small offset for plausibility
+        drone.pressure_altitude = float(
+            overrides.get("pressure_altitude", drone.geodetic_altitude)
+        )
+        drone.height = float(overrides.get("height", random_height()))
 
     def _create_drones_from_config(self, drones_config: List[dict]) -> List[DroneState]:
         drones = []
@@ -182,10 +205,17 @@ class DroneSpoofer:
                 transport=drone_transport,
                 timestamp_offset=float(timestamp_offset),
             )
+            self._seed_kinematics(drone, overrides=self._extract_kinematic_overrides(entry))
             drones.append(drone)
             logger.info(f"Drone {serial_bytes.decode()} created with MAC {mac_addr} mode={mode}")
 
         return drones
+
+    def _extract_kinematic_overrides(self, entry: dict) -> dict:
+        """Pull kinematic overrides from a scenario entry; missing keys stay random."""
+        keys = ("speed", "vertical_speed", "pressure_altitude",
+                "geodetic_altitude", "height")
+        return {k: entry[k] for k in keys if k in entry}
 
     def _run_automatic_loop(self, drones: List[DroneState]) -> None:
         next_send = datetime.now()
@@ -205,6 +235,7 @@ class DroneSpoofer:
                             continue
                         if drone.mode == "random":
                             drone.update_location(10000)
+                            drone.drift_kinematics()
                         elif drone.mode == "waypoints":
                             self._update_waypoints(drone, now)
                         self._send(drone)

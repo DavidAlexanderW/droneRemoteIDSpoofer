@@ -53,6 +53,9 @@ def parse_args() -> argparse.Namespace:
                         help="Transport backend (default: wifi)")
     parser.add_argument("--ble-adapter", type=str, default=None,
                         help="BLE adapter name (default: hci0). If BLE transport is used")
+    parser.add_argument("--wifi-ess", action="store_true", default=None,
+                        help="Set the ESS capability bit on Wi-Fi beacons "
+                             "(default: off; spoofed drone is not advertised as an AP)")
 
     args = parser.parse_args()
 
@@ -72,13 +75,13 @@ def load_config(path: str) -> dict:
 
 
 def create_backends(transport: str, interface: str, ble_adapter: str,
-                    ble_interval_ms: int) -> List[TransportBackend]:
+                    ble_interval_ms: int, wifi_ess: bool = False) -> List[TransportBackend]:
     """Create transport backend instances based on configuration."""
     backends: List[TransportBackend] = []
 
     if transport in ("wifi", "both"):
         from drone_rid_spoofer.transport.wifi import WifiBackend
-        backends.append(WifiBackend(interface))
+        backends.append(WifiBackend(interface, ess=wifi_ess))
 
     if transport in ("ble", "both"):
         from drone_rid_spoofer.transport.ble import BleBackend
@@ -124,6 +127,10 @@ def main() -> None:
         else:
             ble_interval_ms = 200
 
+        if args.wifi_ess is None:
+            wifi_config = config_global.get("wifi", {})
+            args.wifi_ess = bool(wifi_config.get("ess", False))
+
         if args.random < 1:
             raise ValueError("Number of random drones must be at least 1")
 
@@ -133,7 +140,7 @@ def main() -> None:
         logging.info(f"Interval between packets(s): {args.interval}s")
 
         backends = create_backends(args.transport, args.interface, args.ble_adapter,
-                                   ble_interval_ms)
+                                   ble_interval_ms, wifi_ess=args.wifi_ess)
         spoofer = DroneSpoofer(args, backends)
 
         try:
