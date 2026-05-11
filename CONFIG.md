@@ -21,6 +21,9 @@ Note that CLI flags override config values.
 - `ble` (object): BLE-specific settings (optional).
   - `adapter` (string): HCI adapter name. Default: `"hci0"`.
   - `advertising_interval_ms` (int): time per BLE advertisement in ms. Default: `200`.
+- `wifi` (object): Wi-Fi-specific settings (optional).
+  - `channel` (int): Wi-Fi channel for injection. Default: `6`.
+  - `ess` (bool): Set ESS capability (make beacon look like an AP). Default: `false`.
 
 ## Drone fields
 Each entry in `drones` describes a single drone. Missing fields are generated
