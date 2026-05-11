@@ -273,7 +273,7 @@ class BleBackend(TransportBackend):
         self._set_advertising_enable(False)
 
         # Set random address to drone's MAC
-        self._set_random_address(drone.mac_address)
+        self._set_random_address(drone.ble_address)
         self._set_advertising_params()
 
         send_sequence = self._build_send_sequence(drone_key, messages)

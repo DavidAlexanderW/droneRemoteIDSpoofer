@@ -32,7 +32,10 @@ randomly (serial, MAC, and locations).
 
 - `mode` (string): `"random"`, `"static"`, or `"waypoints"`. Default: `"random"`.
 - `serial` (string): max 20 chars. Optional.
-- `mac` (string): MAC address. Optional.
+- `mac` (string): Wi-Fi source MAC address. Must be a **unicast, locally-administered** address
+  (byte[0] bits: `0bxxxxxx10`). Randomly generated if omitted. Optional.
+- `ble_mac` (string): BLE advertiser address. Must be a **Static Random** address per BT Core Spec §1.3.2
+  (byte[0] bits: `0b11xxxxxx`). Randomly generated if omitted. Optional.
 - `start_location` ([lat, lng]): initial drone location. Optional.
 - `pilot_location` ([lat, lng]): pilot position. Optional.
 - `lifespan_seconds` (int): stop transmitting after N seconds. Optional.
