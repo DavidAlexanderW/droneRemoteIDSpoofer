@@ -1,6 +1,8 @@
 import logging
 import subprocess
-from typing import List
+import threading
+import time
+from typing import List, Dict, Tuple
 
 from scapy.all import sendp
 import scapy.layers.dot11 as dot11
@@ -23,11 +25,12 @@ class WifiBackend(TransportBackend):
     SUPPORTED_RATES = b'\x82\x84\x8b\x96'
     EXTENDED_SUPPORTED_RATES = b'\x0c\x12\x18\x24\x30\x48\x60\x6c'
 
-    def __init__(self, interface: str, ess: bool = False, protocol_version: int = 2, channel: int = 6):
+    def __init__(self, interface: str, ess: bool = False, protocol_version: int = 2, channel: int = 6, beacon_interval: float = 0.1024):
         self.interface = interface
         self.ess = ess
         self.protocol_version = protocol_version
         self.channel = channel
+        self.beacon_interval = beacon_interval
         
         # Lock the physical interface to the target channel to ensure compliance
         try:
@@ -42,6 +45,49 @@ class WifiBackend(TransportBackend):
         # ODID message-pack counter: must increment per transmission so
         # receivers treat each beacon as a fresh message rather than a duplicate.
         self._counter = 0
+
+        self._payloads: Dict[bytes, Tuple[dot11.Packet, dot11.Packet, str]] = {}
+        self._seq_nums: Dict[bytes, int] = {}
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._transmit_loop, daemon=True)
+        self._thread.start()
+        logger.info(f"Wi-Fi backend started on {interface} with {self.beacon_interval*1000:.0f}ms beacon interval")
+
+    def _transmit_loop(self) -> None:
+        """Continuously broadcast all active beacons at the specified interval."""
+        while self._running:
+            packets = []
+            current_tsf = int(time.time() * 1000000) % (2**64)
+            
+            with self._lock:
+                items = list(self._payloads.items())
+            
+            for serial, (radiotap, ies, mac_addr) in items:
+                with self._lock:
+                    seq_num = self._seq_nums.get(serial, 0)
+                    self._seq_nums[serial] = (seq_num + 1) % 4096
+                
+                # Dynamically instantiate the header to avoid thread contention on shared Scapy objects
+                dot11_base = dot11.Dot11(
+                    type=0, subtype=8,
+                    addr1=self.DEST_ADDR,
+                    addr2=mac_addr,
+                    addr3=mac_addr,
+                    SC=(seq_num << 4)
+                )
+                beacon_base = dot11.Dot11Beacon(cap='ESS' if self.ess else 0, timestamp=current_tsf)
+                
+                frame = radiotap / dot11_base / beacon_base / ies
+                packets.append(frame)
+                
+            if packets:
+                try:
+                    sendp(packets, iface=self.interface, verbose=False)
+                except Exception as e:
+                    logger.debug(f"Wi-Fi transmit error: {e}")
+                    
+            time.sleep(self.beacon_interval)
 
     def send_messages(self, drone: DroneState, messages: List[bytes]) -> None:
         """Pack all messages into a single Wi-Fi beacon vendor-specific IE and send."""
@@ -63,25 +109,14 @@ class WifiBackend(TransportBackend):
         # covers both the OUI and the Remote ID payload.
         ie_vendor = dot11.Dot11Elt(ID=221, info=self.OUI + vendor_data)
 
-        packet = (
-            dot11.RadioTap() /
-            dot11.Dot11(
-                type=0, subtype=8,
-                addr1=self.DEST_ADDR,
-                addr2=drone.mac_address,
-                addr3=drone.mac_address,
-            ) /
-            dot11.Dot11Beacon(cap='ESS' if self.ess else 0) /
-            ie_ssid /
-            ie_rates /
-            ie_dsset /
-            ie_tim /
-            ie_erp /
-            ie_esr /
-            ie_vendor
-        )
-
-        sendp(packet, iface=self.interface, verbose=False, count=1)
+        radiotap = dot11.RadioTap()
+        ies = ie_ssid / ie_rates / ie_dsset / ie_tim / ie_erp / ie_esr / ie_vendor
+        
+        with self._lock:
+            self._payloads[drone.serial] = (radiotap, ies, drone.mac_address)
 
     def close(self) -> None:
-        pass
+        self._running = False
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        logger.info("Wi-Fi backend closed")

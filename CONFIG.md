@@ -24,6 +24,7 @@ Note that CLI flags override config values.
 - `wifi` (object): Wi-Fi-specific settings (optional).
   - `channel` (int): Wi-Fi channel for injection. Default: `6`.
   - `ess` (bool): Set ESS capability (make beacon look like an AP). Default: `false`.
+  - `beacon_interval` (number): Wi-Fi beacon transmission interval in seconds. Default: `0.1024`.
 
 ## Drone fields
 Each entry in `drones` describes a single drone. Missing fields are generated
