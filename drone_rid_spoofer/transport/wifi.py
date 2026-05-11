@@ -5,6 +5,7 @@ from scapy.all import sendp
 import scapy.layers.dot11 as dot11
 
 from drone_rid_spoofer.state import DroneState
+from drone_rid_spoofer.messages import MsgType
 from drone_rid_spoofer.transport.base import TransportBackend
 
 logger = logging.getLogger(__name__)
@@ -14,18 +15,20 @@ class WifiBackend(TransportBackend):
     """Wi-Fi beacon frame transport for ASTM F3411-19 RID."""
 
     APP_CODE = 0x0D
-    # Message pack header: msg_type+ver (0xf0 = pack/v0), msg_size (0x19 = 25 bytes)
-    # Followed dynamically by the message count (one byte) per send.
-    PACK_HEADER_PREFIX = b'\xf0\x19'
     DEST_ADDR = 'ff:ff:ff:ff:ff:ff'
     SSID_PREFIX = 'RID-'
     SSID_MAX_LEN = 32
     OUI = b'\xfa\x0b\xbc'
     SUPPORTED_RATES = b'\x82\x84\x8b\x96\x24\x30\x48\x6c'
 
-    def __init__(self, interface: str, ess: bool = False):
+    def __init__(self, interface: str, ess: bool = False, protocol_version: int = 2):
         self.interface = interface
         self.ess = ess
+        self.protocol_version = protocol_version
+        
+        # Message pack header: msg_type (0xF = Pack) + ver, msg_size (0x19 = 25 bytes)
+        self.pack_header_prefix = bytes([(MsgType.PACK << 4) | self.protocol_version, 0x19])
+        
         # ODID message-pack counter: must increment per transmission so
         # receivers treat each beacon as a fresh message rather than a duplicate.
         self._counter = 0
@@ -33,7 +36,7 @@ class WifiBackend(TransportBackend):
     def send_messages(self, drone: DroneState, messages: List[bytes]) -> None:
         """Pack all messages into a single Wi-Fi beacon vendor-specific IE and send."""
         msg_count = bytes([len(messages) & 0xFF])
-        header = bytes([self.APP_CODE, self._counter]) + self.PACK_HEADER_PREFIX + msg_count
+        header = bytes([self.APP_CODE, self._counter]) + self.pack_header_prefix + msg_count
         self._counter = (self._counter + 1) & 0xFF
         vendor_data = header + b''.join(messages)
 
