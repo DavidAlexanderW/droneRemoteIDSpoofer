@@ -795,7 +795,7 @@ def main():
     parser.add_argument("--consecutive-misses", type=int, default=2, help="Terminate sweep early when 100%% of deadlines are missed for N consecutive drone counts (default: 2; 0 to disable)")
     parser.add_argument("--duration", type=float, default=10.0, help="Duration per test in seconds")
     parser.add_argument("--interval", type=float, default=1.0, help="Main spoofer update interval in seconds")
-    parser.add_argument("--ble-interval-ms", type=int, default=200, help="Default BLE advertising interval in ms")
+    parser.add_argument("--ble-interval-ms", type=int, default=100, help="Default BLE advertising interval in ms")
     parser.add_argument("--legacy-interval-ms", type=int, default=None, help="BLE 4 legacy advertising interval in ms (overrides --ble-interval-ms for legacy/dual)")
     parser.add_argument("--extended-interval-ms", type=int, default=None, help="BLE 5 extended advertising interval in ms (overrides --ble-interval-ms for extended/dual)")
     parser.add_argument("--rx-mode", choices=["auto", "ble4", "ble5"], default="auto", help="Sniffer capture mode: 'ble5' (Coded PHY), 'ble4' (1M Legacy), or 'auto'")
