@@ -51,3 +51,4 @@ plots_*/
 evaluation/*_results.json
 evaluation/*.png
 evaluation/cts_inject
+attacks/takeover/cts_inject

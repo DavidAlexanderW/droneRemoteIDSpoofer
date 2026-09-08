@@ -292,7 +292,7 @@ The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenD
 | **`0x2`** | **Authentication** | `auth_type` (`UAS ID Signature`, `Operator ID Signature`, `Message Set Signature`, `Network RID`, `Specific Auth`), `page_number` (`0..15`), `last_page_index`, `auth_data_length`, `auth_timestamp_iso`, `auth_data_hex` |
 | **`0x3`** | **Self-ID** | `desc_type` (`Text`, `Emergency Status`, `Extended Status`), `description` |
 | **`0x4`** | **System** | `pilot_lat`/`pilot_lon`, `pilot_alt_m`, `operator_location_type` (`Takeoff`, `Live GNSS`, `Fixed`), `area_count`, `area_radius_m`, `area_ceiling_m`, `area_floor_m`, `classification_type` (`EU`), `category_eu` (`Open`, `Specific`, `Certified`), `class_eu` (`Class 0`..`Class 6`), `system_timestamp_iso` |
-| **`0x5`** | **Operator ID** | `operator_id` (e.g. `CHE-123456789abc-xyz`), `operator_id_type` |
+| **`0x5`** | **Operator ID** | `operator_id` (16-char public CAA string, e.g. `CHE87astd57qkgc4`), `operator_id_type` |
 | **`0xF`** | **Message Pack** | Decompresses 25-byte composite packs into individual typed sub-messages |
 
 ---
