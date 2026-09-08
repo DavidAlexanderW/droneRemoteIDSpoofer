@@ -74,7 +74,14 @@ class NrfSnifferThread(threading.Thread):
         subprocess.run(["killall", "-9", "nrfutil", "nrfutil-ble-sniffer", "nrfutil-ble-sni"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         time.sleep(0.5)
         
-        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nrf_bt_sniffer_json.py")]
+        eval_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate_paths = [
+            os.path.join(eval_dir, "..", "scanner", "sniffers", "nrf_bt_sniffer_json.py"),
+            os.path.join(eval_dir, "..", "scanner", "nrf_bt_sniffer_json.py"),
+            os.path.join(eval_dir, "nrf_bt_sniffer_json.py"),
+        ]
+        nrf_script = next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
+        cmd = [sys.executable, nrf_script]
         if self.nrf_port:
             cmd.extend(["--nrf-port", self.nrf_port])
         elif self.rx_pcap and os.path.exists(self.rx_pcap):
