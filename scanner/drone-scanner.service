@@ -33,7 +33,7 @@ ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/python3 scanner/combined_rid
     --ble-mode extended \
     --coded \
     --db-file /home/user/droneRemoteIDSpoofer/rid_detections.db \
-    --log-jsonl /home/lab/droneRemoteIDSpoofer/rid_packets.jsonl \
+    --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
     --rotate-daily \
     --quiet
 

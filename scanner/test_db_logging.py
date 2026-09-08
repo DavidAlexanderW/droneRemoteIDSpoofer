@@ -5,11 +5,16 @@ and query_rid_db.py search & GeoJSON export utility.
 """
 
 import os
+import sys
 import json
 import sqlite3
 import tempfile
 import time
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from scanner.combined_rid_listener import (
     EncounterTracker,
     UnifiedTelemetryLogger,
@@ -126,6 +131,55 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             total_enc = conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0]
             self.assertEqual(total_enc, 2)
+
+    def test_encounter_initial_packet_without_serial_merging(self):
+        # Test case reported by user: Packet 1 arrives with ONLY Location (no serial), Packet 2 arrives with Basic ID
+        # Both MUST merge into the same encounter without generating a split duplicate encounter.
+        tracker = EncounterTracker(db_path=self.db_path, timeout_s=300.0)
+        t0 = 1756129000.0
+        mac = "D6:D0:BC:41:7F:F9"
+
+        # Packet 1: Location only (serial = None)
+        pkt1 = {
+            "timestamp": t0,
+            "mac": mac,
+            "serial_number": None,
+            "transport": "bt5",
+            "channel": "Adv",
+            "rssi_dbm": -60,
+            "messages": [
+                {"type": "Location", "lat": 47.3769, "lon": 8.5417, "geodetic_altitude_m": 229.5}
+            ]
+        }
+        enc_id1 = tracker.update_with_packet(pkt1)
+
+        # Packet 2: 1 second later with Basic ID (serial = "Spoofed_Serial_17073")
+        pkt2 = {
+            "timestamp": t0 + 1.0,
+            "mac": mac,
+            "serial_number": "Spoofed_Serial_17073",
+            "transport": "bt5",
+            "channel": "Adv",
+            "rssi_dbm": -58,
+            "messages": [
+                {"type": "Basic ID", "id": "Spoofed_Serial_17073", "id_type": 1},
+                {"type": "Location", "lat": 47.3770, "lon": 8.5418, "geodetic_altitude_m": 239.5}
+            ]
+        }
+        enc_id2 = tracker.update_with_packet(pkt2)
+
+        # enc_id2 MUST be identical to enc_id1
+        self.assertEqual(enc_id1, enc_id2)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            total_enc = conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0]
+            self.assertEqual(total_enc, 1) # Exactly 1 encounter, not 2 split encounters
+
+            row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (enc_id1,)).fetchone()
+            self.assertEqual(row["packet_count"], 2)
+            self.assertEqual(row["serial_number"], "Spoofed_Serial_17073") # Serial was attached
+            self.assertEqual(row["max_alt_m"], 239.5)
 
     def test_replay_jsonl_output_format(self):
         logger = UnifiedTelemetryLogger(

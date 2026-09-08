@@ -9,11 +9,11 @@ import sys
 import os
 
 # Ensure repository root is in sys.path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from sniffparser import ASTM_F3411_SpecParser, parse_astm_payload
+from drone_rid_spoofer.parser import ASTM_F3411_SpecParser, parse_astm_payload
 
 REMOTE_ID_UUID = b"\xfa\xff" # 16-bit UUID in little-endian
 

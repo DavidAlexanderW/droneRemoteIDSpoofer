@@ -165,7 +165,7 @@ python3 scanner/combined_rid_listener.py \
 *(BLE 5 Extended Advertising and LE Coded PHY tracking are active by default. Port `/dev/ttyACM0` is auto-detected.)*
 
 ### 4. Running as a 24/7 Background Service (systemd)
-The scanner includes a dedicated systemd service template [`scanner/drone-scanner.service`](file:///home/davidalexander/ETH/droneID_thesis/droneRemoteIDSpoofer/scanner/drone-scanner.service) configured for autonomous, indefinite operation:
+The scanner includes a dedicated systemd service template [`scanner/drone-scanner.service`](scanner/drone-scanner.service) configured for autonomous, indefinite operation:
 
 ```bash
 # 1. Copy service file to systemd directory
@@ -184,7 +184,7 @@ sudo journalctl -u drone-scanner.service -f
 
 | Argument | Default | Description |
 | :--- | :--- | :--- |
-| `--wifi-iface`, `-i` | `None` | Wi-Fi monitor-mode interface (e.g. `wlx00c0cabd0a22` or `wlan1`) |
+| `--wifi-iface`, `-i` | `None` | Wi-Fi monitor-mode interface (e.g. `wlan1` or `wlan0mon`) |
 | `--nrf-port`, `-p` | `None` (auto) | nRF Sniffer UART port (e.g. `/dev/ttyACM0`). Auto-reconnects on USB disconnect. |
 | `--no-wifi` | `False` | Disable Wi-Fi sniffing and channel hopping |
 | `--no-ble` | `False` | Disable Bluetooth sniffing |
@@ -209,7 +209,7 @@ sudo journalctl -u drone-scanner.service -f
 
 ## 6. Querying & Exporting Flights (`query_rid_db.py`)
 
-The companion tool [`query_rid_db.py`](file:///home/davidalexander/ETH/droneID_thesis/droneRemoteIDSpoofer/scanner/query_rid_db.py) provides instant search, table formatting, and GeoJSON export for all flights in the SQLite database:
+The companion tool [`query_rid_db.py`](query_rid_db.py) provides instant search, table formatting, and GeoJSON export for all flights in the SQLite database:
 
 ### 1. List Recorded Flights
 ```bash
@@ -271,7 +271,17 @@ sudo python3 replay/replay_drones.py capture.jsonl --wifi-iface wlan1 --ble-adap
 
 ---
 
-## 8. Decoded Message Types & Fields Reference
+## 8. Standalone Sniffer Tools (`scanner/sniffers/`)
+
+For targeted debugging or single-transport analysis, dedicated standalone sniffers are available under `scanner/sniffers/`:
+
+- **`scanner/sniffers/nrf_bt_sniffer_json.py`**: Interacts with nRF52840 dongles over UART using Nordic's sniffer protocol to capture raw BLE 4 Legacy and BLE 5 Extended / LE Coded PHY advertisements, outputting structured JSON streams to stdout.
+- **`scanner/sniffers/wifi_sniffer.py`**: Standalone Scapy-based 802.11 monitor mode listener capturing ASTM F3411 Drone Remote ID beacons.
+- **`scanner/sniffers/bt_sniffer.py`**: Standalone Linux HCI socket listener capturing BLE 4/5 Remote ID advertisements via standard internal/external Bluetooth adapters.
+
+---
+
+## 9. Decoded Message Types & Fields Reference
 
 The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenDroneID message types:
 

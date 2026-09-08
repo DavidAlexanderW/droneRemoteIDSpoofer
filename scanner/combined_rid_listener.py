@@ -48,14 +48,14 @@ logger = logging.getLogger("CombinedRIDListener")
 
 
 # ============================================================================
-# ASTM F3411 Protocol Constants & Spec Parser (Imported from sniffparser.py)
+# ASTM F3411 Protocol Constants & Spec Parser (Imported from drone_rid_spoofer.parser)
 # ============================================================================
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from sniffparser import (
+from drone_rid_spoofer.parser import (
     ASTM_OUI,
     APP_CODE_RID,
     BLE_RID_UUID,
@@ -217,7 +217,8 @@ class EncounterTracker:
             ch_str = str(ch_raw)
         rssi = packet.get("rssi_dbm")
 
-        key = f"{mac}_{serial}" if serial else mac
+        # Group encounters by transmitter MAC address within the 5-minute flight window
+        key = mac
         now = time.time()
 
         with self.lock:
@@ -761,6 +762,7 @@ class BleNrfSnifferThread(threading.Thread):
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidate_paths = [
+            os.path.join(script_dir, "sniffers", "nrf_bt_sniffer_json.py"),
             os.path.join(script_dir, "nrf_bt_sniffer_json.py"),
             os.path.join(script_dir, "..", "evaluation", "nrf_bt_sniffer_json.py"),
             os.path.join(script_dir, "..", "nrf_bt_sniffer_json.py"),

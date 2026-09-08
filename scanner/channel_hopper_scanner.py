@@ -1,11 +1,52 @@
 #!/usr/bin/env python3
+import argparse
+import os
+import sys
 import threading
 import time
-import os
-import argparse
-import sys
-from scapy.all import sniff
-from sniffparser import packet_callback
+
+# Ensure repo root is in sys.path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from scapy.all import sniff, Dot11Beacon, Dot11Elt
+from drone_rid_spoofer.parser import ASTM_F3411_SpecParser
+
+
+def packet_callback(pkt):
+    """Callback for Scapy sniffing to detect and parse ASTM Remote ID Vendor IEs."""
+    if pkt.haslayer(Dot11Beacon):
+        elt = pkt.getlayer(Dot11Elt)
+        while isinstance(elt, Dot11Elt):
+            if elt.ID == 221 and elt.info.startswith(b'\xfa\x0b\xbc'):
+                astm_payload = elt.info[5:]
+                try:
+                    parser = ASTM_F3411_SpecParser(astm_payload)
+                    data = parser.parse_payload()
+                    if data:
+                        chan_info = ""
+                        if pkt.haslayer("RadioTap"):
+                            try:
+                                freq = pkt.getlayer("RadioTap").ChannelFrequency
+                                if freq == 2484:
+                                    chan = 14
+                                elif freq < 2484:
+                                    chan = (freq - 2407) // 5
+                                elif freq > 5000:
+                                    chan = (freq - 5000) // 5
+                                else:
+                                    chan = freq
+                                chan_info = f", Ch: {chan}"
+                            except Exception:
+                                pass
+                        print(f"\n[+] Remote ID Detected from {pkt.addr2} (RSSI: {getattr(pkt, 'dBm_AntSignal', 'N/A')}dBm{chan_info})")
+                        for entry in data:
+                            print(f"    - {entry}")
+                except Exception:
+                    pass
+            elt = elt.payload
+
 
 def channel_hopper(interface, channels, hop_interval):
     """
@@ -24,9 +65,10 @@ def channel_hopper(interface, channels, hop_interval):
             # Wait for the specified interval before switching to the next channel
             time.sleep(hop_interval)
 
+
 def main():
     parser = argparse.ArgumentParser(description="Wi-Fi Channel Hopper and Drone Remote ID Scanner")
-    parser.add_argument("-i", "--interface", required=True, help="Monitor mode interface to use (e.g., wlan0, wlx...)")
+    parser.add_argument("-i", "--interface", required=True, help="Monitor mode interface to use (e.g., wlan0mon, wlan1)")
     parser.add_argument("-c", "--channels", type=str, default="1,2,3,4,5,6,7,8,9,10,11,12,13", 
                         help="Comma-separated list of channels to hop through (default: 1-13)")
     parser.add_argument("-t", "--time", type=float, default=0.5, 
@@ -60,6 +102,7 @@ def main():
     except Exception as e:
         print(f"[-] Error during sniffing: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

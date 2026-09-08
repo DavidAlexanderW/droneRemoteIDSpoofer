@@ -334,7 +334,7 @@ class TestCombinedRIDListener(unittest.TestCase):
         self.assertEqual(set(visited_5g), set(NON_SOCIAL_CHANNELS_5G))
 
     def test_nordic_ble_packet_metadata_and_rssi(self):
-        from evaluation.nrf_bt_sniffer_json import parse_packet_metadata
+        from scanner.sniffers.nrf_bt_sniffer_json import parse_packet_metadata
         # Build realistic nRF Sniffer v2 DLT_NORDIC_BLE header (17 bytes)
         # Board(1) + Len(2, e.g. 164 = 0x00A4) + Ver(1) + Cnt(2) + Type(1=0x06) + HdrLen(1=10) + Flags(1=0x01) + Ch(1=37) + RSSI(1=55 -> -55dBm) + EvtCnt(2) + DeltaTime(4)
         board = b'\x00'
@@ -375,7 +375,7 @@ class TestCombinedRIDListener(unittest.TestCase):
         self.assertEqual(mac_addr, "UNKNOWN")
 
     def test_ble5_extended_header_and_rid_extraction(self):
-        from evaluation.nrf_bt_sniffer_json import extract_remote_id_info, parse_packet_metadata
+        from scanner.sniffers.nrf_bt_sniffer_json import extract_remote_id_info, parse_packet_metadata
         # Test full end-to-end BLE 5 extended frame with AdvA and ASTM Remote ID Service Data
         # MAC: F1:D4:C5:1A:31:5A
         mac_bytes_le = bytes.fromhex("5A311AC5D4F1")

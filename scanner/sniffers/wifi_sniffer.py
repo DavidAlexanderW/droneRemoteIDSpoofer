@@ -10,12 +10,12 @@ import signal
 from scapy.all import sniff, Dot11Beacon, Dot11Elt, wrpcap
 
 # Ensure repository root is in sys.path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 # Local parser
-from sniffparser import ASTM_F3411_SpecParser, parse_astm_payload
+from drone_rid_spoofer.parser import ASTM_F3411_SpecParser, parse_astm_payload
 
 # Globals
 START_TIME = None
