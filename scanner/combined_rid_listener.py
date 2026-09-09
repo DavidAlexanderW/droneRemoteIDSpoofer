@@ -81,6 +81,17 @@ from drone_rid_spoofer.parser import (
     parse_astm_payload,
 )
 
+try:
+    from scanner.db import init_encounters_db, get_db_connection as db_get_connection, reconcile_stale_encounters
+    from scanner.drone_models import infer_drone_model
+except ImportError:
+    try:
+        from db import init_encounters_db, get_db_connection as db_get_connection, reconcile_stale_encounters
+        from drone_models import infer_drone_model
+    except ImportError:
+        def infer_drone_model(serial):
+            return {"make": None, "model": None, "company": None, "country": None, "is_inferred": False}
+
 
 # ============================================================================
 # Wi-Fi Channel State & Hopping Definitions
@@ -109,6 +120,83 @@ def get_freq_for_channel(ch: int) -> int:
     elif ch >= 36:
         return 5000 + 5 * ch
     return 0
+
+
+def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
+    """
+    Extracts the dBm Antenna Signal (RSSI) from an IEEE 802.11 Radiotap header.
+    Accurately computes field offsets by following standard field alignment rules:
+      - Bit 0 (TSFT): 8 bytes, 8-byte aligned
+      - Bit 1 (Flags): 1 byte, 1-byte aligned
+      - Bit 2 (Rate): 1 byte, 1-byte aligned
+      - Bit 3 (Channel): 4 bytes (2B freq + 2B flags), 2-byte aligned
+      - Bit 4 (FHSS): 2 bytes, 2-byte aligned
+      - Bit 5 (dBm Antenna Signal): 1 byte signed int8, 1-byte aligned
+    Returns the signed RSSI integer in dBm (supports both weak and strong signals), or None.
+    """
+    if len(frame) < 8 or frame[0] != 0x00:
+        return None
+
+    try:
+        radiotap_len = struct.unpack('<H', frame[2:4])[0]
+        if len(frame) < radiotap_len or radiotap_len < 8:
+            return None
+
+        # 1. Parse present bitmasks (each 4 bytes; bit 31 indicates another word follows)
+        present_words = []
+        idx = 4
+        while idx + 4 <= radiotap_len:
+            present = struct.unpack('<I', frame[idx:idx+4])[0]
+            present_words.append(present)
+            idx += 4
+            if not (present & 0x80000000):
+                break
+
+        if not present_words:
+            return None
+
+        w0 = present_words[0]
+
+        # Check if dBm Antenna Signal (bit 5) is present in word 0
+        if not (w0 & (1 << 5)):
+            return None
+
+        # 2. Advance through fields preceding bit 5 adhering to natural alignment rules
+        offset = idx
+
+        # Bit 0: TSFT (8 bytes, 8-byte aligned)
+        if w0 & (1 << 0):
+            offset = (offset + 7) & ~7
+            offset += 8
+
+        # Bit 1: Flags (1 byte, 1-byte aligned)
+        if w0 & (1 << 1):
+            offset += 1
+
+        # Bit 2: Rate (1 byte, 1-byte aligned)
+        if w0 & (1 << 2):
+            offset += 1
+
+        # Bit 3: Channel (4 bytes: 2B freq + 2B flags, 2-byte aligned)
+        if w0 & (1 << 3):
+            offset = (offset + 1) & ~1
+            offset += 4
+
+        # Bit 4: FHSS (2 bytes, 2-byte aligned)
+        if w0 & (1 << 4):
+            offset = (offset + 1) & ~1
+            offset += 2
+
+        # Bit 5: dBm Antenna Signal (1 byte signed int8, 1-byte aligned)
+        if w0 & (1 << 5):
+            if offset < radiotap_len and offset < len(frame):
+                val = struct.unpack('<b', frame[offset:offset+1])[0]
+                return int(val)
+
+    except Exception:
+        pass
+
+    return None
 
 
 class SharedChannelState:
@@ -161,46 +249,7 @@ class EncounterTracker:
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode = WAL;")
-            conn.execute("PRAGMA synchronous = NORMAL;")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS encounters (
-                    encounter_id TEXT PRIMARY KEY,
-                    mac TEXT NOT NULL,
-                    serial_number TEXT,
-                    first_seen REAL NOT NULL,
-                    first_seen_iso TEXT NOT NULL,
-                    last_seen REAL NOT NULL,
-                    last_seen_iso TEXT NOT NULL,
-                    duration_s REAL NOT NULL,
-                    packet_count INTEGER NOT NULL,
-                    transports TEXT NOT NULL,
-                    channels TEXT NOT NULL,
-                    min_rssi_dbm INTEGER,
-                    max_rssi_dbm INTEGER,
-                    avg_rssi_dbm REAL,
-                    min_alt_m REAL,
-                    max_alt_m REAL,
-                    max_speed_mps REAL,
-                    pilot_lat REAL,
-                    pilot_lon REAL,
-                    pilot_alt_m REAL,
-                    operator_id TEXT,
-                    self_id_desc TEXT,
-                    trajectory_json TEXT,
-                    is_active INTEGER NOT NULL DEFAULT 1
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_mac ON encounters(mac);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_serial ON encounters(serial_number);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_time ON encounters(first_seen, last_seen);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_active ON encounters(is_active);")
-            
-            # Auto-reconcile any lingering active encounters from prior runs that are past timeout_s
-            now = time.time()
-            conn.execute("UPDATE encounters SET is_active = 0 WHERE is_active = 1 AND (? - last_seen) > ?;",
-                         (now, self.timeout_s))
-            conn.commit()
+            init_encounters_db(conn, timeout_s=self.timeout_s)
 
     def update_with_packet(self, packet: Dict[str, Any]) -> str:
         """Update or create an active encounter from an incoming packet. Returns encounter_id."""
@@ -237,10 +286,13 @@ class EncounterTracker:
                 dt_tag = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%d-%H%M%S")
                 encounter_id = f"ENC-{dt_tag}-{enc_slug}"
 
+                drone_info = infer_drone_model(serial) if serial else {}
                 self.active_encounters[key] = {
                     "encounter_id": encounter_id,
                     "mac": mac,
                     "serial_number": serial,
+                    "drone_make": drone_info.get("make"),
+                    "drone_model": drone_info.get("model"),
                     "first_seen": ts,
                     "first_seen_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                     "last_seen": ts,
@@ -251,10 +303,15 @@ class EncounterTracker:
                     "channels": set([ch_str]),
                     "rssi_values": [rssi] if rssi is not None else [],
                     "altitudes": [],
+                    "pressure_altitudes": [],
+                    "heights": [],
                     "speeds": [],
+                    "vert_speeds": [],
                     "pilot_lat": None,
                     "pilot_lon": None,
                     "pilot_alt_m": None,
+                    "area_ceil_m": None,
+                    "area_floor_m": None,
                     "operator_id": None,
                     "self_id_desc": None,
                     "trajectory": [],
@@ -269,8 +326,12 @@ class EncounterTracker:
             enc["packet_count"] += 1
             enc["transports"].add(transport)
             enc["channels"].add(ch_str)
-            if serial and not enc["serial_number"]:
+            if serial and not enc.get("serial_number"):
                 enc["serial_number"] = serial
+                if not enc.get("drone_make"):
+                    inf = infer_drone_model(serial)
+                    enc["drone_make"] = inf.get("make")
+                    enc["drone_model"] = inf.get("model")
 
             if rssi is not None:
                 enc["rssi_values"].append(rssi)
@@ -281,15 +342,30 @@ class EncounterTracker:
                 if m_type == "Location":
                     lat = msg.get("lat")
                     lon = msg.get("lon")
-                    alt = msg.get("geodetic_altitude_m") or msg.get("pressure_altitude_m")
+                    g_alt = msg.get("geodetic_altitude_m")
+                    p_alt = msg.get("pressure_altitude_m")
+                    alt = g_alt if g_alt is not None else p_alt
+                    h_m = msg.get("height_m")
+                    h_type = msg.get("height_type")
                     spd = msg.get("speed_mps")
                     heading = msg.get("direction_deg")
-                    if alt is not None:
+                    v_spd = msg.get("vertical_speed_mps")
+
+                    if g_alt is not None:
+                        enc["altitudes"].append(g_alt)
+                    elif alt is not None:
                         enc["altitudes"].append(alt)
+                    if p_alt is not None:
+                        enc["pressure_altitudes"].append(p_alt)
+                    if h_m is not None:
+                        enc["heights"].append(h_m)
                     if spd is not None:
                         enc["speeds"].append(spd)
+                    if v_spd is not None:
+                        enc["vert_speeds"].append(v_spd)
+
                     if lat is not None and lon is not None:
-                        # Append trajectory coordinate tuple [lat, lon, alt, speed, heading, ts]
+                        # Append 10-element trajectory fix [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt_m, vert_spd]
                         # Downsample trajectory if stationary or dense (<1s dt and <~1m movement)
                         last_pt = enc["trajectory"][-1] if enc["trajectory"] else None
                         should_record = False
@@ -300,11 +376,17 @@ class EncounterTracker:
                             if dt_pt >= 1.0 or abs(lat - last_pt[0]) > 0.00001 or abs(lon - last_pt[1]) > 0.00001:
                                 should_record = True
                         if should_record:
-                            enc["trajectory"].append([lat, lon, alt, spd, heading, round(ts, 2)])
+                            enc["trajectory"].append([lat, lon, alt, spd, heading, round(ts, 2), h_m, h_type, p_alt, v_spd])
 
                 elif m_type == "Basic ID":
-                    if msg.get("id") and not enc.get("serial_number"):
-                        enc["serial_number"] = msg.get("id")
+                    b_id = msg.get("id")
+                    if b_id:
+                        if not enc.get("serial_number"):
+                            enc["serial_number"] = b_id
+                        if not enc.get("drone_make"):
+                            inf = infer_drone_model(b_id)
+                            enc["drone_make"] = inf.get("make")
+                            enc["drone_model"] = inf.get("model")
 
                 elif m_type == "System":
                     if msg.get("pilot_lat") is not None:
@@ -313,6 +395,12 @@ class EncounterTracker:
                         enc["pilot_lon"] = msg.get("pilot_lon")
                     if msg.get("pilot_alt_m") is not None:
                         enc["pilot_alt_m"] = msg.get("pilot_alt_m")
+                    if msg.get("area_ceiling_m") is not None:
+                        enc["area_ceil_m"] = msg.get("area_ceiling_m")
+                    elif msg.get("area_ceil_m") is not None:
+                        enc["area_ceil_m"] = msg.get("area_ceil_m")
+                    if msg.get("area_floor_m") is not None:
+                        enc["area_floor_m"] = msg.get("area_floor_m")
 
                 elif m_type == "Operator ID":
                     op_val = msg.get("operator_id") or msg.get("id")
@@ -379,11 +467,19 @@ class EncounterTracker:
         max_rssi = max(rssi_vals) if rssi_vals else None
         avg_rssi = round(sum(rssi_vals) / len(rssi_vals), 1) if rssi_vals else None
 
-        alts = enc["altitudes"]
+        alts = enc.get("altitudes", [])
         min_alt = min(alts) if alts else None
         max_alt = max(alts) if alts else None
 
-        speeds = enc["speeds"]
+        heights = enc.get("heights", [])
+        min_height = min(heights) if heights else None
+        max_height = max(heights) if heights else None
+
+        p_alts = enc.get("pressure_altitudes", [])
+        min_p_alt = min(p_alts) if p_alts else None
+        max_p_alt = max(p_alts) if p_alts else None
+
+        speeds = enc.get("speeds", [])
         max_speed = max(speeds) if speeds else None
 
         transports_str = ",".join(sorted(enc["transports"]))
@@ -397,9 +493,10 @@ class EncounterTracker:
                         encounter_id, mac, serial_number, first_seen, first_seen_iso,
                         last_seen, last_seen_iso, duration_s, packet_count, transports,
                         channels, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm, min_alt_m,
-                        max_alt_m, max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m,
-                        operator_id, self_id_desc, trajectory_json, is_active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        max_alt_m, min_height_m, max_height_m, min_pressure_alt_m, max_pressure_alt_m,
+                        max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m, area_ceil_m, area_floor_m,
+                        operator_id, self_id_desc, drone_make, drone_model, trajectory_json, is_active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     enc["encounter_id"],
                     enc["mac"],
@@ -417,18 +514,127 @@ class EncounterTracker:
                     avg_rssi,
                     min_alt,
                     max_alt,
+                    min_height,
+                    max_height,
+                    min_p_alt,
+                    max_p_alt,
                     max_speed,
                     enc["pilot_lat"],
                     enc["pilot_lon"],
                     enc["pilot_alt_m"],
+                    enc.get("area_ceil_m"),
+                    enc.get("area_floor_m"),
                     enc["operator_id"],
                     enc["self_id_desc"],
+                    enc.get("drone_make"),
+                    enc.get("drone_model"),
                     trajectory_str,
                     enc["is_active"]
                 ))
                 conn.commit()
         except Exception as e:
             logger.debug(f"Error persisting encounter to SQLite: {e}")
+
+
+def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optional[str] = None) -> int:
+    """
+    Retroactively parses all raw base64 ASTM messages in JSONL log files (rid_packets_*.jsonl)
+    and re-populates/upgrades the SQLite encounter database with full 10-element trajectory fixes,
+    min/max heights, pressure altitudes, and system telemetry limits.
+    """
+    import glob
+    import base64
+
+    if log_dir is None:
+        search_patterns = [
+            "rid_packets_*.jsonl",
+            os.path.join(repo_root, "rid_packets_*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "..", "rid_packets_*.jsonl"),
+        ]
+    else:
+        search_patterns = [os.path.join(log_dir, "rid_packets_*.jsonl"), os.path.join(log_dir, "*.jsonl")]
+
+    log_files = []
+    for pattern in search_patterns:
+        for p in glob.glob(pattern):
+            abs_p = os.path.abspath(p)
+            if abs_p not in log_files and os.path.isfile(abs_p):
+                log_files.append(abs_p)
+
+    if not log_files:
+        logger.info("[*] Rehydration: No JSONL packet log files found.")
+        return 0
+
+    logger.info(f"[*] Rehydration: Found {len(log_files)} packet log file(s): {[os.path.basename(f) for f in log_files]}")
+
+    encounters_data: Dict[str, Dict[str, Any]] = {}
+    for fpath in sorted(log_files):
+        try:
+            with open(fpath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    enc_id = rec.get("encounter_id")
+                    if not enc_id:
+                        mac = rec.get("mac", "UNKNOWN")
+                        enc_id = f"ENC-{mac}"
+                    if enc_id not in encounters_data:
+                        encounters_data[enc_id] = {
+                            "encounter_id": enc_id,
+                            "mac": rec.get("mac", "UNKNOWN"),
+                            "serial_number": rec.get("serial"),
+                            "packets": []
+                        }
+                    encounters_data[enc_id]["packets"].append(rec)
+        except Exception as e:
+            logger.debug(f"Error reading {fpath} for rehydration: {e}")
+
+    tracker = EncounterTracker(db_path=db_path, persist_interval_s=0.0)
+
+    rehydrated_count = 0
+    for enc_id, data in encounters_data.items():
+        pkts = data["packets"]
+        for p in pkts:
+            decoded_msgs = p.get("messages", [])
+            if not decoded_msgs and p.get("messages_b64"):
+                for b64_str in p["messages_b64"]:
+                    try:
+                        raw_b = base64.b64decode(b64_str)
+                        dm = decode_astm_message(raw_b)
+                        if dm:
+                            decoded_msgs.append(dm)
+                    except Exception:
+                        pass
+
+            ts = p.get("timestamp")
+            if ts is None and p.get("timestamp_iso"):
+                try:
+                    ts = datetime.fromisoformat(p["timestamp_iso"]).timestamp()
+                except Exception:
+                    pass
+            if ts is None:
+                ts = time.time()
+
+            pkt_obj = {
+                "timestamp": ts,
+                "transport": p.get("transport", "wifi"),
+                "channel": p.get("channel", "N/A"),
+                "mac": p.get("mac", data["mac"]),
+                "rssi_dbm": p.get("rssi_dbm"),
+                "serial_number": p.get("serial", data["serial_number"]),
+                "messages": decoded_msgs,
+            }
+            tracker.update_with_packet(pkt_obj)
+        rehydrated_count += 1
+
+    tracker.finalize_all()
+    logger.info(f"[+] Rehydration complete: {rehydrated_count} encounter(s) updated in {db_path}")
+    return rehydrated_count
 
 
 # ============================================================================
@@ -654,18 +860,7 @@ class WifiSnifferThread(threading.Thread):
                 mac_addr = ':'.join(f'{b:02X}' for b in mac_bytes)
 
                 # Extract RSSI if Radiotap signal field is available
-                rssi_dbm = None
-                if radiotap_len >= 8:
-                    try:
-                        present_flags = struct.unpack('<I', frame[4:8])[0]
-                        if present_flags & 0x00000020:
-                            for b_idx in range(8, min(radiotap_len, 32)):
-                                val = struct.unpack('<b', frame[b_idx:b_idx+1])[0]
-                                if -100 <= val <= -10:
-                                    rssi_dbm = val
-                                    break
-                    except Exception:
-                        pass
+                rssi_dbm = extract_radiotap_rssi(frame)
 
                 # Extract Payload
                 counter = 0
@@ -1119,7 +1314,9 @@ class UnifiedTelemetryLogger:
         print(f"\n{C_BOLD}🚁 DRONE RID DETECTED {badge}{enc_tag} {C_GRAY}{dt_str}{C_RESET}")
         print(f"   {C_WHITE}MAC: {C_BOLD}{mac}{C_RESET} | {C_WHITE}RSSI: {C_BOLD}{rssi_str}{C_RESET} | {C_WHITE}RF: {C_MAGENTA}{rf_info}{C_RESET}")
         if serial:
-            print(f"   {C_GREEN}Serial / UAS ID: {C_BOLD}{serial}{C_RESET}")
+            inf = infer_drone_model(serial)
+            model_tag = f" {C_YELLOW}[{inf['make']} {inf['model']}]{C_RESET}" if inf.get("is_inferred") else ""
+            print(f"   {C_GREEN}Serial / UAS ID: {C_BOLD}{serial}{C_RESET}{model_tag}")
 
         # Print decoded telemetry blocks
         for msg in event.get("messages", []):
@@ -1333,8 +1530,15 @@ def main():
     parser.add_argument("--log-jsonl", default=None, help="Optional replay-compatible JSONL log file path")
     parser.add_argument("--rotate-daily", action="store_true", help="Automatically split JSONL log file daily (<name>_YYYYMMDD.jsonl)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Quiet / daemon mode: suppress per-packet console banner and print periodic heartbeat status")
+    parser.add_argument("--rehydrate", action="store_true", help="Retroactively re-parse all raw base64 ASTM messages from rid_packets_*.jsonl files and update the SQLite database")
 
     args = parser.parse_args()
+
+    if args.rehydrate:
+        rehydrated = rehydrate_db_from_jsonl(db_path=args.db_file if args.db_file else "rid_detections.db")
+        print(f"{C_GREEN}[+] Database rehydration complete: {rehydrated} encounter(s) updated in {args.db_file or 'rid_detections.db'}.{C_RESET}")
+        if (args.no_wifi or not args.wifi_iface) and (args.no_ble):
+            return
 
     if args.no_wifi and args.no_ble:
         logger.error("[-] Both Wi-Fi and BLE are disabled. Nothing to do!")

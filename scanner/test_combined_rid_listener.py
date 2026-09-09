@@ -11,8 +11,11 @@ import struct
 import time
 from scanner.combined_rid_listener import (
     SharedChannelState,
+    EncounterTracker,
+    rehydrate_db_from_jsonl,
     decode_astm_message,
     parse_astm_payload,
+    extract_radiotap_rssi,
     SOCIAL_CHANNEL_2G,
     NON_SOCIAL_CHANNELS_2G,
     SOCIAL_CHANNEL_5G,
@@ -193,13 +196,13 @@ class TestCombinedRIDListener(unittest.TestCase):
     def test_decode_operator_id(self):
         # Header: 0x52 (Type 5, Proto 2)
         # OpIdType: 0 (Operator ID)
-        # OperatorId: "CHE-123456789abc-xyz"
-        op_id = b"CHE-123456789abc-xyz"
-        block = bytes([0x52, 0x00]) + op_id + b'\x00\x00\x00'
+        # OperatorId: "CHE87astd57qkgc4" (16-char public CAA registration number without secret 3-char PIN)
+        op_id = b"CHE87astd57qkgc4"
+        block = bytes([0x52, 0x00]) + op_id + (b'\x00' * 7) # 2 + 16 + 7 = 25 bytes
         decoded = decode_astm_message(block)
         self.assertIsNotNone(decoded)
         self.assertEqual(decoded["type"], "Operator ID")
-        self.assertEqual(decoded["operator_id"], "CHE-123456789abc-xyz")
+        self.assertEqual(decoded["operator_id"], "CHE87astd57qkgc4")
         self.assertEqual(decoded["operator_id_type_name"], "Operator ID")
 
     def test_decode_location_accuracies_and_speeds(self):
@@ -458,6 +461,121 @@ class TestCombinedRIDListener(unittest.TestCase):
         self.assertEqual(len(parsed_msgs), 1)
         self.assertEqual(parsed_msgs[0]["type"], "Basic ID")
         self.assertEqual(parsed_msgs[0]["id"], "WIFI_TEST_DRONE_0001")
+        self.assertEqual(extract_radiotap_rssi(full_frame), -96)
+
+    def test_extract_radiotap_rssi_field_alignment_and_ranges(self):
+        # 1. Standard Radiotap header with Flags, Rate, Channel (2437MHz, flags 0x00A0), dBm_AntSignal (-45 dBm)
+        # Bitmask = 0x0000482E (FLAGS | RATE | CHANNEL | DBM_ANTSIGNAL | ANTENNA | RX_FLAGS)
+        hdr1 = struct.pack('<BBHI', 0, 0, 18, 0x0000482E)
+        hdr1 += bytes([0x10, 0x02, 0x85, 0x09, 0xa0, 0x00, 256 - 45, 0x00, 0x00, 0x00])
+        self.assertEqual(extract_radiotap_rssi(hdr1), -45)
+
+        # 2. Header with TSFT (8-byte microsecond timestamp where low byte is 0xEF = -17)
+        # Bitmask = 0x0000002F (TSFT | FLAGS | RATE | CHANNEL | DBM_ANTSIGNAL)
+        hdr2 = struct.pack('<BBHI', 0, 0, 23, 0x0000002F)
+        hdr2 += bytes([0xef, 0xcd, 0xab, 0x90, 0x78, 0x56, 0x34, 0x12]) # TSFT
+        hdr2 += bytes([0x00]) # Flags
+        hdr2 += bytes([0x0c]) # Rate
+        hdr2 += bytes([0x6c, 0x09, 0xa0, 0x00]) # Channel (2412 MHz, flags 0x00a0)
+        hdr2 += bytes([256 - 73]) # dBm_AntSignal = -73 dBm
+        self.assertEqual(extract_radiotap_rssi(hdr2), -73)
+
+        # 3. Very strong signal (e.g. -5 dBm) and very weak signal (e.g. -105 dBm)
+        hdr_strong = struct.pack('<BBHI', 0, 0, 18, 0x0000482E)
+        hdr_strong += bytes([0x00, 0x02, 0x85, 0x09, 0xa0, 0x00, 256 - 5, 0x00, 0x00, 0x00])
+        self.assertEqual(extract_radiotap_rssi(hdr_strong), -5)
+
+        hdr_weak = struct.pack('<BBHI', 0, 0, 18, 0x0000482E)
+        hdr_weak += bytes([0x00, 0x02, 0x85, 0x09, 0xa0, 0x00, 256 - 105, 0x00, 0x00, 0x00])
+        self.assertEqual(extract_radiotap_rssi(hdr_weak), -105)
+
+        # 4. No dBm_AntSignal in present bitmask
+        hdr_no_rssi = struct.pack('<BBHI', 0, 0, 8, 0x00000004) # Only Rate
+        hdr_no_rssi += bytes([0x02, 0x00, 0x00, 0x00])
+        self.assertIsNone(extract_radiotap_rssi(hdr_no_rssi))
+
+        # 5. Invalid/short frames
+        self.assertIsNone(extract_radiotap_rssi(b''))
+        self.assertIsNone(extract_radiotap_rssi(b'\x01\x00\x08\x00')) # Wrong version
+
+    def test_extract_radiotap_rssi_extended_present_mask(self):
+        # Header with 2 present words: Word 0 has bit 31 (Extended) and Bit 5 (dBm_AntSignal)
+        w0 = 0x80000020
+        w1 = 0x00000000
+        hdr = struct.pack('<BBHII', 0, 0, 13, w0, w1)
+        hdr += bytes([256 - 62]) # dBm_AntSignal immediately after w1
+        self.assertEqual(extract_radiotap_rssi(hdr), -62)
+
+    def test_encounter_tracker_multi_altitude_and_trajectory(self):
+        import tempfile, sqlite3, json
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            tracker = EncounterTracker(db_path=tmp.name, persist_interval_s=0.0)
+            
+            # Feed Location + System packet
+            pkt = {
+                "timestamp": 1000.0,
+                "transport": "wifi",
+                "channel": 6,
+                "mac": "11:22:33:44:55:66",
+                "rssi_dbm": -70,
+                "serial_number": "DRONE_ALT_TEST_01",
+                "messages": [
+                    {
+                        "type": "Basic ID",
+                        "id": "DRONE_ALT_TEST_01",
+                    },
+                    {
+                        "type": "Location",
+                        "lat": 47.3719,
+                        "lon": 8.5312,
+                        "geodetic_altitude_m": 540.0,
+                        "pressure_altitude_m": 415.0,
+                        "height_m": 80.0,
+                        "height_type": 0,
+                        "speed_mps": 15.0,
+                        "direction_deg": 180,
+                        "vertical_speed_mps": 1.5,
+                    },
+                    {
+                        "type": "System",
+                        "pilot_lat": 47.3715,
+                        "pilot_lon": 8.5310,
+                        "pilot_alt_m": 420.0,
+                        "area_ceiling_m": 600.0,
+                        "area_floor_m": 300.0,
+                    }
+                ]
+            }
+            enc_id = tracker.update_with_packet(pkt)
+            tracker.finalize_all()
+
+            with sqlite3.connect(tmp.name) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (enc_id,)).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row["min_alt_m"], 540.0)
+                self.assertEqual(row["max_alt_m"], 540.0)
+                self.assertEqual(row["min_height_m"], 80.0)
+                self.assertEqual(row["max_height_m"], 80.0)
+                self.assertEqual(row["min_pressure_alt_m"], 415.0)
+                self.assertEqual(row["max_pressure_alt_m"], 415.0)
+                self.assertEqual(row["pilot_alt_m"], 420.0)
+                self.assertEqual(row["area_ceil_m"], 600.0)
+                self.assertEqual(row["area_floor_m"], 300.0)
+
+                traj = json.loads(row["trajectory_json"])
+                self.assertEqual(len(traj), 1)
+                self.assertEqual(len(traj[0]), 10)
+                self.assertEqual(traj[0][0], 47.3719)
+                self.assertEqual(traj[0][1], 8.5312)
+                self.assertEqual(traj[0][2], 540.0)
+                self.assertEqual(traj[0][3], 15.0)
+                self.assertEqual(traj[0][4], 180)
+                self.assertEqual(traj[0][5], 1000.0)
+                self.assertEqual(traj[0][6], 80.0) # height_m
+                self.assertEqual(traj[0][7], 0)    # height_type
+                self.assertEqual(traj[0][8], 415.0)# pressure_alt_m
+                self.assertEqual(traj[0][9], 1.5)  # vert_spd
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tactical Drone Remote ID Airspace Monitor</title>
+  <meta name="description" content="Tactical ASTM F3411 Drone Remote ID real-time airspace monitoring, radar mapping, flight trajectory analysis, and deep packet inspection.">
+  
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  
+  <!-- Main Tactical Stylesheet -->
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="tactical-dark">
+
+  <!-- ===================================================================== -->
+  <!-- TOP TACTICAL HUD HEADER -->
+  <!-- ===================================================================== -->
+  <header id="hud-header" class="hud-bar">
+    <div class="hud-brand">
+      <div class="radar-pulse-icon">
+        <span class="pulse-ring"></span>
+        <span class="pulse-core"></span>
+      </div>
+      <div class="brand-titles">
+        <h1 class="brand-title">AIRSPACE OBSERVATION <span class="accent-text">RID RADAR</span></h1>
+        <span class="brand-sub">ASTM F3411 / ASD-STAN DIRECT BROADCAST MONITOR</span>
+      </div>
+    </div>
+
+    <!-- Airspace Telemetry Status Metrics -->
+    <div class="hud-metrics">
+      <div class="metric-card" id="metric-active">
+        <div class="metric-label">ACTIVE TARGETS</div>
+        <div class="metric-value active-val"><span class="badge-dot pulse-red"></span><span id="stat-active-drones">0</span></div>
+      </div>
+      <div class="metric-card" id="metric-total">
+        <div class="metric-label">TOTAL FLIGHTS</div>
+        <div class="metric-value" id="stat-total-encounters">0</div>
+      </div>
+      <div class="metric-card" id="metric-packets">
+        <div class="metric-label">CAPTURED PACKETS</div>
+        <div class="metric-value" id="stat-total-packets">0</div>
+      </div>
+      <div class="metric-card" id="metric-transports">
+        <div class="metric-label">RF TRANSPORTS</div>
+        <div class="metric-breakdown">
+          <span class="pill-chip bt4" title="Bluetooth 4 Legacy">BT4: <b id="stat-bt4">0</b></span>
+          <span class="pill-chip bt5" title="Bluetooth 5 Long Range Extended">BT5: <b id="stat-bt5">0</b></span>
+          <span class="pill-chip wifi" title="Wi-Fi Beacon / OWD">WIFI: <b id="stat-wifi">0</b></span>
+          <span class="pill-chip nan" title="Wi-Fi Neighbor Awareness Network">NAN: <b id="stat-nan">0</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tactical Actions & Mode Switch -->
+    <div class="hud-controls">
+      <div class="mode-toggle-group">
+        <button id="btn-mode-live" class="btn-mode active" title="Switch to Real-Time Airspace Radar">
+          <span class="live-led"></span> LIVE RADAR
+        </button>
+        <button id="btn-mode-replay" class="btn-mode" title="Switch to Flight Investigation Replay">
+          <svg class="hud-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg> REPLAY
+        </button>
+      </div>
+      <div id="ws-status-badge" class="connection-badge online" title="WebSocket Live Stream Status">
+        <span class="conn-dot"></span> <span id="ws-status-text">LIVE FEED</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================================================================== -->
+  <!-- MAIN TACTICAL WORKSPACE: 3-COLUMN LAYOUT -->
+  <!-- ===================================================================== -->
+  <main id="tactical-workspace">
+
+    <!-- LEFT COLUMN: ENCOUNTERS FEED & FILTERS -->
+    <aside id="feed-panel" class="sidebar-panel">
+      <div class="panel-header">
+        <div class="panel-title-row">
+          <h2 class="panel-title">FLIGHT FEED</h2>
+          <span id="encounter-feed-count" class="count-badge">0</span>
+        </div>
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="feed-search-input" placeholder="Search MAC, Serial, Operator ID..." autocomplete="off">
+          <button id="feed-search-clear" class="btn-clear" style="display: none;">&times;</button>
+        </div>
+        <div class="feed-filter-tabs">
+          <button class="filter-tab active" data-filter="all">All Flights</button>
+          <button class="filter-tab" data-filter="active">🔴 Active Only</button>
+          <button class="filter-tab" data-filter="bt">BLE</button>
+          <button class="filter-tab" data-filter="wifi">Wi-Fi</button>
+        </div>
+      </div>
+
+      <!-- Scrollable list of encounter cards -->
+      <div id="encounters-list" class="encounter-cards-scroll">
+        <div class="empty-state">
+          <div class="empty-radar-scan"></div>
+          <p>Scanning airspace for Remote ID broadcasts...</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER COLUMN: MAP CANVAS & OVERLAYS -->
+    <section id="map-viewport" class="map-container">
+      <div id="leaflet-map"></div>
+
+      <!-- Radar HUD Crosshair Overlay -->
+      <div class="radar-hud-overlay pointer-events-none">
+        <div class="hud-corner top-left"></div>
+        <div class="hud-corner top-right"></div>
+        <div class="hud-corner bottom-left"></div>
+        <div class="hud-corner bottom-right"></div>
+        <div class="radar-scanlines"></div>
+      </div>
+
+      <!-- Map Floating Quick Controls -->
+      <div class="map-floating-bar">
+        <div class="map-info-pill">
+          <span class="coord-label">LAT/LON:</span> <span id="map-cursor-coords">47.3769° N, 8.5417° E</span>
+        </div>
+        <div class="map-actions">
+          <button id="btn-recenter" class="btn-tactical-sm" title="Fit Airspace / All Targets">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20M12 2a10 10 0 1 0 10 10"></path></svg> Recenter
+          </button>
+          <button id="btn-center-receiver" class="btn-tactical-sm" title="Center Map on Configured Receiver Station">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 10 10M2 12a10 10 0 0 1 10-10M12 6a6 6 0 0 1 6 6M6 12a6 6 0 0 1 6-6"/></svg> Receiver
+          </button>
+          <button id="btn-center-operator" class="btn-tactical-sm" title="Center Map on Pilot / Operator GCS Location">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0H5.5z"/></svg> Pilot GCS
+          </button>
+          <button id="btn-toggle-rings" class="btn-tactical-sm active" title="Toggle Distance Range Rings">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg> Rings
+          </button>
+          <button id="btn-toggle-paths" class="btn-tactical-sm active" title="Toggle Flight Path Trails">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"></path></svg> Trails
+          </button>
+          <button id="btn-toggle-waypoints" class="btn-tactical-sm active" title="Toggle Discrete Packet Waypoint Dots">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><circle cx="6" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle></svg> Fixes
+          </button>
+          <button id="btn-open-receiver-config" class="btn-tactical-sm" title="Configure Receiver Location (Saved to Disk)">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> ⚙ Config
+          </button>
+        </div>
+      </div>
+
+      <!-- Selection Banner in Investigation Mode -->
+      <div id="target-track-banner" class="target-banner" style="display: none;">
+        <div class="target-banner-info">
+          <span class="target-pill">TRACK LOCK</span>
+          <span id="target-banner-id" class="target-id font-mono selectable-text" title="Target Identifier (Select to copy)">--</span>
+          <span id="target-banner-op" class="target-op font-mono selectable-text" title="Operator ID (Select to copy)">--</span>
+        </div>
+        <button id="btn-close-track" class="btn-close-banner" title="Deselect Target">&times;</button>
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN: TELEMETRY & COMPLIANCE INSPECTOR -->
+    <aside id="inspector-panel" class="sidebar-panel">
+      <div class="panel-header">
+        <div class="panel-title-row">
+          <h2 class="panel-title">TELEMETRY INSPECTOR</h2>
+          <span id="inspector-status-badge" class="badge-tag">IDLE</span>
+        </div>
+      </div>
+
+      <div id="inspector-content" class="inspector-scroll">
+        <div class="inspector-empty-state">
+          <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+          <p>Select any aircraft on the radar or flight feed to inspect live telemetry and ASTM conformance.</p>
+        </div>
+
+        <!-- Telemetry Details Container (populated when target selected) -->
+        <div id="target-telemetry-view" style="display: none;">
+          
+          <!-- Identity Summary Card -->
+          <div class="tactical-card identity-card">
+            <div class="card-title-with-badge">
+              <span class="card-title">AIRCRAFT IDENTIFIERS</span>
+              <button id="btn-query-faa" class="btn-faa-lookup" title="Query FAA Declaration of Compliance Registry for aircraft make & model">
+                <span class="faa-btn-icon">🦅</span> <span class="faa-btn-text">Query FAA DOC</span>
+              </button>
+            </div>
+            <div class="identity-grid">
+              <div class="id-row">
+                <span class="id-key">SERIAL NUMBER:</span>
+                <div class="id-val-container">
+                  <span id="insp-serial" class="id-val font-mono highlight-cyan selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy Serial Number" data-target="insp-serial">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="id-row" id="insp-drone-model-row">
+                <span class="id-key">MAKE & MODEL:</span>
+                <div class="id-val-container">
+                  <span id="insp-drone-model" class="id-val font-mono highlight-amber selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy Drone Model" data-target="insp-drone-model">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="id-row">
+                <span class="id-key">TRANSMITTER MAC:</span>
+                <div class="id-val-container">
+                  <span id="insp-mac" class="id-val font-mono selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy MAC Address" data-target="insp-mac">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="id-row">
+                <span class="id-key">OPERATOR ID (CAA):</span>
+                <div class="id-val-container">
+                  <span id="insp-operator" class="id-val font-mono highlight-green selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy Operator ID" data-target="insp-operator">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="id-row">
+                <span class="id-key">SELF-ID / DESCRIPTION:</span>
+                <div class="id-val-container">
+                  <span id="insp-selfid" class="id-val font-mono selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy Self-ID" data-target="insp-selfid">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="id-row">
+                <span class="id-key">RF TRANSPORTS / CHANNELS:</span>
+                <span id="insp-rf-channels" class="id-val font-mono selectable-text">--</span>
+              </div>
+            </div>
+
+            <!-- FAA Registry DOC Result Panel -->
+            <div id="insp-faa-result" class="faa-result-box" style="display: none;">
+              <div class="faa-result-header">
+                <div class="faa-result-title">
+                  <span>🦅 FAA DECLARATION OF COMPLIANCE</span>
+                </div>
+                <span id="insp-faa-status-pill" class="comp-status-pill compliant">--</span>
+              </div>
+              <div id="insp-faa-body" class="faa-result-body"></div>
+            </div>
+          </div>
+
+          <!-- Real-Time Flight Gauges -->
+          <div class="gauges-grid">
+            <div class="gauge-box">
+              <div class="gauge-label">ALTITUDE (MSL)</div>
+              <div class="gauge-val font-mono"><span id="insp-alt">--</span> <small>m</small></div>
+              <div class="gauge-sub">Max: <span id="insp-max-alt">--</span> m</div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">HEIGHT (ATO / AGL)</div>
+              <div class="gauge-val font-mono highlight-cyan"><span id="insp-height">--</span> <small>m</small></div>
+              <div class="gauge-sub">Takeoff: <span id="insp-pilot-alt">--</span> m</div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">HORIZONTAL SPEED</div>
+              <div class="gauge-val font-mono"><span id="insp-speed">--</span> <small>m/s</small></div>
+              <div class="gauge-sub">Max: <span id="insp-max-speed">--</span> m/s</div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">HEADING / TRACK</div>
+              <div class="gauge-val font-mono"><span id="insp-heading">--</span><small>°</small></div>
+              <div class="gauge-sub"><span id="insp-heading-compass">--</span></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">SIGNAL (RSSI)</div>
+              <div class="gauge-val font-mono"><span id="insp-rssi">--</span> <small>dBm</small></div>
+              <div class="gauge-sub">Avg: <span id="insp-avg-rssi">--</span> dBm</div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">RANGE TO RECEIVER</div>
+              <div class="gauge-val font-mono highlight-amber"><span id="insp-rx-range">--</span> <small id="insp-rx-unit">m</small></div>
+              <div class="gauge-sub"><span id="insp-rx-bearing">Bearing: --</span></div>
+            </div>
+          </div>
+
+          <!-- ASD-STAN / EU prEN 4709-002 Conformance Checklist (Interactive) -->
+          <div class="tactical-card compliance-card">
+            <div class="card-title-with-badge">
+              <span class="card-title">ASD-STAN CONFORMANCE (prEN 4709-002)</span>
+              <span id="comp-overall-badge" class="comp-status-pill compliant">COMPLIANT</span>
+            </div>
+            <div class="compliance-hint">Click any message block below to inspect decoded fields</div>
+            <div class="compliance-list">
+              
+              <div class="compliance-item clickable" id="comp-basic-id" data-block="basic_id">
+                <div class="comp-row-main">
+                  <span class="comp-icon">✔</span>
+                  <span class="comp-name">Basic ID [0x0] <small class="req-badge">Mandatory</small></span>
+                  <span class="comp-desc" id="comp-basic-id-desc">Serial / ANSI-CTA-2063</span>
+                  <span class="comp-chevron">▾</span>
+                </div>
+                <div class="comp-drawer" id="drawer-comp-basic-id" style="display: none;"></div>
+              </div>
+
+              <div class="compliance-item clickable" id="comp-location" data-block="location">
+                <div class="comp-row-main">
+                  <span class="comp-icon">✔</span>
+                  <span class="comp-name">Location [0x1] <small class="req-badge">Mandatory</small></span>
+                  <span class="comp-desc" id="comp-location-desc">Lat/Lon/Alt/Speed/Track</span>
+                  <span class="comp-chevron">▾</span>
+                </div>
+                <div class="comp-drawer" id="drawer-comp-location" style="display: none;"></div>
+              </div>
+
+              <div class="compliance-item clickable" id="comp-system" data-block="system">
+                <div class="comp-row-main">
+                  <span class="comp-icon">✔</span>
+                  <span class="comp-name">System / GCS [0x4] <small class="req-badge">Mandatory</small></span>
+                  <span class="comp-desc" id="comp-system-desc">Pilot Location & Classification</span>
+                  <span class="comp-chevron">▾</span>
+                </div>
+                <div class="comp-drawer" id="drawer-comp-system" style="display: none;"></div>
+              </div>
+
+              <div class="compliance-item clickable" id="comp-operator" data-block="operator">
+                <div class="comp-row-main">
+                  <span class="comp-icon">✔</span>
+                  <span class="comp-name">Operator ID [0x5] <small class="req-badge">Mandatory</small></span>
+                  <span class="comp-desc" id="comp-operator-desc">Public CAA Registered</span>
+                  <span class="comp-chevron">▾</span>
+                </div>
+                <div class="comp-drawer" id="drawer-comp-operator" style="display: none;"></div>
+              </div>
+
+              <div class="compliance-item optional clickable" id="comp-self-id" data-block="self_id">
+                <div class="comp-row-main">
+                  <span class="comp-icon">○</span>
+                  <span class="comp-name">Self-ID [0x3] <small class="opt-badge">Optional</small></span>
+                  <span class="comp-desc" id="comp-self-id-desc">Flight Purpose / Free-text</span>
+                  <span class="comp-chevron">▾</span>
+                </div>
+                <div class="comp-drawer" id="drawer-comp-self-id" style="display: none;"></div>
+              </div>
+
+              <div class="compliance-item optional clickable" id="comp-auth" data-block="auth">
+                <div class="comp-row-main">
+                  <span class="comp-icon">○</span>
+                  <span class="comp-name">Auth [0x2] <small class="opt-badge">Optional</small></span>
+                  <span class="comp-desc" id="comp-auth-desc">Digital Signature</span>
+                  <span class="comp-chevron">▾</span>
+                </div>
+                <div class="comp-drawer" id="drawer-comp-auth" style="display: none;"></div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Pilot / GCS Coordinates -->
+          <div class="tactical-card pilot-card">
+            <div class="card-title">PILOT / GCS HOME POSITION</div>
+            <div class="pilot-coords-row">
+              <div class="pilot-coord-item">
+                <span class="pilot-key">PILOT LAT:</span>
+                <div class="id-val-container">
+                  <span id="insp-pilot-lat" class="font-mono selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy Pilot Latitude" data-target="insp-pilot-lat">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="pilot-coord-item">
+                <span class="pilot-key">PILOT LON:</span>
+                <div class="id-val-container">
+                  <span id="insp-pilot-lon" class="font-mono selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy Pilot Longitude" data-target="insp-pilot-lon">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Primary Actions -->
+          <div class="inspector-action-buttons">
+            <button id="btn-open-packet-inspector" class="btn-primary-action">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg> DEEP PACKET INSPECTOR
+            </button>
+            <div class="export-btn-group">
+              <button id="btn-export-geojson" class="btn-secondary-action" title="Export RFC 7946 GeoJSON">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> GeoJSON
+              </button>
+              <button id="btn-export-csv" class="btn-secondary-action" title="Export Telemetry CSV">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg> CSV
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- ===================================================================== -->
+  <!-- BOTTOM TIMELINE SCRUBBER & FLIGHT INVESTIGATION BAR -->
+  <!-- ===================================================================== -->
+  <footer id="scrubber-bar" class="timeline-footer" style="display: none;">
+    <div class="scrubber-left">
+      <div class="scrubber-playback-controls">
+        <button id="btn-scrub-prev" class="btn-scrub-step" title="Previous Packet Fix">⏮</button>
+        <button id="btn-scrub-play" class="btn-scrub-play" title="Play / Pause Flight Replay">▶</button>
+        <button id="btn-scrub-next" class="btn-scrub-step" title="Next Packet Fix">⏭</button>
+        <button id="btn-scrub-speed" class="btn-scrub-speed" title="Replay Speed Multiplier">1x</button>
+      </div>
+      <div class="scrubber-time-info font-mono">
+        <span id="scrub-curr-time">--:--:--</span>
+        <span class="time-sep">/</span>
+        <span id="scrub-total-time">--:--:--</span>
+      </div>
+    </div>
+
+    <!-- Timeline Slider with Discrete Packet Fix Ticks -->
+    <div class="scrubber-slider-container">
+      <input type="range" id="scrubber-range" min="0" max="100" value="0" step="1">
+      <div id="scrubber-ticks-canvas" class="scrubber-ticks-container"></div>
+    </div>
+
+    <div class="scrubber-right font-mono">
+      <span class="scrub-stat-pill">Fix: <b id="scrub-point-index">0/0</b></span>
+      <span class="scrub-stat-pill">Alt: <b id="scrub-point-alt">--</b>m</span>
+      <span class="scrub-stat-pill">Speed: <b id="scrub-point-speed">--</b>m/s</span>
+      <span class="scrub-stat-pill highlight-amber" title="Distance from Receiver Station">Rx: <b id="scrub-point-rx">--</b></span>
+    </div>
+  </footer>
+
+  <!-- ===================================================================== -->
+  <!-- DEEP PACKET INSPECTOR MODAL DIALOG -->
+  <!-- ===================================================================== -->
+  <div id="packet-inspector-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-header-titles">
+          <div class="modal-badge">DEEP PACKET INSPECTOR</div>
+          <h3 class="modal-title font-mono" id="modal-encounter-title">ENCOUNTER: --</h3>
+        </div>
+        <div class="modal-header-actions">
+          <button id="btn-modal-export-json" class="btn-tactical-sm">Export Stream (JSON)</button>
+          <button id="btn-close-packet-modal" class="btn-close-modal">&times;</button>
+        </div>
+      </div>
+
+      <!-- Packet Filter Bar -->
+      <div class="modal-filter-bar">
+        <div class="modal-search">
+          <input type="text" id="modal-filter-input" placeholder="Filter packet payloads (e.g. Basic ID, Location, Operator ID, 0x1...)" autocomplete="off">
+        </div>
+        <div class="modal-stats font-mono">
+          Showing <span id="modal-showing-count">0</span> / <span id="modal-total-count">0</span> Packets
+        </div>
+      </div>
+
+      <!-- Packet Stream Table -->
+      <div class="modal-table-container">
+        <table class="packet-stream-table font-mono" id="packet-stream-table">
+          <thead>
+            <tr>
+              <th width="48">#</th>
+              <th width="100">Offset (ms)</th>
+              <th width="110">Transport</th>
+              <th width="70">Channel</th>
+              <th width="80">RSSI</th>
+              <th>Decoded ASTM F3411 Message Blocks</th>
+              <th width="80">Inspect</th>
+            </tr>
+          </thead>
+          <tbody id="packet-stream-tbody">
+            <!-- Populated dynamically via packet_modal.js -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Selected Packet Deep Inspection Accordion / Drawer -->
+      <div id="packet-detail-drawer" class="modal-drawer" style="display: none;">
+        <div class="drawer-header">
+          <span class="drawer-title font-mono">RAW FRAME DISSECTION: PACKET #<span id="drawer-pkt-idx">0</span></span>
+          <button id="btn-close-drawer" class="btn-close-drawer">&times;</button>
+        </div>
+        <div class="drawer-content font-mono">
+          <div class="drawer-section">
+            <div class="drawer-section-title">DECODED ASTM PAYLOAD FIELDS</div>
+            <pre id="drawer-decoded-json" class="json-code-block"></pre>
+          </div>
+          <div class="drawer-section" id="drawer-raw-section">
+            <div class="drawer-section-title">BASE64 / RAW MESSAGE BLOCKS</div>
+            <pre id="drawer-raw-payload" class="raw-code-block"></pre>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- RECEIVER CONFIGURATION MODAL DIALOG -->
+  <!-- ===================================================================== -->
+  <div id="receiver-config-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog modal-dialog-sm">
+      <div class="modal-header">
+        <div class="modal-header-titles">
+          <div class="modal-badge-row" style="display: flex; align-items: center; gap: 8px;">
+            <div class="modal-badge" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border-color: #f59e0b;">SENSOR STATION CONFIG</div>
+            <span id="modal-rx-lock-badge" class="badge-tag" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; font-size: 9px; padding: 1px 6px;">UNLOCKED</span>
+          </div>
+          <h3 class="modal-title font-mono">RECEIVER LOCATION (SAVED ON DISK)</h3>
+        </div>
+        <button id="btn-close-receiver-modal" class="btn-close-modal">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Lock Notice Banner (Visible when locked via receiver_config.json) -->
+        <div id="modal-rx-locked-banner" class="tactical-lock-banner" style="display: none;">
+          <div class="lock-banner-icon">🔒</div>
+          <div class="lock-banner-text">
+            <b>POSITION WRITE-PROTECTED:</b> Receiver station parameters are locked in <code>receiver_config.json</code> on disk. To modify or reposition, set <code>"locked": false</code> directly in the file on disk.
+          </div>
+        </div>
+
+        <form id="form-receiver-config" class="tactical-form font-mono">
+          <div class="form-group">
+            <label for="cfg-rx-name">STATION IDENTIFIER / NAME</label>
+            <input type="text" id="cfg-rx-name" placeholder="e.g. Zurich Tactical Sensor Node 1" required>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="cfg-rx-lat">LATITUDE (° N)</label>
+              <input type="number" step="0.000001" id="cfg-rx-lat" placeholder="47.3769" required>
+            </div>
+            <div class="form-group">
+              <label for="cfg-rx-lon">LONGITUDE (° E)</label>
+              <input type="number" step="0.000001" id="cfg-rx-lon" placeholder="8.5417" required>
+            </div>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="cfg-rx-alt">ALTITUDE MSL (METERS)</label>
+              <input type="number" step="0.1" id="cfg-rx-alt" placeholder="450.0" required>
+            </div>
+            <div class="form-group">
+              <label for="cfg-rx-rings">RANGE RINGS (METERS)</label>
+              <input type="text" id="cfg-rx-rings" placeholder="500, 1000, 2500, 5000">
+            </div>
+          </div>
+
+          <div class="form-checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-rx-show-rings" checked> Display Distance Range Rings on Radar Map
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-rx-enabled" checked> Enable Sensor Station in Airspace Calculations
+            </label>
+          </div>
+
+          <div class="config-quick-actions">
+            <button type="button" id="btn-rx-gps-detect" class="btn-tactical-sm">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="12 2 15 9 22 12 15 15 12 22 9 15 2 12 9 9"/></svg> Use Browser GPS
+            </button>
+            <button type="button" id="btn-rx-map-pick" class="btn-tactical-sm">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg> Pick on Map
+            </button>
+          </div>
+
+          <div class="modal-form-actions">
+            <button type="button" id="btn-rx-cancel" class="btn-secondary-action">Cancel</button>
+            <button type="submit" id="btn-rx-save" class="btn-primary-action" style="background: #f59e0b; color: #080c16; border-color: #f59e0b;">💾 Save to Disk</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet & App JS Scripts -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script type="module" src="/js/app.js"></script>
+
+</body>
+</html>

@@ -50,13 +50,19 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {rem_mins:02d}m"
 
 
+try:
+    from scanner.db import get_db_connection as db_get_connection, reconcile_stale_encounters
+    from scanner.drone_models import infer_drone_model
+except ImportError:
+    from db import get_db_connection as db_get_connection, reconcile_stale_encounters
+    from drone_models import infer_drone_model
+
+
 def get_db_connection(db_path: str) -> sqlite3.Connection:
     if not os.path.exists(db_path):
         print(f"{C_RED}[-] Error: Database file '{db_path}' does not exist.{C_RESET}")
         sys.exit(1)
-    conn = sqlite3.connect(db_path, timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return db_get_connection(db_path)
 
 
 def reconcile_stale_encounters(conn: sqlite3.Connection, timeout_s: float = 300.0):
@@ -88,6 +94,9 @@ def cmd_list(args):
     if args.serial:
         query += " AND serial_number LIKE ?"
         params.append(f"%{args.serial}%")
+    if getattr(args, "operator", None):
+        query += " AND operator_id LIKE ?"
+        params.append(f"%{args.operator}%")
     if args.active_only:
         query += " AND is_active = 1"
     if args.since:
@@ -113,7 +122,7 @@ def cmd_list(args):
     print(f"{C_GRAY}Database: {args.db}{C_RESET}\n")
 
     # Header
-    hdr = f"{'ENCOUNTER ID':<26} {'START TIME (UTC)':<19} {'DURATION':<10} {'PKTS':<6} {'MAC':<18} {'SERIAL / UAS ID':<22} {'TRANSPORTS':<14} {'MAX ALT':<9} {'STATUS':<8}"
+    hdr = f"{'ENCOUNTER ID':<26} {'START TIME (UTC)':<19} {'DURATION':<10} {'PKTS':<6} {'MAC':<18} {'SERIAL / UAS ID':<22} {'OPERATOR ID':<20} {'TRANSPORTS':<14} {'MAX ALT':<9} {'STATUS':<8}"
     print(f"{C_BOLD}{hdr}{C_RESET}")
     print(f"{C_GRAY}{'-'*len(hdr)}{C_RESET}")
 
@@ -125,12 +134,13 @@ def cmd_list(args):
         pkts = r["packet_count"]
         mac = r["mac"]
         serial = r["serial_number"] or f"{C_GRAY}<None>{C_RESET}"
+        op_id = r["operator_id"] or f"{C_GRAY}<None>{C_RESET}"
         transports = r["transports"]
         max_alt = f"{r['max_alt_m']:.1f}m" if r["max_alt_m"] is not None else f"{C_GRAY}-{C_RESET}"
         is_active = bool(r["is_active"] and (now - r["last_seen"] <= timeout_s))
         status = f"{C_GREEN}ACTIVE{C_RESET}" if is_active else f"{C_GRAY}CLOSED{C_RESET}"
 
-        print(f"{C_WHITE}{enc_id:<26}{C_RESET} {start_str:<19} {dur_str:<10} {pkts:<6} {mac:<18} {serial:<22} {transports:<14} {max_alt:<9} {status:<8}")
+        print(f"{C_WHITE}{enc_id:<26}{C_RESET} {start_str:<19} {dur_str:<10} {pkts:<6} {mac:<18} {serial:<22} {op_id:<20} {transports:<14} {max_alt:<9} {status:<8}")
 
     print(f"{C_GRAY}{'-'*len(hdr)}{C_RESET}\n")
 
@@ -170,6 +180,9 @@ def cmd_show(args):
     print(f"  • {C_BOLD}Status           :{C_RESET} {status_str}")
     print(f"  • {C_BOLD}Transmitter MAC  :{C_RESET} {row['mac']}")
     print(f"  • {C_BOLD}UAS Serial Number:{C_RESET} {row['serial_number'] or 'Not Broadcasted'}")
+    if "drone_make" in row.keys() and (row['drone_make'] or row['drone_model']):
+        full_m = f"{row['drone_make'] or ''} {row['drone_model'] or ''}".strip()
+        print(f"  • {C_BOLD}Make & Model     :{C_RESET} {C_YELLOW}{full_m}{C_RESET}")
     print(f"  • {C_BOLD}Operator ID      :{C_RESET} {row['operator_id'] or 'Not Broadcasted'}")
     print(f"  • {C_BOLD}Self-ID Desc     :{C_RESET} \"{row['self_id_desc'] or ''}\"")
     print(f"  • {C_BOLD}First Detected   :{C_RESET} {row['first_seen_iso']}")
@@ -187,14 +200,27 @@ def cmd_show(args):
 
     alt_min = f"{row['min_alt_m']:.1f} m" if row['min_alt_m'] is not None else "N/A"
     alt_max = f"{row['max_alt_m']:.1f} m" if row['max_alt_m'] is not None else "N/A"
-    print(f"  • {C_BOLD}Altitude Range   :{C_RESET} Min: {alt_min} | Max: {alt_max}")
+    print(f"  • {C_BOLD}Altitude (MSL)   :{C_RESET} Min: {alt_min} | Max: {alt_max}")
+
+    if "min_height_m" in row.keys() and (row['min_height_m'] is not None or row['max_height_m'] is not None):
+        h_min = f"{row['min_height_m']:.1f} m" if row['min_height_m'] is not None else "N/A"
+        h_max = f"{row['max_height_m']:.1f} m" if row['max_height_m'] is not None else "N/A"
+        print(f"  • {C_BOLD}Height (ATO/AGL) :{C_RESET} Min: {h_min} | Max: {h_max}")
+
+    if "min_pressure_alt_m" in row.keys() and (row['min_pressure_alt_m'] is not None or row['max_pressure_alt_m'] is not None):
+        p_min = f"{row['min_pressure_alt_m']:.1f} m" if row['min_pressure_alt_m'] is not None else "N/A"
+        p_max = f"{row['max_pressure_alt_m']:.1f} m" if row['max_pressure_alt_m'] is not None else "N/A"
+        print(f"  • {C_BOLD}Pressure Alt     :{C_RESET} Min: {p_min} | Max: {p_max}")
 
     max_spd = f"{row['max_speed_mps']:.1f} m/s ({row['max_speed_mps']*3.6:.1f} km/h)" if row['max_speed_mps'] is not None else "N/A"
     print(f"  • {C_BOLD}Max Ground Speed :{C_RESET} {max_spd}")
 
     if row['pilot_lat'] is not None and row['pilot_lon'] is not None:
         p_alt = f"{row['pilot_alt_m']:.1f}m" if row['pilot_alt_m'] is not None else "N/A"
-        print(f"  • {C_BOLD}Pilot / Home Pos :{C_RESET} Lat: {row['pilot_lat']:.6f}, Lon: {row['pilot_lon']:.6f}, Alt: {p_alt}")
+        area_info = ""
+        if "area_ceil_m" in row.keys() and row['area_ceil_m'] is not None:
+            area_info = f" (Area Ceil: {row['area_ceil_m']}m)"
+        print(f"  • {C_BOLD}Pilot / Home Pos :{C_RESET} Lat: {row['pilot_lat']:.6f}, Lon: {row['pilot_lon']:.6f}, Alt: {p_alt}{area_info}")
 
     # Trajectory preview
     traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
@@ -360,10 +386,26 @@ def cmd_export_csv(args):
     out_path = args.output or f"{row['encounter_id']}.csv"
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(["index", "timestamp_epoch", "latitude", "longitude", "altitude_m", "speed_mps", "heading_deg"])
+        writer.writerow([
+            "index", "timestamp_epoch", "latitude", "longitude",
+            "altitude_geo_msl_m", "speed_mps", "heading_deg",
+            "height_m", "height_type", "pressure_altitude_m", "vertical_speed_mps"
+        ])
         for idx, pt in enumerate(traj):
-            # pt: [lat, lon, alt, speed, heading, ts]
-            writer.writerow([idx, sanitize_csv_cell(pt[5]), pt[0], pt[1], pt[2], pt[3], pt[4]])
+            # pt: [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt, vert_spd]
+            writer.writerow([
+                idx,
+                sanitize_csv_cell(pt[5] if len(pt) > 5 else None),
+                pt[0] if len(pt) > 0 else None,
+                pt[1] if len(pt) > 1 else None,
+                pt[2] if len(pt) > 2 else None,
+                pt[3] if len(pt) > 3 else None,
+                pt[4] if len(pt) > 4 else None,
+                pt[6] if len(pt) > 6 else None,
+                sanitize_csv_cell(pt[7]) if len(pt) > 7 else None,
+                pt[8] if len(pt) > 8 else None,
+                pt[9] if len(pt) > 9 else None,
+            ])
 
     print(f"{C_GREEN}[+] Successfully exported CSV trajectory ({len(traj)} points) to {out_path}{C_RESET}")
 
@@ -421,6 +463,7 @@ def main():
     p_list = subparsers.add_parser("list", help="List recorded drone flight encounters")
     p_list.add_argument("--mac", help="Filter by transmitter MAC address")
     p_list.add_argument("--serial", help="Filter by UAS Serial Number")
+    p_list.add_argument("--operator", "--operator-id", help="Filter by CAA Operator Registration ID")
     p_list.add_argument("--since", help="Filter encounters starting after ISO date (e.g. 2026-08-25)")
     p_list.add_argument("--active-only", action="store_true", help="Only show currently active encounters")
     p_list.add_argument("--limit", type=int, default=50, help="Maximum encounters to show")

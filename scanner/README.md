@@ -13,8 +13,14 @@ Compliant with **ASTM F3411-19**, **ASTM F3411-22**, and **ASD-STAN (OpenDroneID
 - [4. Dual Logging & Flight Encounter Engine](#4-dual-logging--flight-encounter-engine)
 - [5. How to Run the Scanner (`combined_rid_listener.py`)](#5-how-to-run-the-scanner-combined_rid_listenerpy)
 - [6. Querying & Exporting Flights (`query_rid_db.py`)](#6-querying--exporting-flights-query_rid_dbpy)
-- [7. Replaying Captured Traffic (`replay_drones.py`)](#7-replaying-captured-traffic-replay_dronespy)
-- [8. Running the Unit Tests](#8-running-the-unit-tests)
+- [7. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)](#7-tactical-web-dashboard--deep-packet-inspector-scannerrun_dashboardpy)
+- [8. Configurable & Lockable Receiver Geodesy (`receiver_config.json`)](#8-configurable--lockable-receiver-geodesy-receiver_configjson)
+- [9. Automated Drone Make & Model Inference (`scanner/drone_models.py`)](#9-automated-drone-make--model-inference-scannerdrone_modelspy)
+- [10. Official FAA DOC Registry Lookup (`/api/faa_lookup`)](#10-official-faa-doc-registry-lookup-apifaa_lookup)
+- [11. Replaying Captured Traffic (`replay_drones.py`)](#11-replaying-captured-traffic-replay_dronespy)
+- [12. Standalone Sniffer Tools (`scanner/sniffers/`)](#12-standalone-sniffer-tools-scannersniffers)
+- [13. Decoded Message Types & Fields Reference](#13-decoded-message-types--fields-reference)
+- [14. Running the Unit Tests](#14-running-the-unit-tests)
 
 ---
 
@@ -201,6 +207,12 @@ sudo journalctl -u drone-scanner.service -f
 | `--db-file` | `rid_detections.db` | SQLite database path for flight encounters (`''` to disable) |
 | `--encounter-timeout-s` | `300.0` | Inactivity timeout in seconds before closing an encounter (5 min) |
 | `--persist-interval` | `2.0` | Max frequency in seconds to persist active encounters to SQLite |
+| `--rehydrate` | `False` | Retroactively re-decode raw base64 frames from `.jsonl` files and rehydrate SQLite DB |
+| `--receiver-config` | `receiver_config.json` | Path to JSON receiver station configuration file for client-side geodesy |
+| `--receiver-lat`, `--receiver-lon`, `--receiver-alt` | `None` | Ground station coordinates override (decimal degrees and meters MSL) |
+| `--receiver-name` | `None` | Ground station identification name override |
+| `--receiver-lock` | `False` | Write-protect receiver station parameters directly on disk (`"locked": true`) |
+| `--receiver-unlock` | `False` | Remove write-protection from receiver station config file on disk |
 | `--log-jsonl` | `None` | Optional output JSONL replay file path |
 | `--rotate-daily` | `False` | Automatically split JSONL log file daily (`<path>_YYYYMMDD.jsonl`) |
 | `--quiet`, `-q` | `False` | Quiet mode: suppress per-packet terminal banner and print 30s status heartbeat |
@@ -260,7 +272,94 @@ python3 scanner/query_rid_db.py stats
 
 ---
 
-## 7. Replaying Captured Traffic (`replay_drones.py`)
+## 7. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)
+
+A full-featured, zero-build tactical SPA dashboard providing real-time airspace monitoring, radar visualization, timeline flight replay, and deep ASTM F3411 packet inspection.
+
+### Features
+- **🔴 Live Tactical Airspace Radar**: Real-time Leaflet tactical dark radar map with rotated aircraft markers, altitude trails, pilot/GCS home coordinates, concentric sensor range rings, and WebSocket telemetry stream (`/ws/live`).
+- **🎛️ Flight Feed & Search**: Live feed of active and closed encounters with real-time filtering by Serial, MAC, inferred Make/Model, and public CAA Operator ID (`CHE...`).
+- **🕒 Dynamic HUD Mode Switcher & Replay**: Auto-switches between **`LIVE RADAR`** (`● LIVE FEED`) and **`REPLAY`** (`● REPLAY MODE`) when selecting historical flights or scrubbing the timeline.
+- **🛰️ Client-Side Receiver Geodesy**: Real-time computation of 3D slant range ($\sqrt{d_{\text{ground}}^2 + \Delta h^2}$), ground distance, altitude delta, and azimuth bearing relative to a configurable sensor station.
+- **🦅 Official FAA DOC Registry Lookup**: Instant verification of aircraft serial numbers against the FAA Declaration of Compliance database (`https://uasdoc.faa.gov/api/v1/serialNumbers`).
+- **🚁 Automated Make & Model Inference**: Offline ANSI/CTA-2063-A decoding of manufacturer prefixes and hardware generations (e.g. DJI Matrice, Mavic, Avata, Autel EVO).
+- **🔬 Deep Packet Inspector**: Chronological dissection table of all captured ASTM message blocks (`Basic ID [0x0]`, `Location [0x1]`, `Auth [0x2]`, `Self-ID [0x3]`, `System [0x4]`, `Operator ID [0x5]`) with expandable raw hex and Base64 payload viewer.
+- **💾 One-Click Data Export**: Direct downloads of RFC 7946 GeoJSON trajectories, tabular CSV telemetry, and packet stream JSON.
+
+### Launching the Dashboard Server
+```bash
+# Launch on default port (http://localhost:8080)
+.venv/bin/python3 scanner/run_dashboard.py
+
+# Custom port, database path, and receiver station config
+.venv/bin/python3 scanner/run_dashboard.py \
+    --port 9000 \
+    --db rid_detections.db \
+    --log-jsonl rid_packets.jsonl \
+    --receiver-config receiver_config.json
+```
+
+### REST & WebSocket API Endpoints
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/stats` | Global airspace metrics, active/closed counts, RF transport breakdown, and receiver station metadata |
+| `GET` | `/api/encounters` | Flight feed with search & filtering (`?active_only=true`, `?search=...`, `?operator=...`) |
+| `GET` | `/api/encounters/{id}` | Detailed encounter metadata, inferred make/model, and complete flight trajectory array |
+| `GET` | `/api/encounters/{id}/packets` | Chronological packet stream with decoded ASTM blocks for Deep Packet Inspection |
+| `GET` | `/api/config/receiver` | Returns active receiver station configuration loaded from disk (with `"locked"` status) |
+| `POST` | `/api/config/receiver` | Updates & persists receiver station parameters to disk (enforces HTTP 403 write-protection when locked) |
+| `GET` | `/api/faa_lookup?serial=...` | Queries official FAA Declaration of Compliance Registry for approved aircraft makes/models |
+| `GET` | `/api/export/{id}/geojson` | Download RFC 7946 GeoJSON FeatureCollection |
+| `GET` | `/api/export/{id}/csv` | Download tabular CSV trajectory coordinates |
+| `WS` | `/ws/live` | Real-time WebSocket broadcasting active aircraft telemetry every 1.5s |
+
+---
+
+## 8. Configurable & Lockable Receiver Geodesy (`receiver_config.json`)
+
+Ground station parameters and range rings are persisted directly to a standalone JSON configuration file on disk:
+
+```json
+{
+  "name": "Zurich Airspace Tactical Sensor Node",
+  "latitude": 47.377415,
+  "longitude": 8.552706,
+  "altitude_m": 450.0,
+  "range_rings_m": [500.0, 1000.0, 2500.0, 5000.0],
+  "show_range_rings": true,
+  "enabled": true,
+  "locked": true,
+  "description": "Configurable Ground Receiver & Radar Station for Drone Remote ID Monitoring"
+}
+```
+
+### Safety & Write-Protection Locking
+- When `"locked": true` is set on disk:
+  - Web modifications via `POST /api/config/receiver` return `HTTP 403 Forbidden`.
+  - Leaflet map marker dragging and map-click repositioning are disabled.
+  - The UI displays a red 🔒 `LOCKED ON DISK` badge and write-protection advisory banner.
+- To modify or reposition a locked station, set `"locked": false` directly in `receiver_config.json` or pass `--receiver-unlock` via CLI.
+
+---
+
+## 9. Automated Drone Make & Model Inference (`scanner/drone_models.py`)
+
+The scanner features a built-in offline ANSI/CTA-2063-A decoding engine:
+- **Manufacturer Identification**: Decodes 4-character ICAO/CTA manufacturer codes (`1581` $\to$ DJI, `1596` $\to$ Autel, `1668` $\to$ Skydio, `1748` $\to$ Parrot, `1714` $\to$ Dronetag, `1686` $\to$ Wingtra, `1716` $\to$ Flyability).
+- **Sub-Model Generations**: Identifies specific hardware series (e.g. `1581F8` $\to$ Matrice 30 / 4TD / 350 RTK Enterprise, `1581F5` $\to$ Mavic 3, `1581F6` $\to$ Avata, `1581F9` $\to$ Mini 4 Pro / Air 3 Series, `1596E1` $\to$ EVO II Pro).
+- **Database Storage & Search**: Inferred make and model are stored in the SQLite `encounters` table (`drone_make`, `drone_model`) and are searchable in real-time in the dashboard feed.
+
+---
+
+## 10. Official FAA DOC Registry Lookup (`/api/faa_lookup`)
+
+- Operators can query the official **FAA Declaration of Compliance (DOC) Registry** (`https://uasdoc.faa.gov/api/v1/serialNumbers`) for any selected aircraft via the **`🦅 Query FAA DOC`** button in the dashboard.
+- Displays official approval status (`ACCEPTED`), registered applicant entity, official model name, and tracking number.
+- Verified FAA DOC records automatically synchronize with the local SQLite encounter database.
+
+---
+
+## 11. Replaying Captured Traffic (`replay_drones.py`)
 
 Any JSONL file recorded with `--log-jsonl <capture.jsonl>` can be replayed over the air using the spoofer's replay engine:
 
@@ -271,7 +370,7 @@ sudo python3 replay/replay_drones.py capture.jsonl --wifi-iface wlan1 --ble-adap
 
 ---
 
-## 8. Standalone Sniffer Tools (`scanner/sniffers/`)
+## 12. Standalone Sniffer Tools (`scanner/sniffers/`)
 
 For targeted debugging or single-transport analysis, dedicated standalone sniffers are available under `scanner/sniffers/`:
 
@@ -281,7 +380,7 @@ For targeted debugging or single-transport analysis, dedicated standalone sniffe
 
 ---
 
-## 9. Decoded Message Types & Fields Reference
+## 13. Decoded Message Types & Fields Reference
 
 The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenDroneID message types:
 
@@ -297,11 +396,12 @@ The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenD
 
 ---
 
-## 9. Running the Unit Tests
+## 14. Running the Unit Tests
 
-Automated test suites verify ASTM decoding, hopping schedule math, SQLite persistence, and replay formatting:
+Automated test suites verify ASTM decoding, hopping schedule math, SQLite persistence, make/model inference, receiver geodesy, and dashboard APIs:
 
 ```bash
-python3 -m unittest scanner.test_combined_rid_listener scanner.test_db_logging
+# Run all unit tests across the scanner module
+.venv/bin/python3 -m unittest discover -s scanner
 ```
 

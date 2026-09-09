@@ -38,9 +38,10 @@ def packet_callback(pkt):
                                 else:
                                     chan = freq
                                 chan_info = f", Ch: {chan}"
-                            except Exception:
-                                pass
-                        print(f"\n[+] Remote ID Detected from {pkt.addr2} (RSSI: {getattr(pkt, 'dBm_AntSignal', 'N/A')}dBm{chan_info})")
+                        rssi_val = "N/A"
+                        if pkt.haslayer("RadioTap"):
+                            rssi_val = getattr(pkt["RadioTap"], "dBm_AntSignal", "N/A")
+                        print(f"\n[+] Remote ID Detected from {pkt.addr2} (RSSI: {rssi_val}dBm{chan_info})")
                         for entry in data:
                             print(f"    - {entry}")
                 except Exception:
