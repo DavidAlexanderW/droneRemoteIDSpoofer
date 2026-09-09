@@ -594,7 +594,17 @@ def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optiona
         except Exception as e:
             logger.debug(f"Error reading {fpath} for rehydration: {e}")
 
-    tracker = EncounterTracker(db_path=db_path, persist_interval_s=0.0)
+    try:
+        tracker = EncounterTracker(db_path=db_path, persist_interval_s=0.0)
+    except sqlite3.OperationalError as e:
+        if "readonly" in str(e).lower() or "permission" in str(e).lower():
+            logger.error(f"[-] Database permission error opening '{db_path}': {e}\n"
+                         f"    -> The database was likely created by root/sudo. Run rehydration with sudo:\n"
+                         f"       sudo .venv/bin/python3 scanner/combined_rid_listener.py --rehydrate\n"
+                         f"    -> Or fix file ownership with:\n"
+                         f"       sudo chown -R $USER:$USER .\n")
+            return 0
+        raise
 
     rehydrated_count = 0
     for enc_id, data in encounters_data.items():
