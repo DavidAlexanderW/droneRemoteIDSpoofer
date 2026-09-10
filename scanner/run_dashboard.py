@@ -46,10 +46,10 @@ def parse_args():
         help="Inactivity timeout in seconds to consider an encounter closed",
     )
     parser.add_argument(
-        "--receiver-config",
+        "--scanner-config",
         type=str,
-        default="receiver_config.json",
-        help="Path to JSON configuration file on disk for receiver station location and parameters",
+        default=None,
+        help="Path to JSON configuration file on disk for scanner station location and parameters (default: scanner/scanner_config.json)",
     )
     parser.add_argument(
         "--receiver-lat",
@@ -103,11 +103,14 @@ def main():
     if scanner_dir not in sys.path:
         sys.path.insert(0, scanner_dir)
 
-    from receiver_config import load_receiver_config, save_receiver_config
+    try:
+        from scanner.scanner_config import load_scanner_config, save_scanner_config, get_default_config_path
+    except ImportError:
+        from scanner_config import load_scanner_config, save_scanner_config, get_default_config_path
 
-    # Load and optionally override receiver configuration from disk
-    config_path = os.path.abspath(args.receiver_config)
-    rx_config = load_receiver_config(config_path)
+    # Load and optionally override scanner configuration from disk
+    config_path = os.path.abspath(args.scanner_config) if args.scanner_config else get_default_config_path()
+    rx_config = load_scanner_config(config_path)
 
     rx_updates = {}
     if args.receiver_lat is not None:
@@ -125,13 +128,13 @@ def main():
 
     if rx_updates:
         rx_config.update(rx_updates)
-        save_receiver_config(rx_config, config_path)
+        save_scanner_config(rx_config, config_path)
 
     # Pass configuration to FastAPI app via environment variables
     os.environ["RID_DB_PATH"] = os.path.abspath(args.db)
     os.environ["RID_JSONL_PATH"] = os.path.abspath(args.log_jsonl)
     os.environ["RID_TIMEOUT_S"] = str(args.timeout)
-    os.environ["RID_RECEIVER_CONFIG_PATH"] = config_path
+    os.environ["RID_SCANNER_CONFIG_PATH"] = config_path
 
     print("=" * 72)
     print("  TACTICAL DRONE REMOTE ID AIRSPACE MONITOR - WEB DASHBOARD")
@@ -139,8 +142,8 @@ def main():
     print("=" * 72)
     print(f"  Database       : {os.path.abspath(args.db)}")
     print(f"  JSONL Log      : {os.path.abspath(args.log_jsonl)}")
-    print(f"  Receiver Config: {config_path}")
-    print(f"  Receiver Node  : {rx_config['name']} ({rx_config['latitude']:.5f}°N, {rx_config['longitude']:.5f}°E, {rx_config['altitude_m']:.1f}m MSL)")
+    print(f"  Scanner Config : {config_path}")
+    print(f"  Scanner Node   : {rx_config['name']} ({rx_config['latitude']:.5f}°N, {rx_config['longitude']:.5f}°E, {rx_config['altitude_m']:.1f}m MSL)")
     print(f"  Listening      : http://{args.host}:{args.port}")
     if args.host in ("0.0.0.0", "::"):
         print(f"  Local URL      : http://localhost:{args.port}")
@@ -149,8 +152,15 @@ def main():
     print("Press Ctrl+C to terminate the dashboard server.")
     print()
 
+    # Determine uvicorn import string based on environment
+    try:
+        import scanner.dashboard.app  # noqa: F401
+        app_target = "scanner.dashboard.app:app"
+    except ImportError:
+        app_target = "dashboard.app:app"
+
     uvicorn.run(
-        "dashboard.app:app",
+        app_target,
         host=args.host,
         port=args.port,
         reload=args.reload,
@@ -160,3 +170,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

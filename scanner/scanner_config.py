@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tactical Drone Remote ID - Receiver Station Configuration & Geodesy
+Tactical Drone Remote ID - Scanner Station Configuration & Geodesy
 Manages loading, validation, persistence on disk (JSON), and 3D slant range / bearing calculations.
 """
 
@@ -11,9 +11,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-DEFAULT_CONFIG_FILENAME = "receiver_config.json"
+DEFAULT_CONFIG_FILENAME = "scanner_config.json"
 
-DEFAULT_RECEIVER_CONFIG = {
+DEFAULT_SCANNER_CONFIG = {
     "name": "Tactical Sensor Node 1",
     "latitude": 47.3769,
     "longitude": 8.5417,
@@ -28,27 +28,36 @@ DEFAULT_RECEIVER_CONFIG = {
 
 
 def get_default_config_path() -> str:
-    """Returns absolute path to receiver config file from env or default location."""
-    env_path = os.environ.get("RID_RECEIVER_CONFIG_PATH")
+    """Returns absolute path to scanner config file from env or default location."""
+    env_path = os.environ.get("RID_SCANNER_CONFIG_PATH")
     if env_path:
         return os.path.abspath(env_path)
     
-    # Check if receiver_config.json exists in cwd or repo root
+    scanner_dir = os.path.abspath(os.path.dirname(__file__))
+    repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+
+    # 1. Check scanner/scanner_config.json
+    scanner_cfg = os.path.join(scanner_dir, DEFAULT_CONFIG_FILENAME)
+    if os.path.exists(scanner_cfg):
+        return scanner_cfg
+
+    # 2. Check cwd
     cwd_path = os.path.abspath(DEFAULT_CONFIG_FILENAME)
     if os.path.exists(cwd_path):
         return cwd_path
-    
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    # 3. Check repo root
     root_path = os.path.join(repo_root, DEFAULT_CONFIG_FILENAME)
     if os.path.exists(root_path):
         return root_path
-        
-    return cwd_path
+
+    # Default to scanner/scanner_config.json
+    return scanner_cfg
 
 
-def load_receiver_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
-    Loads receiver configuration from JSON file on disk.
+    Loads scanner configuration from JSON file on disk.
     If the file does not exist, writes the default configuration to disk.
     """
     path = os.path.abspath(config_path) if config_path else get_default_config_path()
@@ -57,40 +66,40 @@ def load_receiver_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                config = dict(DEFAULT_RECEIVER_CONFIG)
+                config = dict(DEFAULT_SCANNER_CONFIG)
                 config.update(data)
                 
                 # Normalize types
-                config["latitude"] = float(config.get("latitude", DEFAULT_RECEIVER_CONFIG["latitude"]))
-                config["longitude"] = float(config.get("longitude", DEFAULT_RECEIVER_CONFIG["longitude"]))
-                config["altitude_m"] = float(config.get("altitude_m", DEFAULT_RECEIVER_CONFIG["altitude_m"]))
-                config["name"] = str(config.get("name", DEFAULT_RECEIVER_CONFIG["name"]))
+                config["latitude"] = float(config.get("latitude", DEFAULT_SCANNER_CONFIG["latitude"]))
+                config["longitude"] = float(config.get("longitude", DEFAULT_SCANNER_CONFIG["longitude"]))
+                config["altitude_m"] = float(config.get("altitude_m", DEFAULT_SCANNER_CONFIG["altitude_m"]))
+                config["name"] = str(config.get("name", DEFAULT_SCANNER_CONFIG["name"]))
                 config["show_range_rings"] = bool(config.get("show_range_rings", True))
                 config["enabled"] = bool(config.get("enabled", True))
                 config["locked"] = bool(config.get("locked", False))
                 if not isinstance(config.get("range_rings_m"), list):
-                    config["range_rings_m"] = DEFAULT_RECEIVER_CONFIG["range_rings_m"]
+                    config["range_rings_m"] = DEFAULT_SCANNER_CONFIG["range_rings_m"]
                 
                 return config
-        except Exception as e:
+        except Exception:
             # If reading failed, fall back to default
             pass
 
     # Create default config on disk
-    config = dict(DEFAULT_RECEIVER_CONFIG)
+    config = dict(DEFAULT_SCANNER_CONFIG)
     config["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
-    save_receiver_config(config, path)
+    save_scanner_config(config, path)
     return config
 
 
-def save_receiver_config(config_data: Dict[str, Any], config_path: Optional[str] = None) -> Dict[str, Any]:
+def save_scanner_config(config_data: Dict[str, Any], config_path: Optional[str] = None) -> Dict[str, Any]:
     """
-    Persists receiver station configuration to JSON file on disk.
+    Persists scanner station configuration to JSON file on disk.
     """
     path = os.path.abspath(config_path) if config_path else get_default_config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     
-    merged = dict(DEFAULT_RECEIVER_CONFIG)
+    merged = dict(DEFAULT_SCANNER_CONFIG)
     merged.update(config_data)
     merged["locked"] = bool(config_data.get("locked", False))
     merged["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
@@ -139,7 +148,7 @@ def calculate_slant_range_and_bearing(
 ) -> Dict[str, Any]:
     """
     Computes 2D ground distance, 3D slant range (accounting for altitude delta),
-    and true bearing from receiver to target aircraft.
+    and true bearing from scanner station to target aircraft.
     """
     ground_dist_m = calculate_haversine_distance_m(rx_lat, rx_lon, target_lat, target_lon)
     bearing_deg = calculate_bearing_deg(rx_lat, rx_lon, target_lat, target_lon)
@@ -147,13 +156,12 @@ def calculate_slant_range_and_bearing(
     delta_alt_m = 0.0
     if rx_alt_m is not None and target_alt_m is not None:
         delta_alt_m = target_alt_m - rx_alt_m
-        slant_range_m = math.sqrt(ground_dist_m ** 2 + delta_alt_m ** 2)
-    else:
-        slant_range_m = ground_dist_m
+        
+    slant_range_m = math.sqrt(ground_dist_m ** 2 + delta_alt_m ** 2)
 
     return {
         "ground_distance_m": round(ground_dist_m, 1),
         "slant_range_m": round(slant_range_m, 1),
-        "delta_alt_m": round(delta_alt_m, 1),
+        "delta_altitude_m": round(delta_alt_m, 1),
         "bearing_deg": round(bearing_deg, 1),
     }

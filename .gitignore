@@ -52,3 +52,9 @@ evaluation/*_results.json
 evaluation/*.png
 evaluation/cts_inject
 attacks/takeover/cts_inject
+rid_detections.db
+rid_detections.db-shm
+rid_detections.db-wal
+rid_packets*.jsonl
+scanner/scanner_config.json
+

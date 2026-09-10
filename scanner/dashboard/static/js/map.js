@@ -118,7 +118,7 @@ export class TacticalMapController {
 
   enableMapPickMode() {
     if (this.receiverConfig && this.receiverConfig.locked) {
-      alert("Receiver location is locked in receiver_config.json on disk. Edit the config file on disk ('locked': false) to enable repositioning.");
+      alert("Scanner node location is locked in scanner_config.json on disk. Edit the config file on disk ('locked': false) to enable repositioning.");
       return;
     }
     this.pickLocationMode = true;
@@ -232,7 +232,7 @@ export class TacticalMapController {
     }
 
     const lockStatusHtml = isLocked
-      ? `<span style="font-size: 10px; color: #f87171; font-weight: 700; background: rgba(239, 68, 68, 0.15); padding: 2px 6px; border-radius: 3px; border: 1px solid rgba(239, 68, 68, 0.3);">🔒 Locked via receiver_config.json</span>`
+      ? `<span style="font-size: 10px; color: #f87171; font-weight: 700; background: rgba(239, 68, 68, 0.15); padding: 2px 6px; border-radius: 3px; border: 1px solid rgba(239, 68, 68, 0.3);">🔒 Locked via scanner_config.json</span>`
       : `<span style="font-size: 10px; color: #64748b;">Drag to reposition</span>`;
 
     this.receiverMarker.bindPopup(`

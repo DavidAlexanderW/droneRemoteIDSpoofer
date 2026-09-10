@@ -41,10 +41,18 @@ except ImportError:
     from db import get_db_connection as db_get_connection, reconcile_stale_encounters
     from drone_models import infer_drone_model
 
-from receiver_config import (
-    load_receiver_config,
-    save_receiver_config,
-)
+try:
+    from scanner.scanner_config import (
+        load_scanner_config,
+        save_scanner_config,
+        get_default_config_path,
+    )
+except ImportError:
+    from scanner_config import (
+        load_scanner_config,
+        save_scanner_config,
+        get_default_config_path,
+    )
 
 app = FastAPI(
     title="Tactical Drone Remote ID Airspace Monitor",
@@ -74,12 +82,15 @@ def get_timeout_s() -> float:
     return float(os.environ.get("RID_TIMEOUT_S", "300.0"))
 
 
-def get_receiver_config_path() -> str:
-    return os.environ.get("RID_RECEIVER_CONFIG_PATH", "receiver_config.json")
+def get_scanner_config_path() -> str:
+    env_path = os.environ.get("RID_SCANNER_CONFIG_PATH")
+    if env_path:
+        return os.path.abspath(env_path)
+    return get_default_config_path()
 
 
-def get_current_receiver_config() -> Dict[str, Any]:
-    return load_receiver_config(get_receiver_config_path())
+def get_current_scanner_config() -> Dict[str, Any]:
+    return load_scanner_config(get_scanner_config_path())
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -93,23 +104,23 @@ def get_db_connection() -> sqlite3.Connection:
 # REST Endpoints: Statistics, Config & Encounters Feed
 # ============================================================================
 
-@app.get("/api/config/receiver")
-def get_receiver_config_endpoint():
-    """Returns the receiver station parameters, coordinates, and range rings from disk."""
-    return get_current_receiver_config()
+@app.get("/api/config/scanner")
+def get_scanner_config_endpoint():
+    """Returns the scanner station parameters, coordinates, and range rings from disk."""
+    return get_current_scanner_config()
 
 
-@app.post("/api/config/receiver")
-def update_receiver_config_endpoint(payload: Dict[str, Any]):
-    """Updates and persists receiver station parameters directly to the JSON file on disk."""
-    config_path = get_receiver_config_path()
-    current = load_receiver_config(config_path)
+@app.post("/api/config/scanner")
+def update_scanner_config_endpoint(payload: Dict[str, Any]):
+    """Updates and persists scanner station parameters directly to the JSON file on disk."""
+    config_path = get_scanner_config_path()
+    current = load_scanner_config(config_path)
 
-    # Check if receiver configuration is locked in file on disk
+    # Check if scanner configuration is locked in file on disk
     if current.get("locked", False):
         raise HTTPException(
             status_code=403,
-            detail="Receiver location is locked in configuration file on disk ('locked': true). Edit receiver_config.json directly on disk to change or unlock position."
+            detail="Scanner node location is locked in configuration file on disk ('locked': true). Edit scanner_config.json directly on disk to change or unlock position."
         )
 
     if "latitude" in payload and payload["latitude"] is not None:
@@ -142,13 +153,13 @@ def update_receiver_config_endpoint(payload: Dict[str, Any]):
     if "locked" in payload:
         current["locked"] = bool(payload["locked"])
 
-    saved = save_receiver_config(current, config_path)
-    return {"status": "ok", "receiver": saved}
+    saved = save_scanner_config(current, config_path)
+    return {"status": "ok", "scanner": saved}
 
 
 @app.get("/api/stats")
 def get_stats():
-    """Returns global airspace metrics, receiver station parameters, and transport breakdowns."""
+    """Returns global airspace metrics, scanner station parameters, and transport breakdowns."""
     timeout_s = get_timeout_s()
     conn = get_db_connection()
     reconcile_stale_encounters(conn, timeout_s)
@@ -174,7 +185,7 @@ def get_stats():
             if t in transports_map:
                 transports_map[t] += pkts
 
-    rx_config = get_current_receiver_config()
+    scanner_config = get_current_scanner_config()
 
     return {
         "total_encounters": total_enc,
@@ -187,7 +198,7 @@ def get_stats():
         "first_seen_iso": min_time_iso,
         "last_seen_iso": max_time_iso,
         "transports_breakdown": transports_map,
-        "receiver": rx_config,
+        "scanner": scanner_config,
         "server_time_iso": datetime.now(timezone.utc).isoformat(),
     }
 

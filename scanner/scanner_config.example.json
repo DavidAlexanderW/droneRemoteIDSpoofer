@@ -1,0 +1,16 @@
+{
+  "name": "Zurich Airspace Tactical Sensor Node",
+  "latitude": 47.3763399,
+  "longitude": 8.5312562,
+  "altitude_m": 450.0,
+  "range_rings_m": [
+    500.0,
+    1000.0,
+    2500.0,
+    4000.0
+  ],
+  "show_range_rings": true,
+  "enabled": true,
+  "locked": false,
+  "description": "Example Ground-Based Drone Remote ID Sniffer & Radar Station"
+}

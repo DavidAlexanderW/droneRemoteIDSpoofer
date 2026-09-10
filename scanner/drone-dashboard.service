@@ -1,0 +1,48 @@
+# ==============================================================================
+# Tactical Drone Remote ID Web Dashboard - Autonomous systemd Service Unit
+# ==============================================================================
+#
+# Installation Instructions:
+# 1. Copy or link this service file to /etc/systemd/system/:
+#      sudo cp scanner/drone-dashboard.service /etc/systemd/system/
+#
+# 2. (Optional) Adjust the WorkingDirectory and ExecStart paths below if the
+#    repo is located at a different path on the target machine (e.g. /home/user/droneRemoteIDSpoofer).
+#
+# 3. Reload systemd daemon and enable service at boot:
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now drone-dashboard.service
+#
+# 4. Check status & live logs:
+#      sudo systemctl status drone-dashboard.service
+#      sudo journalctl -u drone-dashboard.service -f
+# ==============================================================================
+
+[Unit]
+Description=Tactical ASTM F3411 Drone Remote ID Web Dashboard & Airspace Radar
+Documentation=https://github.com/cyber-defence-campus/droneRemoteIDSpoofer
+After=network.target time-sync.target drone-scanner.service
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/user/droneRemoteIDSpoofer
+ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-dashboard \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --db /home/user/droneRemoteIDSpoofer/rid_detections.db \
+    --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
+    --scanner-config /home/user/droneRemoteIDSpoofer/scanner/scanner_config.json
+
+# Auto-restart on unexpected termination
+Restart=always
+RestartSec=5s
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drone-dashboard
+
+[Install]
+WantedBy=multi-user.target

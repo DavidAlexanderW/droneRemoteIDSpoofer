@@ -14,13 +14,14 @@ Compliant with **ASTM F3411-19**, **ASTM F3411-22**, and **ASD-STAN (OpenDroneID
 - [5. How to Run the Scanner (`combined_rid_listener.py`)](#5-how-to-run-the-scanner-combined_rid_listenerpy)
 - [6. Querying & Exporting Flights (`query_rid_db.py`)](#6-querying--exporting-flights-query_rid_dbpy)
 - [7. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)](#7-tactical-web-dashboard--deep-packet-inspector-scannerrun_dashboardpy)
-- [8. Configurable & Lockable Receiver Geodesy (`receiver_config.json`)](#8-configurable--lockable-receiver-geodesy-receiver_configjson)
+- [8. Configurable & Lockable Sensor Geodesy (`scanner/scanner_config.json`)](#8-configurable--lockable-sensor-geodesy-scannerscanner_configjson)
 - [9. Automated Drone Make & Model Inference (`scanner/drone_models.py`)](#9-automated-drone-make--model-inference-scannerdrone_modelspy)
 - [10. Official FAA DOC Registry Lookup (`/api/faa_lookup`)](#10-official-faa-doc-registry-lookup-apifaa_lookup)
 - [11. Replaying Captured Traffic (`replay_drones.py`)](#11-replaying-captured-traffic-replay_dronespy)
 - [12. Standalone Sniffer Tools (`scanner/sniffers/`)](#12-standalone-sniffer-tools-scannersniffers)
 - [13. Decoded Message Types & Fields Reference](#13-decoded-message-types--fields-reference)
-- [14. Running the Unit Tests](#14-running-the-unit-tests)
+- [14. Distributed Multi-Node Architecture Design](DISTRIBUTED_ARCHITECTURE_DESIGN.md)
+- [15. Running the Unit Tests](#15-running-the-unit-tests)
 
 ---
 
@@ -142,11 +143,40 @@ Cycle 6: Ch 6 (1000ms) -> Ch 12, Ch 13 (200ms) -> Ch 149 (1000ms) -> Ch 173 (200
 
 ---
 
-## 5. How to Run the Scanner (`combined_rid_listener.py`)
+## 5. Quick Installation & Automated Node Deployment
+
+### Automated One-Command Node Installer (`install_scanner.sh`)
+For Debian, Ubuntu, and Raspberry Pi OS (`x86_64` and `aarch64` / `arm64`), use the automated installer:
+
+```bash
+# 1. Automated installation (OS packages, Nordic nrfutil + ble-sniffer, udev rules, Python venv)
+./scanner/install_scanner.sh
+
+# Or install and automatically configure systemd services for 24/7 autonomous monitoring:
+./scanner/install_scanner.sh --with-services --wifi-iface wlan1 --nrf-port /dev/ttyACM0
+```
+
+### Manual Python Package Installation
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[all]"
+```
+
+Once installed, the following CLI commands are globally available in your environment:
+- **`drone-scanner`**: Combined Wi-Fi + BLE Remote ID listener & encounter logger
+- **`drone-dashboard`**: Tactical Radar Web UI and Deep Packet Inspector (`http://localhost:8080`)
+- **`drone-query`**: SQLite database inspection, search, and GeoJSON/CSV export
+- **`drone-spoofer`**: ASTM F3411 transmitter / spoofer CLI
+- **`drone-replay`**: Over-the-air packet replay tool
+
+---
+
+## 6. How to Run the Scanner (`drone-scanner` / `combined_rid_listener.py`)
 
 ### 1. Standard Combined Wi-Fi + BLE Mode
 ```bash
-sudo python3 scanner/combined_rid_listener.py \
+sudo .venv/bin/drone-scanner \
     --wifi-iface wlan1 \
     --nrf-port /dev/ttyACM0 \
     --db-file rid_detections.db \
@@ -155,7 +185,7 @@ sudo python3 scanner/combined_rid_listener.py \
 
 ### 2. Wi-Fi Only (Custom Hopping Ratio Multiplier $k=2$)
 ```bash
-sudo python3 scanner/combined_rid_listener.py \
+sudo .venv/bin/drone-scanner \
     --wifi-iface wlan1 \
     --no-ble \
     -k 2 \
@@ -164,26 +194,24 @@ sudo python3 scanner/combined_rid_listener.py \
 
 ### 3. BLE 5 Extended Mode (Default BLE Behavior)
 ```bash
-python3 scanner/combined_rid_listener.py \
+.venv/bin/drone-scanner \
     --no-wifi \
     --db-file rid_ble5_only.db
 ```
 *(BLE 5 Extended Advertising and LE Coded PHY tracking are active by default. Port `/dev/ttyACM0` is auto-detected.)*
 
 ### 4. Running as a 24/7 Background Service (systemd)
-The scanner includes a dedicated systemd service template [`scanner/drone-scanner.service`](scanner/drone-scanner.service) configured for autonomous, indefinite operation:
+The scanner includes dedicated systemd service units for the scanner engine and dashboard:
 
 ```bash
-# 1. Copy service file to systemd directory
-sudo cp scanner/drone-scanner.service /etc/systemd/system/
-
-# 2. Reload daemon and start service
-sudo systemctl daemon-reload
-sudo systemctl enable --now drone-scanner.service
-
-# 3. View live heartbeat and status
+# Start and inspect the combined scanner service
+sudo systemctl start drone-scanner.service
 sudo systemctl status drone-scanner.service
 sudo journalctl -u drone-scanner.service -f
+
+# Start and inspect the tactical radar dashboard service
+sudo systemctl start drone-dashboard.service
+sudo journalctl -u drone-dashboard.service -f
 ```
 
 ### CLI Arguments Reference
@@ -208,7 +236,7 @@ sudo journalctl -u drone-scanner.service -f
 | `--encounter-timeout-s` | `300.0` | Inactivity timeout in seconds before closing an encounter (5 min) |
 | `--persist-interval` | `2.0` | Max frequency in seconds to persist active encounters to SQLite |
 | `--rehydrate` | `False` | Retroactively re-decode raw base64 frames from `.jsonl` files and rehydrate SQLite DB |
-| `--receiver-config` | `receiver_config.json` | Path to JSON receiver station configuration file for client-side geodesy |
+| `--scanner-config` | `scanner/scanner_config.json` | Path to JSON scanner station configuration file for client-side geodesy |
 | `--receiver-lat`, `--receiver-lon`, `--receiver-alt` | `None` | Ground station coordinates override (decimal degrees and meters MSL) |
 | `--receiver-name` | `None` | Ground station identification name override |
 | `--receiver-lock` | `False` | Write-protect receiver station parameters directly on disk (`"locked": true`) |
@@ -289,25 +317,25 @@ A full-featured, zero-build tactical SPA dashboard providing real-time airspace 
 ### Launching the Dashboard Server
 ```bash
 # Launch on default port (http://localhost:8080)
-.venv/bin/python3 scanner/run_dashboard.py
+.venv/bin/drone-dashboard
 
-# Custom port, database path, and receiver station config
-.venv/bin/python3 scanner/run_dashboard.py \
+# Custom port, database path, and scanner station config
+.venv/bin/drone-dashboard \
     --port 9000 \
     --db rid_detections.db \
     --log-jsonl rid_packets.jsonl \
-    --receiver-config receiver_config.json
+    --scanner-config scanner/scanner_config.json
 ```
 
 ### REST & WebSocket API Endpoints
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/stats` | Global airspace metrics, active/closed counts, RF transport breakdown, and receiver station metadata |
+| `GET` | `/api/stats` | Global airspace metrics, active/closed counts, RF transport breakdown, and scanner station metadata |
 | `GET` | `/api/encounters` | Flight feed with search & filtering (`?active_only=true`, `?search=...`, `?operator=...`) |
 | `GET` | `/api/encounters/{id}` | Detailed encounter metadata, inferred make/model, and complete flight trajectory array |
 | `GET` | `/api/encounters/{id}/packets` | Chronological packet stream with decoded ASTM blocks for Deep Packet Inspection |
-| `GET` | `/api/config/receiver` | Returns active receiver station configuration loaded from disk (with `"locked"` status) |
-| `POST` | `/api/config/receiver` | Updates & persists receiver station parameters to disk (enforces HTTP 403 write-protection when locked) |
+| `GET` | `/api/config/scanner` | Returns active scanner station configuration loaded from disk (with `"locked"` status) |
+| `POST` | `/api/config/scanner` | Updates & persists scanner station parameters to disk (enforces HTTP 403 write-protection when locked) |
 | `GET` | `/api/faa_lookup?serial=...` | Queries official FAA Declaration of Compliance Registry for approved aircraft makes/models |
 | `GET` | `/api/export/{id}/geojson` | Download RFC 7946 GeoJSON FeatureCollection |
 | `GET` | `/api/export/{id}/csv` | Download tabular CSV trajectory coordinates |
@@ -315,30 +343,30 @@ A full-featured, zero-build tactical SPA dashboard providing real-time airspace 
 
 ---
 
-## 8. Configurable & Lockable Receiver Geodesy (`receiver_config.json`)
+## 8. Configurable & Lockable Sensor Geodesy (`scanner/scanner_config.json`)
 
-Ground station parameters and range rings are persisted directly to a standalone JSON configuration file on disk:
+Ground station parameters and range rings are persisted directly to [`scanner/scanner_config.json`](scanner/scanner_config.json) (template provided in [`scanner/scanner_config.example.json`](scanner/scanner_config.example.json)):
 
 ```json
 {
   "name": "Zurich Airspace Tactical Sensor Node",
-  "latitude": 47.377415,
-  "longitude": 8.552706,
+  "latitude": 47.377417,
+  "longitude": 8.552832,
   "altitude_m": 450.0,
   "range_rings_m": [500.0, 1000.0, 2500.0, 5000.0],
   "show_range_rings": true,
   "enabled": true,
-  "locked": true,
+  "locked": false,
   "description": "Configurable Ground Receiver & Radar Station for Drone Remote ID Monitoring"
 }
 ```
 
 ### Safety & Write-Protection Locking
 - When `"locked": true` is set on disk:
-  - Web modifications via `POST /api/config/receiver` return `HTTP 403 Forbidden`.
+  - Web modifications via `POST /api/config/scanner` return `HTTP 403 Forbidden`.
   - Leaflet map marker dragging and map-click repositioning are disabled.
   - The UI displays a red 🔒 `LOCKED ON DISK` badge and write-protection advisory banner.
-- To modify or reposition a locked station, set `"locked": false` directly in `receiver_config.json` or pass `--receiver-unlock` via CLI.
+- To modify or reposition a locked station, set `"locked": false` directly in `scanner/scanner_config.json` or pass `--receiver-unlock` via CLI.
 
 ---
 

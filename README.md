@@ -36,12 +36,18 @@ It generates raw 802.11 beacon frames and BLE advertisements containing ASTM F34
 
 ### Install
 
+**Option 1 — Automated Linux / Raspberry Pi Sensor Node Installer:**
 ```bash
 git clone https://github.com/cyber-defence-campus/droneRemoteIDSpoofer.git
 cd droneRemoteIDSpoofer
+./scanner/install_scanner.sh
+```
+
+**Option 2 — Standard Python Package Installation:**
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install scapy
+pip install -e ".[all]"
 ```
 
 ### Run your first spoof - Single drone
@@ -223,7 +229,7 @@ CLI flags override values from scenario config files.
 
 In addition to `spoof_drones.py`, the repository includes specialized security evaluation, fuzzing, scanning, and takeover modules:
 
-- **Combined Remote ID Scanner & Tactical Web Radar (`scanner/`)**: Real-time simultaneous Wi-Fi Beacon, NAN, and Bluetooth (BLE 4/5 via nRF UART) sniffer with dual JSONL replay streaming and SQLite flight encounter logging (`rid_detections.db`). Includes a full-featured tactical radar Web SPA dashboard (`run_dashboard.py`), client-side sensor station geodesy & distance range rings (`receiver_config.json`), offline ANSI/CTA-2063-A make & model inference, official FAA DOC registry integration, and CLI query suite (`query_rid_db.py`). See [scanner/README.md](scanner/README.md).
+- **Combined Remote ID Scanner & Tactical Web Radar (`scanner/`)**: Real-time simultaneous Wi-Fi Beacon, NAN, and Bluetooth (BLE 4/5 via nRF UART) sniffer with dual JSONL replay streaming and SQLite flight encounter logging (`rid_detections.db`). Includes a full-featured tactical radar Web SPA dashboard (`run_dashboard.py`), client-side sensor station geodesy & distance range rings (`scanner/scanner_config.json`), offline ANSI/CTA-2063-A make & model inference, official FAA DOC registry integration, and CLI query suite (`query_rid_db.py`). See [scanner/README.md](scanner/README.md).
 - **Capacity & RF Benchmarking Suite (`evaluation/`)**: Automated multi-mode benchmark orchestrator (`run_ble_benchmark.py`), Wi-Fi capacity tester (`wifi_capacity.py`), and BLE capacity tester (`ble_capacity.py`) with unified plotting engine (`plot_capacity.py`, `plot_ble_comparisons.py`). See [evaluation/README.md](evaluation/README.md).
 - **Offensive Security Attacks & Exploit Verification (`attacks/`)**: Comprehensive suite containing real-time drone session takeover (`attacks/takeover/`), EASA registration checksum collision solver (`attacks/protocol/`), ephemeral swarm identity flood (`attacks/ephemeral_swarm.py`), and OTA protocol mutation fuzzer (`attacks/fuzz_rid.py`). See [attacks/README.md](attacks/README.md).
 - **PCAP Replay Engine (`replay/`)**: Replay captured raw 802.11 / BLE Remote ID telemetry from PCAP recordings (`replay/replay_drones.py`).

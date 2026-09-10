@@ -341,7 +341,7 @@ class TacticalApp {
     if (btnSave) {
       btnSave.disabled = isLocked;
       btnSave.textContent = isLocked ? '🔒 Locked on Disk' : '💾 Save to Disk';
-      btnSave.title = isLocked ? 'Receiver parameters are locked via receiver_config.json on disk' : 'Save parameters to receiver_config.json on disk';
+      btnSave.title = isLocked ? 'Sensor parameters are locked via scanner_config.json on disk' : 'Save parameters to scanner_config.json on disk';
     }
 
     modal.style.display = 'flex';
@@ -353,29 +353,30 @@ class TacticalApp {
   }
 
   /**
-   * Fetches receiver configuration from disk via /api/config/receiver
+   * Fetches scanner station configuration from disk via /api/config/scanner
    */
   async fetchReceiverConfig() {
     try {
-      const resp = await fetch('/api/config/receiver');
+      const resp = await fetch('/api/config/scanner');
       if (!resp.ok) return;
       const data = await resp.json();
-      this.receiverConfig = data;
-      this.mapCtrl.setReceiverConfig(data);
-      this.inspectorCtrl.setReceiverConfig(data);
-      this.scrubberCtrl.setReceiverConfig(data);
-      this.modalCtrl.setReceiverConfig(data);
+      const cfg = data.scanner || data.receiver || data;
+      this.receiverConfig = cfg;
+      this.mapCtrl.setReceiverConfig(cfg);
+      this.inspectorCtrl.setReceiverConfig(cfg);
+      this.scrubberCtrl.setReceiverConfig(cfg);
+      this.modalCtrl.setReceiverConfig(cfg);
     } catch (e) {
-      console.warn('Failed to load receiver configuration:', e);
+      console.warn('Failed to load scanner configuration:', e);
     }
   }
 
   /**
-   * Saves receiver configuration to disk via POST /api/config/receiver
+   * Saves scanner station configuration to disk via POST /api/config/scanner
    */
   async saveReceiverConfig(configData) {
     try {
-      const resp = await fetch('/api/config/receiver', {
+      const resp = await fetch('/api/config/scanner', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(configData),
@@ -386,7 +387,7 @@ class TacticalApp {
       }
 
       const resJson = await resp.json();
-      const savedConfig = resJson.receiver || resJson;
+      const savedConfig = resJson.scanner || resJson.receiver || resJson;
       this.receiverConfig = savedConfig;
       this.mapCtrl.setReceiverConfig(savedConfig);
       this.inspectorCtrl.setReceiverConfig(savedConfig);
@@ -394,8 +395,8 @@ class TacticalApp {
       this.modalCtrl.setReceiverConfig(savedConfig);
       return savedConfig;
     } catch (err) {
-      console.error('Failed to save receiver config to disk:', err);
-      alert(`Error saving receiver config: ${err.message}`);
+      console.error('Failed to save scanner config to disk:', err);
+      alert(`Error saving scanner config: ${err.message}`);
     }
   }
 
