@@ -7,7 +7,7 @@
 # This script automates:
 #   1. System packages installation (iw, iproute2, rfkill, wireless-tools, curl, etc.)
 #   2. Architecture detection (x86_64 / amd64 vs aarch64 / arm64)
-#   3. Nordic nrfutil binary installation & ble-sniffer plugin setup
+#   3. Nordic nrfutil binary installation, ble-sniffer plugin setup & /usr/local/bin symlinking
 #   4. udev rules for Nordic USB Dongles & user permissions (dialout group)
 #   5. Python virtual environment creation & editable package installation (pip install -e .[all])
 #   6. Linux raw socket capabilities configuration (setcap)
@@ -142,22 +142,28 @@ echo ""
 # ------------------------------------------------------------------------------
 if [ "$SKIP_SYS_PKGS" = false ]; then
     if command -v apt-get >/dev/null 2>&1; then
-        echo -e "${C_BOLD}${C_GREEN}[1/6] Installing OS System Packages (apt)...${C_RESET}"
-        run_sudo apt-get update -qq || true
-        run_sudo apt-get install -y --no-install-recommends \
-            iw \
-            iproute2 \
-            rfkill \
-            wireless-tools \
-            python3 \
-            python3-venv \
-            python3-pip \
-            libcap2-bin \
-            curl \
-            udev \
-            kmod \
-            build-essential
-        echo -e "${C_GREEN}[+] System dependencies installed.${C_RESET}\n"
+        echo -e "${C_BOLD}${C_GREEN}[1/6] Checking & Installing OS System Packages (apt)...${C_RESET}"
+        REQUIRED_PKGS=(iw iproute2 rfkill wireless-tools python3 python3-venv python3-pip libcap2-bin curl udev kmod build-essential)
+        MISSING_PKGS=()
+        
+        if command -v dpkg-query >/dev/null 2>&1; then
+            for pkg in "${REQUIRED_PKGS[@]}"; do
+                if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
+                    MISSING_PKGS+=("$pkg")
+                fi
+            done
+        else
+            MISSING_PKGS=("${REQUIRED_PKGS[@]}")
+        fi
+
+        if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
+            echo -e "${C_GREEN}[+] All required OS packages are already installed.${C_RESET}\n"
+        else
+            echo -e "${C_CYAN}[*] Installing missing package(s): ${MISSING_PKGS[*]}...${C_RESET}"
+            run_sudo apt-get update -qq || true
+            run_sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
+            echo -e "${C_GREEN}[+] System dependencies installed.${C_RESET}\n"
+        fi
     else
         echo -e "${C_YELLOW}[!] Non-Debian/Ubuntu distribution detected. Ensure iw, iproute2, rfkill, and python3-venv are installed.${C_RESET}\n"
     fi
@@ -189,28 +195,86 @@ if [ "$SKIP_NRF" = false ]; then
 
     if [ -n "${NRFUTIL_URL}" ]; then
         if command -v nrfutil >/dev/null 2>&1; then
-            echo -e "${C_CYAN}[*] nrfutil is already installed at: $(which nrfutil)${C_RESET}"
-            echo -e "${C_CYAN}[*] Version: $(nrfutil --version 2>&1 || true)${C_RESET}"
+            NRFUTIL_BIN=$(which nrfutil)
+            echo -e "${C_GREEN}[+] nrfutil is already installed at: ${NRFUTIL_BIN}${C_RESET}"
+            echo -e "    Version: $(nrfutil --version 2>&1 | head -n 1 || true)"
         else
             echo -e "${C_CYAN}[*] Downloading nrfutil for ${RAW_ARCH} from Nordic Artifactory...${C_RESET}"
             TMP_NRF="/tmp/nrfutil_installer_$$"
             curl -fsSL "${NRFUTIL_URL}" -o "${TMP_NRF}"
             chmod +x "${TMP_NRF}"
             run_sudo mv "${TMP_NRF}" /usr/local/bin/nrfutil
+            run_sudo chmod +x /usr/local/bin/nrfutil
             echo -e "${C_GREEN}[+] nrfutil installed to /usr/local/bin/nrfutil.${C_RESET}"
         fi
 
-        echo -e "${C_CYAN}[*] Ensuring 'ble-sniffer' plugin is installed...${C_RESET}"
-        if nrfutil ble-sniffer --help >/dev/null 2>&1; then
-            echo -e "${C_GREEN}[+] nrfutil ble-sniffer plugin is verified and ready.${C_RESET}"
-        else
-            echo -e "${C_CYAN}[*] Running 'nrfutil install ble-sniffer'...${C_RESET}"
-            nrfutil install ble-sniffer || run_sudo nrfutil install ble-sniffer || true
-            if nrfutil ble-sniffer --help >/dev/null 2>&1; then
-                echo -e "${C_GREEN}[+] ble-sniffer plugin successfully installed.${C_RESET}"
-            else
-                echo -e "${C_YELLOW}[!] Note: Run 'nrfutil install ble-sniffer' if the plugin was not auto-installed.${C_RESET}"
+        # Locate ble-sniffer plugin executable
+        find_ble_sniffer_binary() {
+            local search_paths=(
+                "${USER_HOME}/.nrfutil/bin/nrfutil-ble-sniffer"
+                "/root/.nrfutil/bin/nrfutil-ble-sniffer"
+                "${HOME}/.nrfutil/bin/nrfutil-ble-sniffer"
+            )
+            for path in "${search_paths[@]}"; do
+                if [ -f "${path}" ] && [ -x "${path}" ]; then
+                    echo "${path}"
+                    return 0
+                fi
+            done
+            if [ -d "${USER_HOME}/.nrfutil" ]; then
+                local found
+                found=$(find "${USER_HOME}/.nrfutil" -type f -name "nrfutil-ble-sniffer" 2>/dev/null | head -n 1)
+                if [ -n "${found}" ] && [ -x "${found}" ]; then
+                    echo "${found}"
+                    return 0
+                fi
             fi
+            if [ -d "/root/.nrfutil" ]; then
+                local found_root
+                found_root=$(find "/root/.nrfutil" -type f -name "nrfutil-ble-sniffer" 2>/dev/null | head -n 1)
+                if [ -n "${found_root}" ] && [ -x "${found_root}" ]; then
+                    echo "${found_root}"
+                    return 0
+                fi
+            fi
+            return 1
+        }
+
+        BLE_SNIFFER_BIN=$(find_ble_sniffer_binary || true)
+
+        if [ -z "${BLE_SNIFFER_BIN}" ] || ! nrfutil ble-sniffer --help >/dev/null 2>&1; then
+            echo -e "${C_CYAN}[*] Installing 'ble-sniffer' plugin via nrfutil...${C_RESET}"
+            if [ "${REAL_USER}" != "root" ] && command -v sudo >/dev/null 2>&1; then
+                sudo -u "${REAL_USER}" nrfutil install ble-sniffer 2>/dev/null || true
+            fi
+            nrfutil install ble-sniffer 2>/dev/null || run_sudo nrfutil install ble-sniffer 2>/dev/null || true
+            BLE_SNIFFER_BIN=$(find_ble_sniffer_binary || true)
+        fi
+
+        # Ensure ble-sniffer executable is symlinked into PATH (/usr/local/bin/nrfutil-ble-sniffer)
+        if [ -n "${BLE_SNIFFER_BIN}" ]; then
+            # Ensure permissions on source binary and its parent directory
+            run_sudo chmod 755 "${BLE_SNIFFER_BIN}" 2>/dev/null || true
+            run_sudo chmod 755 "$(dirname "${BLE_SNIFFER_BIN}")" 2>/dev/null || true
+
+            TARGET_SYMLINK="/usr/local/bin/nrfutil-ble-sniffer"
+            if [ -L "${TARGET_SYMLINK}" ] && [ "$(readlink -f "${TARGET_SYMLINK}")" = "$(readlink -f "${BLE_SNIFFER_BIN}")" ]; then
+                echo -e "${C_GREEN}[+] ble-sniffer binary already symlinked in PATH: ${TARGET_SYMLINK} -> ${BLE_SNIFFER_BIN}${C_RESET}"
+            else
+                echo -e "${C_CYAN}[*] Symlinking ${BLE_SNIFFER_BIN} -> ${TARGET_SYMLINK}...${C_RESET}"
+                run_sudo ln -sf "${BLE_SNIFFER_BIN}" "${TARGET_SYMLINK}"
+                run_sudo chmod +x "${TARGET_SYMLINK}"
+                echo -e "${C_GREEN}[+] ble-sniffer binary successfully symlinked to ${TARGET_SYMLINK}.${C_RESET}"
+            fi
+
+            if nrfutil ble-sniffer --help >/dev/null 2>&1 || nrfutil-ble-sniffer --help >/dev/null 2>&1; then
+                echo -e "${C_GREEN}[+] nrfutil ble-sniffer plugin verified and operational.${C_RESET}"
+            else
+                echo -e "${C_YELLOW}[!] Warning: nrfutil ble-sniffer verification returned non-zero status.${C_RESET}"
+            fi
+        else
+            echo -e "${C_YELLOW}[!] Could not automatically locate or install nrfutil-ble-sniffer.${C_RESET}"
+            echo -e "${C_YELLOW}[!] Please run 'nrfutil install ble-sniffer' and symlink ~/.nrfutil/bin/nrfutil-ble-sniffer to /usr/local/bin/.${C_RESET}"
         fi
     fi
     echo ""
@@ -225,27 +289,45 @@ echo -e "${C_BOLD}${C_GREEN}[3/6] Setting Up USB Permissions & udev Rules...${C_
 UDEV_RULE_FILE="/etc/udev/rules.d/99-nrf-sniffer.rules"
 
 if [ -d "/etc/udev/rules.d" ]; then
-    echo -e "${C_CYAN}[*] Creating ${UDEV_RULE_FILE}...${C_RESET}"
-    run_sudo bash -c "cat << 'EOF' > ${UDEV_RULE_FILE}
+    EXPECTED_RULES='# Nordic Semiconductor nRF52840 Dongle / DevKit USB rules for non-root BLE sniffing
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1915", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1915", MODE="0666", GROUP="plugdev"'
+
+    CURRENT_RULES=$(cat "${UDEV_RULE_FILE}" 2>/dev/null || true)
+    if [ "${CURRENT_RULES}" = "${EXPECTED_RULES}" ]; then
+        echo -e "${C_GREEN}[+] udev rule ${UDEV_RULE_FILE} is already in place.${C_RESET}"
+    else
+        echo -e "${C_CYAN}[*] Writing ${UDEV_RULE_FILE}...${C_RESET}"
+        run_sudo bash -c "cat << 'EOF' > ${UDEV_RULE_FILE}
 # Nordic Semiconductor nRF52840 Dongle / DevKit USB rules for non-root BLE sniffing
 SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"1915\", MODE=\"0666\", GROUP=\"dialout\"
 SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"1915\", MODE=\"0666\", GROUP=\"plugdev\"
 EOF"
-    
-    if command -v udevadm >/dev/null 2>&1; then
-        run_sudo udevadm control --reload-rules || true
-        run_sudo udevadm trigger || true
+        
+        if command -v udevadm >/dev/null 2>&1; then
+            run_sudo udevadm control --reload-rules || true
+            run_sudo udevadm trigger || true
+        fi
+        echo -e "${C_GREEN}[+] udev rules installed and reloaded.${C_RESET}"
     fi
-    echo -e "${C_GREEN}[+] udev rules installed and reloaded.${C_RESET}"
 fi
 
 # Add user to dialout and plugdev groups
 if getent group dialout >/dev/null 2>&1; then
-    run_sudo usermod -a -G dialout "${REAL_USER}" || true
-    echo -e "${C_GREEN}[+] Added user '${REAL_USER}' to group 'dialout'.${C_RESET}"
+    if id -nG "${REAL_USER}" 2>/dev/null | grep -qw "dialout"; then
+        echo -e "${C_GREEN}[+] User '${REAL_USER}' is already a member of 'dialout' group.${C_RESET}"
+    else
+        run_sudo usermod -a -G dialout "${REAL_USER}" || true
+        echo -e "${C_GREEN}[+] Added user '${REAL_USER}' to group 'dialout'.${C_RESET}"
+    fi
 fi
 if getent group plugdev >/dev/null 2>&1; then
-    run_sudo usermod -a -G plugdev "${REAL_USER}" || true
+    if id -nG "${REAL_USER}" 2>/dev/null | grep -qw "plugdev"; then
+        echo -e "${C_GREEN}[+] User '${REAL_USER}' is already a member of 'plugdev' group.${C_RESET}"
+    else
+        run_sudo usermod -a -G plugdev "${REAL_USER}" || true
+        echo -e "${C_GREEN}[+] Added user '${REAL_USER}' to group 'plugdev'.${C_RESET}"
+    fi
 fi
 echo ""
 
@@ -254,21 +336,22 @@ echo ""
 # ------------------------------------------------------------------------------
 echo -e "${C_BOLD}${C_GREEN}[4/6] Setting Up Python Virtual Environment & Installing Package...${C_RESET}"
 VENV_DIR="${REPO_DIR}/.venv"
+VENV_PYTHON="${VENV_DIR}/bin/python3"
+VENV_PIP="${VENV_DIR}/bin/pip"
 
-if [ ! -d "${VENV_DIR}" ]; then
+if [ -f "${VENV_PYTHON}" ] && [ -x "${VENV_PYTHON}" ]; then
+    echo -e "${C_GREEN}[+] Python virtualenv found at ${VENV_DIR}.${C_RESET}"
+else
     echo -e "${C_CYAN}[*] Creating Python virtualenv at ${VENV_DIR}...${C_RESET}"
     python3 -m venv "${VENV_DIR}"
 fi
 
-VENV_PYTHON="${VENV_DIR}/bin/python3"
-VENV_PIP="${VENV_DIR}/bin/pip"
-
 echo -e "${C_CYAN}[*] Upgrading pip, setuptools, and wheel...${C_RESET}"
 "${VENV_PIP}" install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
 
-echo -e "${C_CYAN}[*] Installing drone-remote-id with dashboard & CLI tools (pip install -e '.[all]')...${C_RESET}"
-(cd "${REPO_DIR}" && "${VENV_PIP}" install -e ".[all]")
-echo -e "${C_GREEN}[+] Python package and CLI executables successfully installed into virtualenv.${C_RESET}\n"
+echo -e "${C_CYAN}[*] Installing/updating drone-remote-id package with CLI tools (pip install -e '.[all]')...${C_RESET}"
+(cd "${REPO_DIR}" && "${VENV_PIP}" install -e ".[all]" >/dev/null 2>&1 || "${VENV_PIP}" install -e ".[all]")
+echo -e "${C_GREEN}[+] Python package and CLI executables verified in ${VENV_DIR}/bin/.${C_RESET}\n"
 
 # ------------------------------------------------------------------------------
 # 5. Linux Raw Network Capabilities (setcap for rootless sniffing)
@@ -278,11 +361,19 @@ if [ "$SKIP_CAPS" = false ]; then
     if command -v setcap >/dev/null 2>&1 && [ -f "${VENV_PYTHON}" ]; then
         # Resolve any symlink to the real python binary for setcap
         REAL_PYTHON_BIN=$(readlink -f "${VENV_PYTHON}")
-        echo -e "${C_CYAN}[*] Setting cap_net_raw,cap_net_admin+eip on ${REAL_PYTHON_BIN}...${C_RESET}"
-        run_sudo setcap cap_net_raw,cap_net_admin+eip "${REAL_PYTHON_BIN}" 2>/dev/null || {
-            echo -e "${C_YELLOW}[!] Warning: setcap could not be applied. The scanner can still run via sudo.${C_RESET}"
-        }
-        echo -e "${C_GREEN}[+] Capabilities configured.${C_RESET}\n"
+        CURRENT_CAPS=$(getcap "${REAL_PYTHON_BIN}" 2>/dev/null || true)
+        
+        if echo "${CURRENT_CAPS}" | grep -q "cap_net_raw.*cap_net_admin"; then
+            echo -e "${C_GREEN}[+] Capabilities (cap_net_raw,cap_net_admin+eip) are already configured on ${REAL_PYTHON_BIN}.${C_RESET}\n"
+        else
+            echo -e "${C_CYAN}[*] Setting cap_net_raw,cap_net_admin+eip on ${REAL_PYTHON_BIN}...${C_RESET}"
+            run_sudo setcap cap_net_raw,cap_net_admin+eip "${REAL_PYTHON_BIN}" 2>/dev/null || {
+                echo -e "${C_YELLOW}[!] Warning: setcap could not be applied. The scanner can still run via sudo.${C_RESET}"
+            }
+            if getcap "${REAL_PYTHON_BIN}" 2>/dev/null | grep -q "cap_net_raw"; then
+                echo -e "${C_GREEN}[+] Capabilities configured successfully.${C_RESET}\n"
+            fi
+        fi
     else
         echo -e "${C_YELLOW}[!] setcap not found or python binary unavailable. Skipping.${C_RESET}\n"
     fi
