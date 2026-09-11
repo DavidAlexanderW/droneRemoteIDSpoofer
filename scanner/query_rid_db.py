@@ -191,6 +191,11 @@ def cmd_show(args):
     print(f"  • {C_BOLD}Total Packets    :{C_RESET} {row['packet_count']}")
     print(f"  • {C_BOLD}Transports Used  :{C_RESET} {row['transports']}")
     print(f"  • {C_BOLD}Channels Active  :{C_RESET} {row['channels']}")
+    if "dominant_rate_mbps" in row.keys() and row['dominant_rate_mbps'] is not None:
+        mod_tag = f" ({row['dominant_modulation']})" if row.get("dominant_modulation") else ""
+        print(f"  • {C_BOLD}Dominant PHY Rate:{C_RESET} {C_CYAN}{row['dominant_rate_mbps']:.1f} Mbps{mod_tag}{C_RESET}")
+    if "wifi_rates" in row.keys() and row['wifi_rates']:
+        print(f"  • {C_BOLD}PHY Distribution :{C_RESET} {row['wifi_rates']}")
 
     # Signal & Telemetry stats
     rssi_min = f"{row['min_rssi_dbm']} dBm" if row['min_rssi_dbm'] is not None else "N/A"

@@ -57,14 +57,29 @@ def process_packet(pkt):
     if not mac_addr:
         return
 
-    # Extract RSSI if available
+    # Extract RSSI and PHY Rate / Modulation if available
     rssi = "Unknown"
+    rate_mbps = None
+    modulation = None
+    rate_desc = None
     if pkt.haslayer("RadioTap"):
         try:
-            # Some RadioTap headers parse dBm_AntSignal
-            rssi_val = getattr(pkt["RadioTap"], "dBm_AntSignal", None)
+            rt = pkt["RadioTap"]
+            rssi_val = getattr(rt, "dBm_AntSignal", None)
             if rssi_val is not None:
                 rssi = f"{rssi_val} dBm"
+            raw_rate = getattr(rt, "Rate", None)
+            if raw_rate is not None:
+                rate_mbps = round(float(raw_rate) * 0.5, 1)
+                if rate_mbps <= 2.0:
+                    modulation = "DSSS"
+                elif rate_mbps in (5.5, 11.0):
+                    modulation = "CCK"
+                elif rate_mbps in (6.0, 9.0, 12.0, 18.0, 24.0, 36.0, 48.0, 54.0):
+                    modulation = "OFDM"
+                else:
+                    modulation = "802.11"
+                rate_desc = f"{rate_mbps:.1f} Mbps {modulation}"
         except Exception:
             pass
 
@@ -103,7 +118,7 @@ def process_packet(pkt):
             current = current.payload
 
         if found_astm:
-            _handle_astm_payload(pkt, mac_addr, rssi, astm_vendor_data, ssid_val, rates_val, dsset_val, tim_val, erp_val, esr_val, transport="wifi")
+            _handle_astm_payload(pkt, mac_addr, rssi, astm_vendor_data, ssid_val, rates_val, dsset_val, tim_val, erp_val, esr_val, transport="wifi", rate_mbps=rate_mbps, modulation=modulation, rate_desc=rate_desc)
             # If it was an ASTM packet and we want to save PCAP, save it
             if PCAP_FILE is not None:
                 wrpcap(PCAP_FILE, pkt, append=True)
@@ -123,12 +138,12 @@ def process_packet(pkt):
                         if 0 <= first_msg_type <= 5:
                             # Prepend 0x0D dummy AppCode so _handle_astm_payload parses it correctly
                             vendor_data = b'\x0D' + raw[i : i+4+expected_len]
-                            _handle_astm_payload(pkt, mac_addr, rssi, vendor_data, None, None, None, None, None, None, transport="nan")
+                            _handle_astm_payload(pkt, mac_addr, rssi, vendor_data, None, None, None, None, None, None, transport="nan", rate_mbps=rate_mbps, modulation=modulation, rate_desc=rate_desc)
                             if PCAP_FILE is not None:
                                 wrpcap(PCAP_FILE, pkt, append=True)
                             return
 
-def _handle_astm_payload(pkt, mac_addr, rssi, vendor_data, ssid_val, rates_val, dsset_val, tim_val, erp_val, esr_val, transport="wifi"):
+def _handle_astm_payload(pkt, mac_addr, rssi, vendor_data, ssid_val, rates_val, dsset_val, tim_val, erp_val, esr_val, transport="wifi", rate_mbps=None, modulation=None, rate_desc=None):
     try:
         # vendor_data: [AppCode][Counter][MsgType+Ver][Size][Count][Messages...]
         counter = vendor_data[1] if len(vendor_data) > 1 else 0
@@ -138,7 +153,8 @@ def _handle_astm_payload(pkt, mac_addr, rssi, vendor_data, ssid_val, rates_val, 
         # We only expect Message Packs (0xF) over Wi-Fi/NAN
         if msg_type == 0xF and len(vendor_data) > 4 and vendor_data[3] == 0x19:
             t_str = "Wi-Fi NAN" if transport == "nan" else "Wi-Fi Beacon"
-            print(f"🚁 {t_str} Drone Detected! MAC: {mac_addr} | RSSI: {rssi}")
+            phy_str = f" | PHY: {rate_desc}" if rate_desc else ""
+            print(f"🚁 {t_str} Drone Detected! MAC: {mac_addr} | RSSI: {rssi}{phy_str}")
             print(f"  Raw Remote ID Payload (Hex): {vendor_data.hex().upper()}")
             
             parsed_data, msgs_b64 = parse_astm_payload(vendor_data[2:])
@@ -164,7 +180,10 @@ def _handle_astm_payload(pkt, mac_addr, rssi, vendor_data, ssid_val, rates_val, 
                     "transport": transport,
                     "counter": counter,
                     "messages_b64": msgs_b64,
-                    "mac": mac_addr
+                    "mac": mac_addr,
+                    "rate_mbps": rate_mbps,
+                    "modulation": modulation,
+                    "rate_desc": rate_desc,
                 }
                 if serial:
                     event["serial"] = serial

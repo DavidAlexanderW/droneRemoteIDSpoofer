@@ -42,6 +42,12 @@ ENCOUNTERS_SCHEMA = [
     ("packet_count", "INTEGER NOT NULL"),
     ("transports", "TEXT NOT NULL"),
     ("channels", "TEXT NOT NULL"),
+    ("wifi_rates", "TEXT"),
+    ("dominant_rate_mbps", "REAL"),
+    ("dominant_modulation", "TEXT"),
+    ("min_rate_mbps", "REAL"),
+    ("max_rate_mbps", "REAL"),
+    ("phy_rate_dist_json", "TEXT"),
     ("min_rssi_dbm", "INTEGER"),
     ("max_rssi_dbm", "INTEGER"),
     ("avg_rssi_dbm", "REAL"),
@@ -75,6 +81,12 @@ MIGRATION_COLUMNS = [
     ("area_floor_m", "REAL"),
     ("drone_make", "TEXT"),
     ("drone_model", "TEXT"),
+    ("wifi_rates", "TEXT"),
+    ("dominant_rate_mbps", "REAL"),
+    ("dominant_modulation", "TEXT"),
+    ("min_rate_mbps", "REAL"),
+    ("max_rate_mbps", "REAL"),
+    ("phy_rate_dist_json", "TEXT"),
 ]
 
 

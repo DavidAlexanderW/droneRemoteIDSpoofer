@@ -340,6 +340,18 @@ export class TelemetryInspectorController {
       rfEl.textContent = `${transportsStr || 'N/A'} (CH: ${channelsStr || 'N/A'})`;
     }
 
+    // Wi-Fi / PHY Rates & Modulation
+    const phyRow = document.getElementById('insp-phy-rates-row');
+    const phyEl = document.getElementById('insp-phy-rates');
+    if (phyRow && phyEl) {
+      if (encounter.wifi_rates && encounter.wifi_rates.length > 0) {
+        phyEl.textContent = encounter.wifi_rates.join(', ');
+        phyRow.style.display = 'flex';
+      } else {
+        phyRow.style.display = 'none';
+      }
+    }
+
     // Gauges max values
     document.getElementById('insp-max-alt').textContent = encounter.max_alt_m != null ? Math.round(encounter.max_alt_m) : '--';
     document.getElementById('insp-max-speed').textContent = encounter.max_speed_mps != null ? Math.round(encounter.max_speed_mps) : '--';

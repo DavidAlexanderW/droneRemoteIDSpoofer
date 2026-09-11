@@ -288,6 +288,12 @@ def get_encounters(
             "packet_count": r["packet_count"],
             "transports": r["transports"].split(",") if r["transports"] else [],
             "channels": r["channels"].split(",") if r["channels"] else [],
+            "wifi_rates": r["wifi_rates"].split(", ") if ("wifi_rates" in r.keys() and r["wifi_rates"]) else [],
+            "dominant_rate_mbps": r["dominant_rate_mbps"] if "dominant_rate_mbps" in r.keys() else None,
+            "dominant_modulation": r["dominant_modulation"] if "dominant_modulation" in r.keys() else None,
+            "min_rate_mbps": r["min_rate_mbps"] if "min_rate_mbps" in r.keys() else None,
+            "max_rate_mbps": r["max_rate_mbps"] if "max_rate_mbps" in r.keys() else None,
+            "phy_rate_distribution": json.loads(r["phy_rate_dist_json"]) if ("phy_rate_dist_json" in r.keys() and r["phy_rate_dist_json"]) else {},
             "min_rssi_dbm": r["min_rssi_dbm"],
             "max_rssi_dbm": r["max_rssi_dbm"],
             "avg_rssi_dbm": r["avg_rssi_dbm"],
@@ -370,6 +376,12 @@ def get_encounter_details(encounter_id: str):
         "packet_count": row["packet_count"],
         "transports": row["transports"].split(",") if row["transports"] else [],
         "channels": row["channels"].split(",") if row["channels"] else [],
+        "wifi_rates": row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else [],
+        "dominant_rate_mbps": row["dominant_rate_mbps"] if "dominant_rate_mbps" in row.keys() else None,
+        "dominant_modulation": row["dominant_modulation"] if "dominant_modulation" in row.keys() else None,
+        "min_rate_mbps": row["min_rate_mbps"] if "min_rate_mbps" in row.keys() else None,
+        "max_rate_mbps": row["max_rate_mbps"] if "max_rate_mbps" in row.keys() else None,
+        "phy_rate_distribution": json.loads(row["phy_rate_dist_json"]) if ("phy_rate_dist_json" in row.keys() and row["phy_rate_dist_json"]) else {},
         "min_rssi_dbm": row["min_rssi_dbm"],
         "max_rssi_dbm": row["max_rssi_dbm"],
         "avg_rssi_dbm": row["avg_rssi_dbm"],
@@ -447,6 +459,12 @@ def get_encounter_packets(encounter_id: str):
                                     "transport": rec.get("transport"),
                                     "channel": rec.get("channel"),
                                     "rssi_dbm": rec.get("rssi_dbm"),
+                                    "rate_mbps": rec.get("rate_mbps"),
+                                    "modulation": rec.get("modulation"),
+                                    "rate_desc": rec.get("rate_desc"),
+                                    "bandwidth_mhz": rec.get("bandwidth_mhz"),
+                                    "mcs_index": rec.get("mcs_index"),
+                                    "guard_interval": rec.get("guard_interval"),
                                     "mac": rec.get("mac"),
                                     "serial": rec.get("serial"),
                                     "counter": rec.get("counter", 0),
@@ -474,6 +492,8 @@ def get_encounter_packets(encounter_id: str):
             # pt: [lat, lon, alt, speed, heading, ts]
             ts = pt[5] if len(pt) > 5 else t0
             delta_ms = int((ts - t0) * 1000)
+            r_rates = row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else []
+            r_desc = r_rates[0] if r_rates else None
             packets.append({
                 "index": idx + 1,
                 "time_offset_ms": delta_ms,
@@ -481,6 +501,7 @@ def get_encounter_packets(encounter_id: str):
                 "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
                 "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
                 "rssi_dbm": row["avg_rssi_dbm"],
+                "rate_desc": r_desc,
                 "mac": row["mac"],
                 "serial": row["serial_number"],
                 "counter": idx,

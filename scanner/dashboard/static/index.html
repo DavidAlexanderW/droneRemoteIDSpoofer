@@ -239,6 +239,15 @@
                 <span class="id-key">RF TRANSPORTS / CHANNELS:</span>
                 <span id="insp-rf-channels" class="id-val font-mono selectable-text">--</span>
               </div>
+              <div class="id-row" id="insp-phy-rates-row" style="display: none;">
+                <span class="id-key">PHY MODULATION & RATE:</span>
+                <div class="id-val-container">
+                  <span id="insp-phy-rates" class="id-val font-mono highlight-amber selectable-text" title="Click or select to copy">--</span>
+                  <button class="btn-copy-mini" title="Copy PHY Rates" data-target="insp-phy-rates">
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
+              </div>
             </div>
 
             <!-- FAA Registry DOC Result Panel -->
@@ -469,12 +478,13 @@
           <thead>
             <tr>
               <th width="48">#</th>
-              <th width="100">Offset (ms)</th>
-              <th width="110">Transport</th>
-              <th width="70">Channel</th>
-              <th width="80">RSSI</th>
+              <th width="90">Offset (ms)</th>
+              <th width="105">Transport</th>
+              <th width="65">Channel</th>
+              <th width="130">PHY / Rate</th>
+              <th width="75">RSSI</th>
               <th>Decoded ASTM F3411 Message Blocks</th>
-              <th width="80">Inspect</th>
+              <th width="75">Inspect</th>
             </tr>
           </thead>
           <tbody id="packet-stream-tbody">

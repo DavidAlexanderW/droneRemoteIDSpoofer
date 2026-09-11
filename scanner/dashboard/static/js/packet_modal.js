@@ -71,7 +71,7 @@ export class DeepPacketInspectorController {
     this.currentEncounterId = encounterId;
     this.titleEl.textContent = `ENCOUNTER: ${encounterId}`;
     this.modal.style.display = 'flex';
-    this.tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-muted);">Loading captured Remote ID packets...</td></tr>`;
+    this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">Loading captured Remote ID packets...</td></tr>`;
 
     try {
       const resp = await fetch(`/api/encounters/${encounterId}/packets`);
@@ -80,7 +80,7 @@ export class DeepPacketInspectorController {
       this.packets = data.packets || [];
       this.renderTable();
     } catch (err) {
-      this.tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--accent-red);">Failed to load packets: ${err.message}</td></tr>`;
+      this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--accent-red);">Failed to load packets: ${err.message}</td></tr>`;
     }
   }
 
@@ -92,7 +92,7 @@ export class DeepPacketInspectorController {
 
   renderTable() {
     if (!this.packets || this.packets.length === 0) {
-      this.tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-muted);">No packets recorded for this encounter.</td></tr>`;
+      this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">No packets recorded for this encounter.</td></tr>`;
       this.totalCountEl.textContent = '0';
       this.showingCountEl.textContent = '0';
       return;
@@ -114,6 +114,7 @@ export class DeepPacketInspectorController {
       const transport = pkt.transport ? pkt.transport.toUpperCase() : 'BLE';
       const channel = pkt.channel || 'N/A';
       const rssi = pkt.rssi_dbm != null ? `${pkt.rssi_dbm} dBm` : 'N/A';
+      const rateDesc = pkt.rate_desc || (pkt.rate_mbps ? `${pkt.rate_mbps} Mbps` : '--');
 
       // Build message block tags
       const blockTags = (pkt.decoded_messages || []).map(msg => {
@@ -171,6 +172,7 @@ export class DeepPacketInspectorController {
           <td>${offsetMs}</td>
           <td><span class="pill-chip ${transport.toLowerCase()}">${transport}</span></td>
           <td>ch${channel}</td>
+          <td><span class="pill-chip font-mono" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 11px; padding: 1px 6px;">${rateDesc}</span></td>
           <td>${rssi}</td>
           <td>${blockTags || '<span style="color:var(--text-muted);">(No Decoded Blocks)</span>'}</td>
           <td><button class="btn-inspect-pkt">Dissect</button></td>
@@ -202,12 +204,25 @@ export class DeepPacketInspectorController {
     // Decoded JSON
     this.drawerDecoded.textContent = JSON.stringify(pkt.decoded_messages || {}, null, 2);
 
+    // PHY Layer details
+    const phyInfo = [];
+    if (pkt.rate_desc) phyInfo.push(`PHY Rate / Modulation : ${pkt.rate_desc}`);
+    if (pkt.rate_mbps != null) phyInfo.push(`Data Rate (Mbps)     : ${pkt.rate_mbps}`);
+    if (pkt.modulation) phyInfo.push(`Modulation Scheme     : ${pkt.modulation}`);
+    if (pkt.bandwidth_mhz != null) phyInfo.push(`Channel Bandwidth     : ${pkt.bandwidth_mhz} MHz`);
+    if (pkt.mcs_index != null) phyInfo.push(`MCS Index             : ${pkt.mcs_index}`);
+    if (pkt.guard_interval) phyInfo.push(`Guard Interval        : ${pkt.guard_interval}`);
+    if (pkt.rssi_dbm != null) phyInfo.push(`Antenna Signal (RSSI) : ${pkt.rssi_dbm} dBm`);
+    if (pkt.channel != null) phyInfo.push(`Broadcast Channel     : ${pkt.channel}`);
+
+    const phyHeader = phyInfo.length > 0 ? `[PHY RF LAYER METRICS]\n${phyInfo.join('\n')}\n\n` : '';
+
     // Base64 payloads if available
     const b64List = pkt.messages_b64 || [];
     if (b64List.length > 0) {
-      this.drawerRaw.textContent = b64List.map((b64, i) => `Block #${i + 1} (Base64):\n${b64}`).join('\n\n');
+      this.drawerRaw.textContent = phyHeader + b64List.map((b64, i) => `Block #${i + 1} (Base64):\n${b64}`).join('\n\n');
     } else {
-      this.drawerRaw.textContent = `(Synthesized from recorded SQLite telemetry fix)\nLat: ${pkt.decoded_messages?.[1]?.lat || 'N/A'}, Lon: ${pkt.decoded_messages?.[1]?.lon || 'N/A'}`;
+      this.drawerRaw.textContent = `${phyHeader}(Synthesized from recorded SQLite telemetry fix)\nLat: ${pkt.decoded_messages?.[1]?.lat || 'N/A'}, Lon: ${pkt.decoded_messages?.[1]?.lon || 'N/A'}`;
     }
   }
 

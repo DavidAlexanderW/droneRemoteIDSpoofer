@@ -38,35 +38,8 @@ class TestDashboardAPI(unittest.TestCase):
         # Initialize SQLite test database with realistic mock flight encounters
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS encounters (
-                encounter_id TEXT PRIMARY KEY,
-                mac TEXT NOT NULL,
-                serial_number TEXT,
-                first_seen REAL NOT NULL,
-                first_seen_iso TEXT NOT NULL,
-                last_seen REAL NOT NULL,
-                last_seen_iso TEXT NOT NULL,
-                duration_s REAL NOT NULL,
-                packet_count INTEGER NOT NULL,
-                transports TEXT NOT NULL,
-                channels TEXT NOT NULL,
-                min_rssi_dbm INTEGER,
-                max_rssi_dbm INTEGER,
-                avg_rssi_dbm REAL,
-                min_alt_m REAL,
-                max_alt_m REAL,
-                max_speed_mps REAL,
-                pilot_lat REAL,
-                pilot_lon REAL,
-                pilot_alt_m REAL,
-                operator_id TEXT,
-                self_id_desc TEXT,
-                trajectory_json TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1
-            );
-        """)
+        from db import init_encounters_db
+        init_encounters_db(conn)
 
         # Insert Mock Encounter 1: Active BLE5 Flight with Public Operator ID
         traj_1 = [
@@ -75,7 +48,14 @@ class TestDashboardAPI(unittest.TestCase):
             [47.3772, 8.5425, 460.0, 7.0, 85, 1725790004.0],
         ]
         conn.execute("""
-            INSERT INTO encounters VALUES (
+            INSERT INTO encounters (
+                encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                last_seen, last_seen_iso, duration_s, packet_count, transports,
+                channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
+                max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm,
+                min_alt_m, max_alt_m, max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m,
+                operator_id, self_id_desc, trajectory_json, is_active
+            ) VALUES (
                 'enc_test_001',
                 'AA:BB:CC:11:22:33',
                 '1596E123456789012345',
@@ -87,6 +67,12 @@ class TestDashboardAPI(unittest.TestCase):
                 15,
                 'bt5',
                 '37,38,39',
+                '1.0 Mbps (LE 1M GFSK)',
+                1.0,
+                'GFSK',
+                1.0,
+                1.0,
+                '{"1.0 Mbps (LE 1M GFSK)": {"count": 15, "rate_mbps": 1.0, "modulation": "GFSK", "percent": 100.0}}',
                 -75,
                 -62,
                 -68.5,
@@ -109,7 +95,14 @@ class TestDashboardAPI(unittest.TestCase):
             [47.3780, 8.5500, 510.0, 12.5, 180, 1725780020.0],
         ]
         conn.execute("""
-            INSERT INTO encounters VALUES (
+            INSERT INTO encounters (
+                encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                last_seen, last_seen_iso, duration_s, packet_count, transports,
+                channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
+                max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm,
+                min_alt_m, max_alt_m, max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m,
+                operator_id, self_id_desc, trajectory_json, is_active
+            ) VALUES (
                 'enc_test_002',
                 'DD:EE:FF:44:55:66',
                 '1596E999999999999999',
@@ -121,6 +114,12 @@ class TestDashboardAPI(unittest.TestCase):
                 40,
                 'wifi',
                 '6',
+                '1.0 Mbps DSSS (90%), 6.0 Mbps OFDM (10%)',
+                1.0,
+                'DSSS',
+                1.0,
+                6.0,
+                '{"1.0 Mbps DSSS": {"count": 36, "rate_mbps": 1.0, "modulation": "DSSS", "percent": 90.0}, "6.0 Mbps OFDM": {"count": 4, "rate_mbps": 6.0, "modulation": "OFDM", "percent": 10.0}}',
                 -85,
                 -70,
                 -78.0,
@@ -149,6 +148,9 @@ class TestDashboardAPI(unittest.TestCase):
                 "transport": "bt5",
                 "channel": "37",
                 "rssi_dbm": -68,
+                "rate_mbps": 1.0,
+                "modulation": "GFSK",
+                "rate_desc": "1.0 Mbps (LE 1M GFSK)",
                 "mac": "AA:BB:CC:11:22:33",
                 "serial": "1596E123456789012345",
                 "counter": 1,
@@ -209,8 +211,22 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(data["encounter_id"], "enc_test_001")
         self.assertEqual(data["serial_number"], "1596E123456789012345")
         self.assertEqual(data["operator_id"], "CHE87astd57qkgc4")
+        self.assertEqual(data["dominant_rate_mbps"], 1.0)
+        self.assertEqual(data["dominant_modulation"], "GFSK")
         self.assertEqual(len(data["trajectory"]), 3)
         self.assertEqual(data["pilot_lat"], 47.3765)
+
+        # Also verify Encounter 2 (Wi-Fi with 90% DSSS and 10% OFDM)
+        resp2 = self.client.get("/api/encounters/enc_test_002")
+        self.assertEqual(resp2.status_code, 200)
+        d2 = resp2.json()
+        self.assertEqual(d2["dominant_rate_mbps"], 1.0)
+        self.assertEqual(d2["dominant_modulation"], "DSSS")
+        self.assertEqual(d2["min_rate_mbps"], 1.0)
+        self.assertEqual(d2["max_rate_mbps"], 6.0)
+        self.assertIn("1.0 Mbps DSSS", d2["phy_rate_distribution"])
+        self.assertEqual(d2["phy_rate_distribution"]["1.0 Mbps DSSS"]["percent"], 90.0)
+        self.assertEqual(d2["phy_rate_distribution"]["6.0 Mbps OFDM"]["percent"], 10.0)
 
     def test_get_encounter_packets(self):
         """Verify Deep Packet Inspector packet stream retrieval."""
@@ -221,6 +237,9 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertGreaterEqual(data["packet_count"], 1)
         pkt0 = data["packets"][0]
         self.assertEqual(pkt0["transport"], "bt5")
+        self.assertEqual(pkt0["rate_desc"], "1.0 Mbps (LE 1M GFSK)")
+        self.assertEqual(pkt0["modulation"], "GFSK")
+        self.assertEqual(pkt0["rate_mbps"], 1.0)
         self.assertIn("decoded_messages", pkt0)
 
     def test_export_geojson(self):

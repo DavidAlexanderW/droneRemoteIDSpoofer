@@ -16,6 +16,7 @@ from scanner.combined_rid_listener import (
     decode_astm_message,
     parse_astm_payload,
     extract_radiotap_rssi,
+    extract_radiotap_phy_info,
     SOCIAL_CHANNEL_2G,
     NON_SOCIAL_CHANNELS_2G,
     SOCIAL_CHANNEL_5G,
@@ -576,6 +577,114 @@ class TestCombinedRIDListener(unittest.TestCase):
                 self.assertEqual(traj[0][7], 0)    # height_type
                 self.assertEqual(traj[0][8], 415.0)# pressure_alt_m
                 self.assertEqual(traj[0][9], 1.5)  # vert_spd
+
+    def test_extract_radiotap_phy_info_legacy_rates(self):
+        # 1. 1.0 Mbps DSSS (Rate = 2 -> 1.0 Mbps, Channel 2437 MHz, RSSI -50 dBm)
+        # Bitmask = 0x0000002E (FLAGS | RATE | CHANNEL | DBM_ANTSIGNAL)
+        # Length = 8 (hdr) + 1 (flags) + 1 (rate) + 4 (channel) + 1 (rssi) = 15 bytes
+        hdr1 = struct.pack('<BBHI', 0, 0, 15, 0x0000002E)
+        hdr1 += bytes([0x00, 0x02, 0x85, 0x09, 0xa0, 0x00, 256 - 50])
+        phy1 = extract_radiotap_phy_info(hdr1)
+        self.assertEqual(phy1["rate_mbps"], 1.0)
+        self.assertEqual(phy1["modulation"], "DSSS")
+        self.assertEqual(phy1["rate_desc"], "1.0 Mbps DSSS")
+        self.assertEqual(phy1["frequency_mhz"], 2437)
+        self.assertEqual(phy1["rssi_dbm"], -50)
+
+        # 2. 6.0 Mbps OFDM (Rate = 12 -> 6.0 Mbps, Channel 5745 MHz with OFDM flag 0x0040)
+        hdr2 = struct.pack('<BBHI', 0, 0, 15, 0x0000002E)
+        hdr2 += bytes([0x00, 0x0c, 0x71, 0x16, 0x40, 0x01, 256 - 65])
+        phy2 = extract_radiotap_phy_info(hdr2)
+        self.assertEqual(phy2["rate_mbps"], 6.0)
+        self.assertEqual(phy2["modulation"], "OFDM")
+        self.assertEqual(phy2["rate_desc"], "6.0 Mbps OFDM")
+        self.assertEqual(phy2["frequency_mhz"], 5745)
+        self.assertEqual(phy2["rssi_dbm"], -65)
+
+        # 3. 11.0 Mbps CCK (Rate = 22 -> 11.0 Mbps)
+        hdr3 = struct.pack('<BBHI', 0, 0, 15, 0x0000002E)
+        hdr3 += bytes([0x00, 0x16, 0x85, 0x09, 0x20, 0x00, 256 - 72])
+        phy3 = extract_radiotap_phy_info(hdr3)
+        self.assertEqual(phy3["rate_mbps"], 11.0)
+        self.assertEqual(phy3["modulation"], "CCK")
+        self.assertEqual(phy3["rate_desc"], "11.0 Mbps CCK")
+
+    def test_extract_radiotap_phy_info_ht_mcs(self):
+        # Header with MCS bitmask (Bit 19 = 0x00080000)
+        # MCS 0 HT20 Long GI: known=0x07, flags=0x00 (20MHz, Long GI), mcs=0 -> 6.5 Mbps
+        w0 = (1 << 19)
+        hdr = struct.pack('<BBHI', 0, 0, 11, w0)
+        hdr += bytes([0x07, 0x00, 0x00]) # known, flags (HT20 LGI), mcs=0
+        phy = extract_radiotap_phy_info(hdr)
+        self.assertEqual(phy["modulation"], "HT (802.11n)")
+        self.assertEqual(phy["mcs_index"], 0)
+        self.assertEqual(phy["bandwidth_mhz"], 20)
+        self.assertEqual(phy["guard_interval"], "Long GI")
+        self.assertEqual(phy["rate_mbps"], 6.5)
+        self.assertIn("MCS 0", phy["rate_desc"])
+
+        # MCS 7 HT40 Short GI: known=0x07, flags=0x05 (40MHz bit0=1, SGI bit2=1), mcs=7 -> 150.0 Mbps
+        hdr2 = struct.pack('<BBHI', 0, 0, 11, w0)
+        hdr2 += bytes([0x07, 0x05, 0x07]) # known, flags (HT40 SGI), mcs=7
+        phy2 = extract_radiotap_phy_info(hdr2)
+        self.assertEqual(phy2["mcs_index"], 7)
+        self.assertEqual(phy2["bandwidth_mhz"], 40)
+        self.assertEqual(phy2["guard_interval"], "Short GI")
+        self.assertEqual(phy2["rate_mbps"], 150.0)
+
+    def test_encounter_tracker_wifi_rates_persistence(self):
+        import tempfile, sqlite3, json
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            tracker = EncounterTracker(db_path=tmp.name, persist_interval_s=0.0)
+            
+            # Send 3 packets with 1.0 Mbps DSSS
+            for i in range(3):
+                pkt1 = {
+                    "timestamp": 1000.0 + i,
+                    "transport": "wifi",
+                    "channel": 6,
+                    "mac": "60:60:1F:AA:BB:CC",
+                    "rssi_dbm": -55,
+                    "rate_mbps": 1.0,
+                    "modulation": "DSSS",
+                    "rate_desc": "1.0 Mbps DSSS",
+                    "serial_number": "WIFI_MOD_TEST",
+                    "messages": [{"type": "Basic ID", "id": "WIFI_MOD_TEST"}]
+                }
+                enc_id = tracker.update_with_packet(pkt1)
+            
+            # Send 1 packet with 6.0 Mbps OFDM
+            pkt2 = {
+                "timestamp": 1005.0,
+                "transport": "wifi",
+                "channel": 6,
+                "mac": "60:60:1F:AA:BB:CC",
+                "rssi_dbm": -53,
+                "rate_mbps": 6.0,
+                "modulation": "OFDM",
+                "rate_desc": "6.0 Mbps OFDM",
+                "serial_number": "WIFI_MOD_TEST",
+                "messages": [{"type": "Basic ID", "id": "WIFI_MOD_TEST"}]
+            }
+            tracker.update_with_packet(pkt2)
+            tracker.finalize_all()
+
+            with sqlite3.connect(tmp.name) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (enc_id,)).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row["dominant_rate_mbps"], 1.0)
+                self.assertEqual(row["dominant_modulation"], "DSSS")
+                self.assertEqual(row["min_rate_mbps"], 1.0)
+                self.assertEqual(row["max_rate_mbps"], 6.0)
+                self.assertIn("1.0 Mbps DSSS", row["wifi_rates"])
+                self.assertIn("6.0 Mbps OFDM", row["wifi_rates"])
+
+                dist = json.loads(row["phy_rate_dist_json"])
+                self.assertEqual(dist["1.0 Mbps DSSS"]["count"], 3)
+                self.assertEqual(dist["1.0 Mbps DSSS"]["percent"], 75.0)
+                self.assertEqual(dist["6.0 Mbps OFDM"]["count"], 1)
+                self.assertEqual(dist["6.0 Mbps OFDM"]["percent"], 25.0)
 
 if __name__ == "__main__":
     unittest.main()

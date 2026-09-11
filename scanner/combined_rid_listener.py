@@ -122,25 +122,30 @@ def get_freq_for_channel(ch: int) -> int:
     return 0
 
 
-def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
+def extract_radiotap_phy_info(frame: bytes) -> Dict[str, Any]:
     """
-    Extracts the dBm Antenna Signal (RSSI) from an IEEE 802.11 Radiotap header.
-    Accurately computes field offsets by following standard field alignment rules:
-      - Bit 0 (TSFT): 8 bytes, 8-byte aligned
-      - Bit 1 (Flags): 1 byte, 1-byte aligned
-      - Bit 2 (Rate): 1 byte, 1-byte aligned
-      - Bit 3 (Channel): 4 bytes (2B freq + 2B flags), 2-byte aligned
-      - Bit 4 (FHSS): 2 bytes, 2-byte aligned
-      - Bit 5 (dBm Antenna Signal): 1 byte signed int8, 1-byte aligned
-    Returns the signed RSSI integer in dBm (supports both weak and strong signals), or None.
+    Extracts physical layer RF parameters (RSSI, data rate, modulation, frequency, channel flags,
+    and 802.11n HT MCS parameters) from an IEEE 802.11 Radiotap header.
+    Adheres strictly to the IEEE 802.11 Radiotap natural alignment specification.
     """
+    res: Dict[str, Any] = {
+        "rssi_dbm": None,
+        "rate_mbps": None,
+        "modulation": None,
+        "rate_desc": None,
+        "frequency_mhz": None,
+        "channel_flags": None,
+        "mcs_index": None,
+        "bandwidth_mhz": None,
+        "guard_interval": None,
+    }
     if len(frame) < 8 or frame[0] != 0x00:
-        return None
+        return res
 
     try:
         radiotap_len = struct.unpack('<H', frame[2:4])[0]
         if len(frame) < radiotap_len or radiotap_len < 8:
-            return None
+            return res
 
         # 1. Parse present bitmasks (each 4 bytes; bit 31 indicates another word follows)
         present_words = []
@@ -153,15 +158,9 @@ def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
                 break
 
         if not present_words:
-            return None
+            return res
 
         w0 = present_words[0]
-
-        # Check if dBm Antenna Signal (bit 5) is present in word 0
-        if not (w0 & (1 << 5)):
-            return None
-
-        # 2. Advance through fields preceding bit 5 adhering to natural alignment rules
         offset = idx
 
         # Bit 0: TSFT (8 bytes, 8-byte aligned)
@@ -173,13 +172,21 @@ def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
         if w0 & (1 << 1):
             offset += 1
 
-        # Bit 2: Rate (1 byte, 1-byte aligned)
+        # Bit 2: Rate (1 byte, 1-byte aligned, units of 500 kbps)
+        raw_rate = None
         if w0 & (1 << 2):
+            if offset < radiotap_len and offset < len(frame):
+                raw_rate = frame[offset]
+                res["rate_mbps"] = round(raw_rate * 0.5, 1)
             offset += 1
 
         # Bit 3: Channel (4 bytes: 2B freq + 2B flags, 2-byte aligned)
         if w0 & (1 << 3):
             offset = (offset + 1) & ~1
+            if offset + 4 <= radiotap_len and offset + 4 <= len(frame):
+                freq, ch_flags = struct.unpack('<HH', frame[offset:offset+4])
+                res["frequency_mhz"] = int(freq)
+                res["channel_flags"] = int(ch_flags)
             offset += 4
 
         # Bit 4: FHSS (2 bytes, 2-byte aligned)
@@ -191,12 +198,124 @@ def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
         if w0 & (1 << 5):
             if offset < radiotap_len and offset < len(frame):
                 val = struct.unpack('<b', frame[offset:offset+1])[0]
-                return int(val)
+                res["rssi_dbm"] = int(val)
+            offset += 1
+
+        # Bit 6: dBm Antenna Noise (1 byte signed int8, 1-byte aligned)
+        if w0 & (1 << 6):
+            offset += 1
+
+        # Bit 7: Lock quality (2 bytes, 2-byte aligned)
+        if w0 & (1 << 7):
+            offset = (offset + 1) & ~1
+            offset += 2
+
+        # Bit 8: TX attenuation (2 bytes, 2-byte aligned)
+        if w0 & (1 << 8):
+            offset = (offset + 1) & ~1
+            offset += 2
+
+        # Bit 9: dB TX attenuation (2 bytes, 2-byte aligned)
+        if w0 & (1 << 9):
+            offset = (offset + 1) & ~1
+            offset += 2
+
+        # Bit 10: dBm TX power (1 byte signed int8, 1-byte aligned)
+        if w0 & (1 << 10):
+            offset += 1
+
+        # Bit 11: Antenna (1 byte u8, 1-byte aligned)
+        if w0 & (1 << 11):
+            offset += 1
+
+        # Bit 12: dB Antenna Signal (1 byte u8, 1-byte aligned)
+        if w0 & (1 << 12):
+            offset += 1
+
+        # Bit 13: dB Antenna Noise (1 byte u8, 1-byte aligned)
+        if w0 & (1 << 13):
+            offset += 1
+
+        # Bit 14: RX flags (2 bytes u16, 2-byte aligned)
+        if w0 & (1 << 14):
+            offset = (offset + 1) & ~1
+            offset += 2
+
+        # Bit 15: TX flags (2 bytes u16, 2-byte aligned)
+        if w0 & (1 << 15):
+            offset = (offset + 1) & ~1
+            offset += 2
+
+        # Bit 16: RTS retries (1 byte u8, 1-byte aligned)
+        if w0 & (1 << 16):
+            offset += 1
+
+        # Bit 17: Data retries (1 byte u8, 1-byte aligned)
+        if w0 & (1 << 17):
+            offset += 1
+
+        # Bit 18: XChannel (8 bytes, 4-byte aligned)
+        if w0 & (1 << 18):
+            offset = (offset + 3) & ~3
+            offset += 8
+
+        # Bit 19: MCS (3 bytes: known, flags, mcs_index; 1-byte aligned)
+        if w0 & (1 << 19):
+            if offset + 3 <= radiotap_len and offset + 3 <= len(frame):
+                known = frame[offset]
+                flags = frame[offset + 1]
+                mcs = frame[offset + 2]
+                res["mcs_index"] = int(mcs)
+                bw_flag = flags & 0x03
+                res["bandwidth_mhz"] = 40 if bw_flag == 1 else 20
+                sgi = bool(flags & 0x04)
+                res["guard_interval"] = "Short GI" if sgi else "Long GI"
+                res["modulation"] = "HT (802.11n)"
+                ht20_lgi = [6.5, 13.0, 19.5, 26.0, 39.0, 52.0, 58.5, 65.0]
+                ht20_sgi = [7.2, 14.4, 21.7, 28.9, 43.3, 57.8, 65.0, 72.2]
+                ht40_lgi = [13.5, 27.0, 40.5, 54.0, 81.0, 108.0, 121.5, 135.0]
+                ht40_sgi = [15.0, 30.0, 45.0, 60.0, 90.0, 120.0, 135.0, 150.0]
+                if mcs < 8:
+                    if res["bandwidth_mhz"] == 40:
+                        res["rate_mbps"] = ht40_sgi[mcs] if sgi else ht40_lgi[mcs]
+                    else:
+                        res["rate_mbps"] = ht20_sgi[mcs] if sgi else ht20_lgi[mcs]
+                gi_str = "SGI" if sgi else "LGI"
+                rate_str = f"{res['rate_mbps']:.1f} Mbps " if res["rate_mbps"] else ""
+                res["rate_desc"] = f"MCS {mcs} ({rate_str}HT{res['bandwidth_mhz']} {gi_str})".strip()
+            offset += 3
+
+        # If legacy rate was found and MCS wasn't present, determine modulation
+        if res["rate_mbps"] is not None and res["modulation"] is None:
+            r = res["rate_mbps"]
+            ch_fl = res["channel_flags"] or 0
+            if ch_fl & 0x0040:  # OFDM flag
+                res["modulation"] = "OFDM"
+            elif ch_fl & 0x0020:  # CCK flag
+                res["modulation"] = "DSSS" if r <= 2.0 else "CCK"
+            elif r in (1.0, 2.0):
+                res["modulation"] = "DSSS"
+            elif r in (5.5, 11.0):
+                res["modulation"] = "CCK"
+            elif r in (6.0, 9.0, 12.0, 18.0, 24.0, 36.0, 48.0, 54.0):
+                res["modulation"] = "OFDM"
+            else:
+                res["modulation"] = "802.11"
+
+            res["rate_desc"] = f"{r:.1f} Mbps {res['modulation']}"
 
     except Exception:
         pass
 
-    return None
+    return res
+
+
+def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
+    """
+    Extracts the dBm Antenna Signal (RSSI) from an IEEE 802.11 Radiotap header.
+    Maintained for backward compatibility; delegates to extract_radiotap_phy_info.
+    """
+    return extract_radiotap_phy_info(frame).get("rssi_dbm")
 
 
 class SharedChannelState:
@@ -301,6 +420,8 @@ class EncounterTracker:
                     "packet_count": 0,
                     "transports": set([transport]),
                     "channels": set([ch_str]),
+                    "wifi_rates": set(),
+                    "rate_counts": {},
                     "rssi_values": [rssi] if rssi is not None else [],
                     "altitudes": [],
                     "pressure_altitudes": [],
@@ -326,6 +447,18 @@ class EncounterTracker:
             enc["packet_count"] += 1
             enc["transports"].add(transport)
             enc["channels"].add(ch_str)
+            r_desc = packet.get("rate_desc")
+            if r_desc:
+                enc["wifi_rates"].add(r_desc)
+                if "rate_counts" not in enc:
+                    enc["rate_counts"] = {}
+                if r_desc not in enc["rate_counts"]:
+                    enc["rate_counts"][r_desc] = {
+                        "count": 0,
+                        "rate_mbps": packet.get("rate_mbps"),
+                        "modulation": packet.get("modulation"),
+                    }
+                enc["rate_counts"][r_desc]["count"] += 1
             if serial and not enc.get("serial_number"):
                 enc["serial_number"] = serial
                 if not enc.get("drone_make"):
@@ -484,6 +617,45 @@ class EncounterTracker:
 
         transports_str = ",".join(sorted(enc["transports"]))
         channels_str = ",".join(sorted(enc["channels"]))
+
+        # Compute structured PHY rate metrics and JSON distribution
+        rate_counts = enc.get("rate_counts", {})
+        dominant_rate_mbps = None
+        dominant_modulation = None
+        min_rate_mbps = None
+        max_rate_mbps = None
+        phy_dist = {}
+        wifi_rates_list = []
+
+        if rate_counts:
+            total_phy_pkts = sum(v["count"] for v in rate_counts.values())
+            rates = [v["rate_mbps"] for v in rate_counts.values() if v.get("rate_mbps") is not None]
+            if rates:
+                min_rate_mbps = min(rates)
+                max_rate_mbps = max(rates)
+
+            # Sort entries by packet count descending
+            sorted_entries = sorted(rate_counts.items(), key=lambda x: x[1]["count"], reverse=True)
+            dom_k, dom_v = sorted_entries[0]
+            dominant_rate_mbps = dom_v.get("rate_mbps")
+            dominant_modulation = dom_v.get("modulation")
+
+            for desc, info in sorted_entries:
+                cnt = info["count"]
+                pct = round((cnt / total_phy_pkts) * 100.0, 1) if total_phy_pkts > 0 else 0.0
+                phy_dist[desc] = {
+                    "count": cnt,
+                    "rate_mbps": info.get("rate_mbps"),
+                    "modulation": info.get("modulation"),
+                    "percent": pct,
+                }
+                if len(sorted_entries) > 1:
+                    wifi_rates_list.append(f"{desc} ({pct:.0f}%)")
+                else:
+                    wifi_rates_list.append(desc)
+
+        phy_rate_dist_json = json.dumps(phy_dist) if phy_dist else None
+        wifi_rates_str = ", ".join(wifi_rates_list) if wifi_rates_list else None
         trajectory_str = json.dumps(enc["trajectory"])
 
         try:
@@ -492,11 +664,12 @@ class EncounterTracker:
                     INSERT OR REPLACE INTO encounters (
                         encounter_id, mac, serial_number, first_seen, first_seen_iso,
                         last_seen, last_seen_iso, duration_s, packet_count, transports,
-                        channels, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm, min_alt_m,
+                        channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
+                        max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm, min_alt_m,
                         max_alt_m, min_height_m, max_height_m, min_pressure_alt_m, max_pressure_alt_m,
                         max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m, area_ceil_m, area_floor_m,
                         operator_id, self_id_desc, drone_make, drone_model, trajectory_json, is_active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     enc["encounter_id"],
                     enc["mac"],
@@ -509,6 +682,12 @@ class EncounterTracker:
                     enc["packet_count"],
                     transports_str,
                     channels_str,
+                    wifi_rates_str,
+                    dominant_rate_mbps,
+                    dominant_modulation,
+                    min_rate_mbps,
+                    max_rate_mbps,
+                    phy_rate_dist_json,
                     min_rssi,
                     max_rssi,
                     avg_rssi,
@@ -636,6 +815,9 @@ def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optiona
                 "channel": p.get("channel", "N/A"),
                 "mac": p.get("mac", data["mac"]),
                 "rssi_dbm": p.get("rssi_dbm"),
+                "rate_desc": p.get("rate_desc"),
+                "rate_mbps": p.get("rate_mbps"),
+                "modulation": p.get("modulation"),
                 "serial_number": p.get("serial", data["serial_number"]),
                 "messages": decoded_msgs,
             }
@@ -869,8 +1051,17 @@ class WifiSnifferThread(threading.Thread):
                 mac_bytes = frame[radiotap_len + 10 : radiotap_len + 16]
                 mac_addr = ':'.join(f'{b:02X}' for b in mac_bytes)
 
-                # Extract RSSI if Radiotap signal field is available
-                rssi_dbm = extract_radiotap_rssi(frame)
+                # Extract PHY RF parameters (RSSI, data rate, modulation, channel freq)
+                phy_info = extract_radiotap_phy_info(frame)
+                rssi_dbm = phy_info.get("rssi_dbm")
+                rate_mbps = phy_info.get("rate_mbps")
+                modulation = phy_info.get("modulation")
+                rate_desc = phy_info.get("rate_desc")
+                bandwidth_mhz = phy_info.get("bandwidth_mhz")
+                mcs_index = phy_info.get("mcs_index")
+                guard_interval = phy_info.get("guard_interval")
+                if phy_info.get("frequency_mhz") and cur_freq == 0:
+                    cur_freq = phy_info["frequency_mhz"]
 
                 # Extract Payload
                 counter = 0
@@ -909,6 +1100,12 @@ class WifiSnifferThread(threading.Thread):
                     "channel": cur_ch,
                     "band": cur_band,
                     "frequency_mhz": cur_freq,
+                    "rate_mbps": rate_mbps,
+                    "modulation": modulation,
+                    "rate_desc": rate_desc,
+                    "bandwidth_mhz": bandwidth_mhz,
+                    "mcs_index": mcs_index,
+                    "guard_interval": guard_interval,
                     "counter": counter,
                     "mac": mac_addr,
                     "rssi_dbm": rssi_dbm,
@@ -1090,6 +1287,12 @@ class BleNrfSnifferThread(threading.Thread):
                             "channel": ch_str,
                             "band": "2.4GHz",
                             "frequency_mhz": freq_mhz,
+                            "rate_mbps": 1.0,
+                            "modulation": "GFSK",
+                            "rate_desc": "1.0 Mbps (LE 1M GFSK)",
+                            "bandwidth_mhz": 2,
+                            "mcs_index": None,
+                            "guard_interval": None,
                             "counter": counter,
                             "mac": mac.upper(),
                             "rssi_dbm": record.get("rssi_dbm"),
@@ -1289,6 +1492,12 @@ class UnifiedTelemetryLogger:
                 "serial": serial,
                 "channel": event.get("channel"),
                 "rssi_dbm": event.get("rssi_dbm"),
+                "rate_mbps": event.get("rate_mbps"),
+                "modulation": event.get("modulation"),
+                "rate_desc": event.get("rate_desc"),
+                "bandwidth_mhz": event.get("bandwidth_mhz"),
+                "mcs_index": event.get("mcs_index"),
+                "guard_interval": event.get("guard_interval"),
                 "timestamp_iso": event.get("timestamp_iso"),
                 "encounter_id": encounter_id,
             }
@@ -1316,7 +1525,8 @@ class UnifiedTelemetryLogger:
             ch_display = f"BLE {ch_raw}" if ch_raw and not str(ch_raw).startswith("BLE") else str(ch_raw or "Adv")
         else:
             ch_display = f"Ch {ch_raw}" if ch_raw and not str(ch_raw).startswith("Ch") else str(ch_raw or "")
-        rf_info = f"{band_str} {ch_display}".strip()
+        rate_tag = f" [{event['rate_desc']}]" if event.get("rate_desc") else ""
+        rf_info = f"{band_str} {ch_display}{rate_tag}".strip()
 
         dt_str = datetime.fromtimestamp(event.get("timestamp", now)).strftime("%H:%M:%S.%f")[:-3]
         enc_tag = f" {C_GRAY}({encounter_id}){C_RESET}" if encounter_id else ""
