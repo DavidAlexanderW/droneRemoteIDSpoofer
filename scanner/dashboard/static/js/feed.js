@@ -1,7 +1,9 @@
+import { calculateHaversineDistanceM } from './map.js';
+
 /**
  * Tactical Drone Remote ID Airspace Monitor - Encounters Feed Controller
  * Renders flight cards, manages live search, filter tabs, Wi-Fi channel badges,
- * and highlights repeated encounters for the same aircraft (Serial / MAC).
+ * configurable chronological / receiver distance sorting, and highlights repeated encounters.
  */
 
 export class EncountersFeedController {
@@ -12,10 +14,19 @@ export class EncountersFeedController {
     
     this.encounters = [];
     this.activeFilter = 'all'; // 'all', 'active', 'bt', 'wifi'
+    this.sortBy = 'time_desc'; // 'time_desc', 'time_asc', 'duration_desc', 'dist_asc', 'dist_desc', 'packets_desc'
     this.searchQuery = '';
     this.selectedEncounterId = null;
+    this.receiverConfig = null;
 
     this.initSearchAndFilters();
+  }
+
+  setReceiverConfig(config) {
+    this.receiverConfig = config;
+    if (this.sortBy.startsWith('dist_')) {
+      this.render();
+    }
   }
 
   initSearchAndFilters() {
@@ -48,6 +59,14 @@ export class EncountersFeedController {
         this.render();
       });
     });
+
+    const sortSelect = document.getElementById('feed-sort-select');
+    if (sortSelect) {
+      sortSelect.addEventListener('change', (e) => {
+        this.sortBy = e.target.value;
+        this.render();
+      });
+    }
   }
 
   setEncounters(encountersList) {
@@ -60,8 +79,46 @@ export class EncountersFeedController {
     this.render();
   }
 
-  filterEncounters() {
-    return this.encounters.filter(enc => {
+  getEncounterDistanceM(enc) {
+    if (!this.receiverConfig || !this.receiverConfig.enabled || this.receiverConfig.latitude == null || this.receiverConfig.longitude == null) {
+      return null;
+    }
+    const rxLat = this.receiverConfig.latitude;
+    const rxLon = this.receiverConfig.longitude;
+
+    // 1. Check latest position of drone
+    if (enc.latest_position && enc.latest_position.lat != null && enc.latest_position.lon != null && !isNaN(enc.latest_position.lat) && !isNaN(enc.latest_position.lon)) {
+      return {
+        distM: calculateHaversineDistanceM(rxLat, rxLon, enc.latest_position.lat, enc.latest_position.lon),
+        isPilot: false,
+      };
+    }
+
+    // 2. Check latest trajectory point
+    if (enc.trajectory && enc.trajectory.length > 0) {
+      const valid = enc.trajectory.filter(pt => Array.isArray(pt) && pt.length >= 2 && !isNaN(pt[0]) && !isNaN(pt[1]));
+      if (valid.length > 0) {
+        const last = valid[valid.length - 1];
+        return {
+          distM: calculateHaversineDistanceM(rxLat, rxLon, last[0], last[1]),
+          isPilot: false,
+        };
+      }
+    }
+
+    // 3. Fallback to pilot / GCS coordinates if drone coordinates unacquired
+    if (enc.pilot_lat != null && enc.pilot_lon != null && !isNaN(enc.pilot_lat) && !isNaN(enc.pilot_lon)) {
+      return {
+        distM: calculateHaversineDistanceM(rxLat, rxLon, enc.pilot_lat, enc.pilot_lon),
+        isPilot: true,
+      };
+    }
+
+    return null;
+  }
+
+  filterAndSortEncounters() {
+    const filtered = this.encounters.filter(enc => {
       // 1. Tab filter
       if (this.activeFilter === 'active' && !enc.is_active) return false;
       if (this.activeFilter === 'bt') {
@@ -92,6 +149,50 @@ export class EncountersFeedController {
 
       return true;
     });
+
+    // Compute distance info for each encounter
+    filtered.forEach(enc => {
+      const dInfo = this.getEncounterDistanceM(enc);
+      enc._distInfo = dInfo;
+      enc._distM = dInfo ? dInfo.distM : null;
+      enc._distIsPilot = dInfo ? dInfo.isPilot : false;
+    });
+
+    // Sort according to active sort mode
+    if (this.sortBy === 'dist_asc') {
+      const withDist = filtered.filter(e => e._distM != null).sort((a, b) => a._distM - b._distM);
+      const withoutDist = filtered.filter(e => e._distM == null).sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+      return { withDist, withoutDist, isDistanceMode: true };
+    }
+
+    if (this.sortBy === 'dist_desc') {
+      const withDist = filtered.filter(e => e._distM != null).sort((a, b) => b._distM - a._distM);
+      const withoutDist = filtered.filter(e => e._distM == null).sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+      return { withDist, withoutDist, isDistanceMode: true };
+    }
+
+    if (this.sortBy === 'time_asc') {
+      const sorted = [...filtered].sort((a, b) => (a.first_seen || a.last_seen || 0) - (b.first_seen || b.last_seen || 0));
+      return { withDist: sorted, withoutDist: [], isDistanceMode: false };
+    }
+
+    if (this.sortBy === 'duration_desc') {
+      const sorted = [...filtered].sort((a, b) => {
+        const durA = a.duration_s != null ? a.duration_s : ((a.last_seen || 0) - (a.first_seen || 0));
+        const durB = b.duration_s != null ? b.duration_s : ((b.last_seen || 0) - (b.first_seen || 0));
+        return durB - durA;
+      });
+      return { withDist: sorted, withoutDist: [], isDistanceMode: false };
+    }
+
+    if (this.sortBy === 'packets_desc') {
+      const sorted = [...filtered].sort((a, b) => (b.packet_count || 0) - (a.packet_count || 0));
+      return { withDist: sorted, withoutDist: [], isDistanceMode: false };
+    }
+
+    // Default: 'time_desc' (Latest Seen First)
+    const sorted = [...filtered].sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+    return { withDist: sorted, withoutDist: [], isDistanceMode: false };
   }
 
   /**
@@ -100,7 +201,6 @@ export class EncountersFeedController {
   formatChannelBadge(transports = [], channels = []) {
     if (!channels || channels.length === 0) return '';
     const isWifi = transports.some(t => t.toLowerCase().includes('wifi') || t.toLowerCase().includes('nan'));
-    const isBle = transports.some(t => t.toLowerCase().includes('bt') || t.toLowerCase().includes('ble'));
 
     const formattedList = channels.map(ch => {
       const num = parseInt(ch, 10);
@@ -114,13 +214,110 @@ export class EncountersFeedController {
     return `<span class="pill-chip channel-pill" title="Radio Frequency Channels">${formattedList.join(', ')}</span>`;
   }
 
-  render() {
-    const filtered = this.filterEncounters();
-    if (this.countBadge) {
-      this.countBadge.textContent = filtered.length;
+  renderCard(enc, isDistanceMode, aircraftFlightCounts, selectedAircraftKey) {
+    const isSelected = enc.encounter_id === this.selectedEncounterId;
+    const aircraftKey = enc.serial_number || enc.mac;
+    const totalDroneFlights = aircraftKey ? (aircraftFlightCounts.get(aircraftKey) || 1) : 1;
+    const isSameAircraft = selectedAircraftKey && (aircraftKey === selectedAircraftKey) && !isSelected;
+    const isDimmed = selectedAircraftKey && (aircraftKey !== selectedAircraftKey) && !isSelected;
+
+    const statusClass = enc.is_active ? 'active' : '';
+    const displaySerial = enc.serial_number || enc.mac || enc.encounter_id.slice(0, 12);
+    const displayTime = enc.last_seen_iso ? new Date(enc.last_seen_iso).toLocaleTimeString() : '--:--';
+    const durationStr = enc.duration_s != null ? `${Math.round(enc.duration_s)}s` : '';
+    const pktCount = enc.packet_count || 0;
+    const pktStr = `${pktCount} pkt${pktCount === 1 ? '' : 's'}`;
+    const metaDurationPkts = durationStr ? `${durationStr} · ${pktStr}` : pktStr;
+
+    const maxAltStr = enc.max_alt_m != null ? `${Math.round(enc.max_alt_m)}m` : 'N/A';
+    const maxSpeedStr = enc.max_speed_mps != null ? `${Math.round(enc.max_speed_mps)}m/s` : 'N/A';
+
+    // Receiver Distance Badge
+    let distBadge = '';
+    if (enc._distM != null) {
+      const distStr = enc._distM >= 1000 ? `${(enc._distM / 1000).toFixed(2)} km` : `${Math.round(enc._distM)} m`;
+      const isPilot = Boolean(enc._distIsPilot);
+      distBadge = `<span class="pill-chip rx-dist-pill ${isDistanceMode ? 'highlight-sort' : ''}" title="${isPilot ? 'Pilot / GCS Distance to Ground Station' : 'Aircraft Distance to Ground Station'}">📡 ${isPilot ? 'GCS: ' : ''}${distStr}</span>`;
+    } else if (isDistanceMode) {
+      distBadge = `<span class="pill-chip rx-dist-pill no-fix" title="No GNSS position coordinates recorded">📡 No Range</span>`;
     }
 
-    if (filtered.length === 0) {
+    // Transports & Channel Chips
+    const transportChips = (enc.transports || []).map(t => {
+      const clean = t.toLowerCase().trim();
+      return `<span class="pill-chip ${clean}">${clean.toUpperCase()}</span>`;
+    }).join(' ');
+
+    const channelBadge = this.formatChannelBadge(enc.transports, enc.channels);
+
+    // Operator ID Badge
+    const operatorHtml = enc.operator_id ? `
+      <div class="card-operator-row">
+        <span class="operator-badge selectable-text" title="Public CAA Registered Operator ID (Select to copy)">
+          <span class="caa-tag">CAA</span> ${enc.operator_id}
+        </span>
+      </div>
+    ` : '';
+
+    // Drone Make & Model Badge
+    let modelHtml = '';
+    if (enc.drone_make || enc.drone_model) {
+      const fullModel = [enc.drone_make, enc.drone_model].filter(Boolean).join(' ');
+      modelHtml = `
+        <div class="card-model-row">
+          <span class="drone-model-pill" title="Inferred / Registered Drone Make & Model">
+            <span class="drone-icon">🚁</span> ${fullModel}
+          </span>
+        </div>
+      `;
+    }
+
+    // Same drone repeated encounters indicator
+    let sameDroneBadge = '';
+    if (isSameAircraft) {
+      sameDroneBadge = `<span class="same-drone-pill">🔁 SAME AIRCRAFT</span>`;
+    } else if (totalDroneFlights > 1) {
+      sameDroneBadge = `<span class="repeat-count-pill" title="Total ${totalDroneFlights} flights detected for this aircraft">🔁 ${totalDroneFlights} FLIGHTS</span>`;
+    }
+
+    let cardClasses = 'encounter-card';
+    if (isSelected) cardClasses += ' selected';
+    if (isSameAircraft) cardClasses += ' same-aircraft-highlight';
+    if (isDimmed) cardClasses += ' dimmed-card';
+
+    return `
+      <div class="${cardClasses}" data-id="${enc.encounter_id}" data-key="${aircraftKey || ''}">
+        <div class="card-top">
+          <div class="card-target-id">
+            <span class="card-status-indicator ${statusClass}"></span>
+            <span class="card-serial selectable-text" title="Aircraft Identifier (Select to copy)">${displaySerial}</span>
+          </div>
+          <div class="card-time">${displayTime} (${metaDurationPkts})</div>
+        </div>
+
+        ${sameDroneBadge}
+        ${modelHtml}
+        ${operatorHtml}
+
+        <div class="card-meta-row">
+          <div class="card-transports">${transportChips} ${channelBadge} ${distBadge}</div>
+          <div class="card-stats">
+            <span>Alt: <b>${maxAltStr}</b></span> · <span>Spd: <b>${maxSpeedStr}</b></span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  render() {
+    const { withDist, withoutDist, isDistanceMode } = this.filterAndSortEncounters();
+    const totalCount = withDist.length + withoutDist.length;
+
+    if (this.countBadge) {
+      this.countBadge.textContent = totalCount;
+    }
+
+    if (totalCount === 0) {
       this.listContainer.innerHTML = `
         <div class="empty-state">
           <p>No encounters matching current filter.</p>
@@ -145,90 +342,25 @@ export class EncountersFeedController {
     const selectedAircraftKey = selectedEnc ? (selectedEnc.serial_number || selectedEnc.mac) : null;
 
     let html = '';
-    filtered.forEach(enc => {
-      const isSelected = enc.encounter_id === this.selectedEncounterId;
-      const aircraftKey = enc.serial_number || enc.mac;
-      const totalDroneFlights = aircraftKey ? (aircraftFlightCounts.get(aircraftKey) || 1) : 1;
-      const isSameAircraft = selectedAircraftKey && (aircraftKey === selectedAircraftKey) && !isSelected;
-      const isDimmed = selectedAircraftKey && (aircraftKey !== selectedAircraftKey) && !isSelected;
 
-      const statusClass = enc.is_active ? 'active' : '';
-      const displaySerial = enc.serial_number || enc.mac || enc.encounter_id.slice(0, 12);
-      const displayTime = enc.last_seen_iso ? new Date(enc.last_seen_iso).toLocaleTimeString() : '--:--';
-      const durationStr = enc.duration_s != null ? `${Math.round(enc.duration_s)}s` : '';
-      const pktCount = enc.packet_count || 0;
-      const pktStr = `${pktCount} pkt${pktCount === 1 ? '' : 's'}`;
-      const metaDurationPkts = durationStr ? `${durationStr} · ${pktStr}` : pktStr;
+    // 1. Render primary sorted encounters list
+    withDist.forEach(enc => {
+      html += this.renderCard(enc, isDistanceMode, aircraftFlightCounts, selectedAircraftKey);
+    });
 
-      const maxAltStr = enc.max_alt_m != null ? `${Math.round(enc.max_alt_m)}m` : 'N/A';
-      const maxSpeedStr = enc.max_speed_mps != null ? `${Math.round(enc.max_speed_mps)}m/s` : 'N/A';
-
-      // Transports & Channel Chips
-      const transportChips = (enc.transports || []).map(t => {
-        const clean = t.toLowerCase().trim();
-        return `<span class="pill-chip ${clean}">${clean.toUpperCase()}</span>`;
-      }).join(' ');
-
-      const channelBadge = this.formatChannelBadge(enc.transports, enc.channels);
-
-      // Operator ID Badge
-      const operatorHtml = enc.operator_id ? `
-        <div class="card-operator-row">
-          <span class="operator-badge selectable-text" title="Public CAA Registered Operator ID (Select to copy)">
-            <span class="caa-tag">CAA</span> ${enc.operator_id}
-          </span>
-        </div>
-      ` : '';
-
-      // Drone Make & Model Badge
-      let modelHtml = '';
-      if (enc.drone_make || enc.drone_model) {
-        const fullModel = [enc.drone_make, enc.drone_model].filter(Boolean).join(' ');
-        modelHtml = `
-          <div class="card-model-row">
-            <span class="drone-model-pill" title="Inferred / Registered Drone Make & Model">
-              <span class="drone-icon">🚁</span> ${fullModel}
-            </span>
-          </div>
-        `;
-      }
-
-      // Same drone repeated encounters indicator
-      let sameDroneBadge = '';
-      if (isSameAircraft) {
-        sameDroneBadge = `<span class="same-drone-pill">🔁 SAME AIRCRAFT</span>`;
-      } else if (totalDroneFlights > 1) {
-        sameDroneBadge = `<span class="repeat-count-pill" title="Total ${totalDroneFlights} flights detected for this aircraft">🔁 ${totalDroneFlights} FLIGHTS</span>`;
-      }
-
-      let cardClasses = 'encounter-card';
-      if (isSelected) cardClasses += ' selected';
-      if (isSameAircraft) cardClasses += ' same-aircraft-highlight';
-      if (isDimmed) cardClasses += ' dimmed-card';
-
+    // 2. Render encounters without distance fixes in a distinct section when sorting by distance
+    if (isDistanceMode && withoutDist.length > 0) {
       html += `
-        <div class="${cardClasses}" data-id="${enc.encounter_id}" data-key="${aircraftKey || ''}">
-          <div class="card-top">
-            <div class="card-target-id">
-              <span class="card-status-indicator ${statusClass}"></span>
-              <span class="card-serial selectable-text" title="Aircraft Identifier (Select to copy)">${displaySerial}</span>
-            </div>
-            <div class="card-time">${displayTime} (${metaDurationPkts})</div>
-          </div>
-
-          ${sameDroneBadge}
-          ${modelHtml}
-          ${operatorHtml}
-
-          <div class="card-meta-row">
-            <div class="card-transports">${transportChips} ${channelBadge}</div>
-            <div class="card-stats">
-              <span>Alt: <b>${maxAltStr}</b></span> · <span>Spd: <b>${maxSpeedStr}</b></span>
-            </div>
-          </div>
+        <div class="feed-section-divider">
+          <span class="divider-line"></span>
+          <span class="divider-text">NO GNSS RANGE FIX (${withoutDist.length})</span>
+          <span class="divider-line"></span>
         </div>
       `;
-    });
+      withoutDist.forEach(enc => {
+        html += this.renderCard(enc, isDistanceMode, aircraftFlightCounts, selectedAircraftKey);
+      });
+    }
 
     this.listContainer.innerHTML = html;
 

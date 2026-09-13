@@ -460,10 +460,18 @@ body.has-scrubber #tactical-workspace {
   cursor: pointer;
 }
 
-/* Filter Tabs */
+/* Filter Tabs & Sort Controls */
+.feed-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
 .feed-filter-tabs {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
 
 .filter-tab {
@@ -472,10 +480,11 @@ body.has-scrubber #tactical-workspace {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
-  padding: 4px 8px;
+  padding: 3px 6px;
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.15s;
+  white-space: nowrap;
 }
 
 .filter-tab:hover {
@@ -487,6 +496,83 @@ body.has-scrubber #tactical-workspace {
   background: rgba(0, 240, 255, 0.15);
   border-color: var(--accent-cyan);
   color: var(--accent-cyan);
+}
+
+.feed-sort-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.feed-sort-select {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent-cyan);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.2s ease;
+  height: 24px;
+}
+
+.feed-sort-select:hover,
+.feed-sort-select:focus {
+  border-color: var(--accent-cyan);
+  background: rgba(15, 23, 42, 1);
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.25);
+}
+
+.feed-sort-select option {
+  background: #0f172a;
+  color: #f1f5f9;
+}
+
+/* Feed Section Divider */
+.feed-section-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 6px 0;
+  padding: 0 4px;
+}
+
+.feed-section-divider .divider-line {
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.feed-section-divider .divider-text {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.8px;
+  white-space: nowrap;
+}
+
+/* Range Badge in Feed Card */
+.pill-chip.rx-dist-pill {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  font-weight: 700;
+}
+
+.pill-chip.rx-dist-pill.highlight-sort {
+  border-color: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.4);
+}
+
+.pill-chip.rx-dist-pill.no-fix {
+  background: rgba(100, 116, 139, 0.15);
+  border: 1px solid rgba(100, 116, 139, 0.3);
+  color: #94a3b8;
+  font-weight: normal;
 }
 
 /* ==========================================================================
@@ -985,7 +1071,22 @@ body.has-scrubber #tactical-workspace {
 
 /* Pilot Marker */
 .pilot-marker-icon {
-  filter: drop-shadow(0 0 8px var(--accent-green));
+  filter: drop-shadow(0 0 10px var(--accent-green));
+}
+
+@keyframes pilotRadarPulse {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(2.3);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.3);
+    opacity: 0;
+  }
 }
 
 /* ==========================================================================
@@ -1313,6 +1414,12 @@ body.has-scrubber #tactical-workspace {
   color: var(--accent-green);
 }
 
+.comp-status-pill.partial {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #f59e0b;
+}
+
 .comp-status-pill.non-compliant {
   background: rgba(239, 68, 68, 0.15);
   border: 1px solid rgba(239, 68, 68, 0.4);
@@ -1404,6 +1511,20 @@ body.has-scrubber #tactical-workspace {
 
 .compliance-item.passed .comp-icon {
   color: var(--accent-green);
+}
+
+.compliance-item.zeroed {
+  border: 1px dashed rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.compliance-item.zeroed .comp-name {
+  color: #fcd34d;
+}
+
+.compliance-item.zeroed .comp-icon {
+  color: #f59e0b;
+  font-weight: 700;
 }
 
 .compliance-item.failed .comp-icon {
@@ -1806,6 +1927,26 @@ body.has-scrubber #tactical-workspace {
 .astm-tag.self-id { background: rgba(139, 92, 246, 0.15); border-color: #8b5cf6; color: #c4b5fd; }
 .astm-tag.system { background: rgba(236, 72, 153, 0.15); border-color: #ec4899; color: #fbcfe8; }
 .astm-tag.auth { background: rgba(14, 165, 233, 0.15); border-color: #0ea5e9; color: #7dd3fc; }
+
+/* Intermediate Styling for Present but Zeroed-Out / Unpopulated ASTM Blocks */
+.astm-tag.zeroed {
+  opacity: 0.65;
+  border-style: dashed !important;
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+  color: #94a3b8 !important;
+}
+
+.astm-tag.zeroed .zero-badge {
+  font-size: 8.5px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.09);
+  color: #cbd5e1;
+  margin-left: 3px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
 
 .btn-inspect-pkt {
   background: rgba(0, 240, 255, 0.15);

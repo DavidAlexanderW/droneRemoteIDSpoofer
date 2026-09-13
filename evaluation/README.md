@@ -10,6 +10,7 @@ This directory contains the benchmarking harnesses, automated sweep orchestrator
 evaluation/
 ├── ble_capacity.py            # Core BLE benchmark sweep harness (raw HCI injection)
 ├── wifi_capacity.py           # Core Wi-Fi benchmark sweep harness (raw AF_PACKET 802.11)
+├── hopping_evaluation.py      # Wi-Fi monitor mode channel switching latency & scanner calibration
 ├── run_ble_benchmark.py       # Automated multi-mode & multi-adapter BLE sweep orchestrator
 │
 ├── plot_common.py             # Shared plotting & metric normalization engine (Seaborn/Matplotlib)
@@ -62,6 +63,27 @@ Sweeps drone swarms over raw 802.11 monitor mode interfaces:
 sudo .venv/bin/python evaluation/wifi_capacity.py \
   --interface wlan1 --channels 6,149 --drones 10,25,50,100,150,200 \
   --out evaluation/data/wifi_capacity_comparison.json
+```
+
+### D. Wi-Fi Channel Hopping Latency & Calibration (`hopping_evaluation.py`)
+Measures exact monitor mode channel switching latencies, demonstrating that switching latency is **governed by target frequency** (rather than frequency jump distance $\Delta f$) with near source-band invariance. Evaluates the complete 4-phase lifecycle (Previous Frequency Drain $\rightarrow$ RF Synthesizer Blind Spot $\rightarrow$ Physical Target Lock $\rightarrow$ Command Completion). Supports active pulse injection via an auxiliary interface (`--tx-interface`) to provide deterministic ground-truth timing:
+
+```bash
+# 1. Active Injection Mode: Transmit deterministic 500 Hz calibration pulses from wlan0 while switching on wlx00c0cabb1654:
+sudo .venv/bin/python evaluation/hopping_evaluation.py \
+  -i wlx00c0cabb1654 --tx-interface wlan0 --pulse-rate 500 --plot
+
+# 2. Passive Ambient Sniffing Mode on single interface:
+sudo .venv/bin/python evaluation/hopping_evaluation.py -i wlx00c0cabb1654 --plot
+
+# 3. Replay exact scanner sequence for 10 cycles (ratio k=1):
+sudo .venv/bin/python evaluation/hopping_evaluation.py -i wlx00c0cabb1654 --mode scanner_sequence --cycles 10
+
+# 4. Pairwise N x N matrix across all channels:
+sudo .venv/bin/python evaluation/hopping_evaluation.py -i wlx00c0cabb1654 --mode matrix -n 10
+
+# 5. Dry-run simulation (no root / physical hardware required):
+.venv/bin/python evaluation/hopping_evaluation.py --mock --plot
 ```
 
 ---

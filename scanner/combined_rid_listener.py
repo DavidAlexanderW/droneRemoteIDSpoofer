@@ -122,6 +122,17 @@ def get_freq_for_channel(ch: int) -> int:
     return 0
 
 
+def get_channel_for_freq(freq: int) -> int:
+    """Calculates 802.11 channel number from center frequency in MHz."""
+    if freq == 2484:
+        return 14
+    elif 2412 <= freq <= 2472:
+        return (freq - 2407) // 5
+    elif 5000 <= freq <= 5900:
+        return (freq - 5000) // 5
+    return 0
+
+
 def extract_radiotap_phy_info(frame: bytes) -> Dict[str, Any]:
     """
     Extracts physical layer RF parameters (RSSI, data rate, modulation, frequency, channel flags,
@@ -319,22 +330,90 @@ def extract_radiotap_rssi(frame: bytes) -> Optional[int]:
 
 
 class SharedChannelState:
-    """Thread-safe state holding the current active Wi-Fi channel and band."""
-    def __init__(self, initial_channel: int = 6):
+    """
+    Thread-safe state holding the current active Wi-Fi channel, band, and frequency.
+    Supports transition-aware packet attribution:
+    - Retains previous channel for drain_retention_s (default: 5ms) after switch start.
+    - Honors physical radiotap frequency header as ground-truth when available.
+    """
+    def __init__(self, initial_channel: int = 6, drain_retention_ms: float = 5.0):
         self.lock = threading.Lock()
         self.channel = initial_channel
         self.band = get_band_for_channel(initial_channel)
         self.frequency = get_freq_for_channel(initial_channel)
+        self.previous_channel = initial_channel
+        self.previous_band = self.band
+        self.previous_frequency = self.frequency
+        self.target_channel = initial_channel
+        self.target_band = self.band
+        self.target_frequency = self.frequency
+        self.is_switching = False
+        self.switch_start_time = 0.0
+        self.drain_retention_s = max(0.0, drain_retention_ms / 1000.0)
         self.last_switch_time = time.time()
         self.total_switches = 0
 
-    def update(self, new_channel: int):
+    def start_switch(self, target_channel: int, source_channel: Optional[int] = None):
+        """Signals start of physical channel transition."""
         with self.lock:
+            src = source_channel if source_channel is not None else self.channel
+            self.previous_channel = src
+            self.previous_band = get_band_for_channel(src)
+            self.previous_frequency = get_freq_for_channel(src)
+            self.target_channel = target_channel
+            self.target_band = get_band_for_channel(target_channel)
+            self.target_frequency = get_freq_for_channel(target_channel)
+            self.is_switching = True
+            self.switch_start_time = time.time()
+
+    def finish_switch(self, target_channel: int):
+        """Signals completion of channel switch command."""
+        with self.lock:
+            self.channel = target_channel
+            self.band = get_band_for_channel(target_channel)
+            self.frequency = get_freq_for_channel(target_channel)
+            self.target_channel = target_channel
+            self.is_switching = False
+            self.last_switch_time = time.time()
+            self.total_switches += 1
+
+    def update(self, new_channel: int):
+        """Direct channel update (backward-compatible)."""
+        with self.lock:
+            self.previous_channel = self.channel
+            self.previous_band = self.band
+            self.previous_frequency = self.frequency
             self.channel = new_channel
             self.band = get_band_for_channel(new_channel)
             self.frequency = get_freq_for_channel(new_channel)
+            self.target_channel = new_channel
+            self.target_band = self.band
+            self.target_frequency = self.frequency
+            self.is_switching = False
             self.last_switch_time = time.time()
             self.total_switches += 1
+
+    def resolve_channel(self, pkt_ts: float, radiotap_freq: Optional[int] = None) -> Tuple[int, str, int]:
+        """
+        Resolves the true physical channel, band, and frequency for a captured frame:
+        1. If valid radiotap_freq is present, resolves directly from radiotap.
+        2. If switching and packet arrived within drain retention window (< 5ms), attributes to previous channel.
+        3. If switching and packet arrived after drain window, attributes to target channel.
+        4. Otherwise returns the currently active channel.
+        """
+        if radiotap_freq and radiotap_freq > 0:
+            ch = get_channel_for_freq(radiotap_freq)
+            if ch > 0:
+                return ch, get_band_for_channel(ch), radiotap_freq
+
+        with self.lock:
+            if self.is_switching:
+                elapsed = pkt_ts - self.switch_start_time
+                if elapsed < self.drain_retention_s:
+                    return self.previous_channel, self.previous_band, self.previous_frequency
+                else:
+                    return self.target_channel, self.target_band, self.target_frequency
+            return self.channel, self.band, self.frequency
 
     def get(self) -> Tuple[int, str, int, float]:
         with self.lock:
@@ -837,10 +916,12 @@ class WifiChannelHopperThread(threading.Thread):
     """
     Dedicated thread executing the Wi-Fi Remote ID channel hopping schedule:
     - 2.4 GHz Social Channel: Ch 6 (1000 ms dwell)
-    - 2.4 GHz Non-Social Channels: (200 ms dwell each, 30 ms intraband switch)
-    - 5.8 GHz Social Channel: Ch 149 (1000 ms dwell, 50 ms interband switch)
-    - 5.8 GHz Non-Social Channels: (200 ms dwell each, 30 ms intraband switch)
+    - 2.4 GHz Non-Social Channels: (200 ms dwell each)
+    - 5.8 GHz Social Channel: Ch 149 (1000 ms dwell)
+    - 5.8 GHz Non-Social Channels: (200 ms dwell each)
     - Configurable non-social ratio (2k on 2.4GHz for every k on 5.8GHz)
+    - Lead-Time Dwell Compensation: Compensates for early RF lock (~40ms on 2.4GHz)
+      by adjusting remaining post-switch sleep time to achieve exact on-air dwell.
     """
     def __init__(
         self,
@@ -849,8 +930,8 @@ class WifiChannelHopperThread(threading.Thread):
         non_social_ratio_k: int = 1,
         social_dwell_ms: int = 1000,
         non_social_dwell_ms: int = 200,
-        intraband_delay_ms: int = 30,
-        interband_delay_ms: int = 50,
+        lead_time_2g_ms: int = 40,
+        lead_time_5g_ms: int = 0,
     ):
         super().__init__(name="WifiHopperThread", daemon=True)
         self.interface = interface
@@ -858,8 +939,8 @@ class WifiChannelHopperThread(threading.Thread):
         self.k = max(1, non_social_ratio_k)
         self.social_dwell_s = social_dwell_ms / 1000.0
         self.non_social_dwell_s = non_social_dwell_ms / 1000.0
-        self.intraband_delay_s = intraband_delay_ms / 1000.0
-        self.interband_delay_s = interband_delay_ms / 1000.0
+        self.lead_time_2g_s = max(0.0, lead_time_2g_ms / 1000.0)
+        self.lead_time_5g_s = max(0.0, lead_time_5g_ms / 1000.0)
         self.running = False
         self.current_channel = 6
 
@@ -907,28 +988,32 @@ class WifiChannelHopperThread(threading.Thread):
 
         return False
 
-    def _hop_step(self, target_channel: int, dwell_time: float, switch_delay: float):
+    def _hop_step(self, target_channel: int, target_dwell_s: float):
         if not self.running:
             return
 
-        if switch_delay > 0:
-            time.sleep(switch_delay)
+        lead_time_s = self.lead_time_2g_s if target_channel <= 14 else self.lead_time_5g_s
 
-        if not self.running:
-            return
-
+        self.channel_state.start_switch(target_channel, source_channel=self.current_channel)
         success = self._set_channel(target_channel)
         if success:
             self.current_channel = target_channel
-            self.channel_state.update(target_channel)
-        time.sleep(dwell_time)
+        self.channel_state.finish_switch(target_channel)
+
+        if not self.running:
+            return
+
+        # Compensate for RF receiving lead time achieved during switch command
+        remaining_dwell_s = max(0.010, target_dwell_s - lead_time_s)
+        time.sleep(remaining_dwell_s)
 
     def run(self):
         self.running = True
         logger.info(
             f"[*] Wi-Fi Hopper started on {self.interface} "
             f"(2.4G Non-Social: {self.n_2g_non_social}/cycle, 5.8G Non-Social: {self.n_5g_non_social}/cycle, "
-            f"Social Dwell: {self.social_dwell_s*1000:.0f}ms, Non-Social Dwell: {self.non_social_dwell_s*1000:.0f}ms)"
+            f"Social Dwell: {self.social_dwell_s*1000:.0f}ms, Non-Social Dwell: {self.non_social_dwell_s*1000:.0f}ms, "
+            f"2.4G Lead Compensation: {self.lead_time_2g_s*1000:.0f}ms)"
         )
 
         self._set_channel(SOCIAL_CHANNEL_2G)
@@ -936,8 +1021,8 @@ class WifiChannelHopperThread(threading.Thread):
 
         try:
             while self.running:
-                # --- Step 1: 2.4 GHz Social Channel (Ch 6) ---
-                self._hop_step(SOCIAL_CHANNEL_2G, self.social_dwell_s, self.interband_delay_s)
+                # --- Step 1: 2.4 GHz Social Channel (Ch 6) #1 ---
+                self._hop_step(SOCIAL_CHANNEL_2G, self.social_dwell_s)
 
                 # --- Step 2: 2.4 GHz Non-Social Channels (2k channels) ---
                 for _ in range(self.n_2g_non_social):
@@ -945,18 +1030,21 @@ class WifiChannelHopperThread(threading.Thread):
                         break
                     ch_2g = NON_SOCIAL_CHANNELS_2G[self.idx_2g % len(NON_SOCIAL_CHANNELS_2G)]
                     self.idx_2g += 1
-                    self._hop_step(ch_2g, self.non_social_dwell_s, self.intraband_delay_s)
+                    self._hop_step(ch_2g, self.non_social_dwell_s)
 
-                # --- Step 3: 5.8 GHz Social Channel (Ch 149) ---
-                self._hop_step(SOCIAL_CHANNEL_5G, self.social_dwell_s, self.interband_delay_s)
+                # --- Step 3: 2.4 GHz Social Channel (Ch 6) #2 (Priority Channel 6 Return) ---
+                self._hop_step(SOCIAL_CHANNEL_2G, self.social_dwell_s)
 
-                # --- Step 4: 5.8 GHz Non-Social Channels (k channels) ---
+                # --- Step 4: 5.8 GHz Social Channel (Ch 149) ---
+                self._hop_step(SOCIAL_CHANNEL_5G, self.social_dwell_s)
+
+                # --- Step 5: 5.8 GHz Non-Social Channels (k channels) ---
                 for _ in range(self.n_5g_non_social):
                     if not self.running:
                         break
                     ch_5g = NON_SOCIAL_CHANNELS_5G[self.idx_5g % len(NON_SOCIAL_CHANNELS_5G)]
                     self.idx_5g += 1
-                    self._hop_step(ch_5g, self.non_social_dwell_s, self.intraband_delay_s)
+                    self._hop_step(ch_5g, self.non_social_dwell_s)
 
         except Exception as e:
             if self.running:
@@ -1014,7 +1102,6 @@ class WifiSnifferThread(threading.Thread):
                     continue
 
                 ts = time.time()
-                cur_ch, cur_band, cur_freq, _ = self.channel_state.get()
 
                 # Fast check for ASTM OUI (FA:0B:BC) in Vendor Specific IEs (0xDD) or NAN Action frames
                 vendor_ie_idx = -1
@@ -1060,8 +1147,7 @@ class WifiSnifferThread(threading.Thread):
                 bandwidth_mhz = phy_info.get("bandwidth_mhz")
                 mcs_index = phy_info.get("mcs_index")
                 guard_interval = phy_info.get("guard_interval")
-                if phy_info.get("frequency_mhz") and cur_freq == 0:
-                    cur_freq = phy_info["frequency_mhz"]
+                cur_ch, cur_band, cur_freq = self.channel_state.resolve_channel(ts, phy_info.get("frequency_mhz"))
 
                 # Extract Payload
                 counter = 0
@@ -1736,8 +1822,9 @@ def main():
                         help="Non-social channel ratio multiplier k (cycles 2k non-social on 2.4GHz for every k on 5.8GHz)")
     parser.add_argument("--social-dwell-ms", type=int, default=1000, help="Social channel dwell time in milliseconds (1 Hz)")
     parser.add_argument("--non-social-dwell-ms", type=int, default=200, help="Non-social channel dwell time in milliseconds (5 Hz)")
-    parser.add_argument("--intraband-delay-ms", type=int, default=30, help="Intraband channel switching delay in ms (empirical estimate, configurable for Wi-Fi chipset/driver)")
-    parser.add_argument("--interband-delay-ms", type=int, default=50, help="Interband channel switching delay in ms (empirical estimate, configurable for Wi-Fi chipset/driver)")
+    parser.add_argument("--lead-time-2g-ms", type=int, default=40, help="Hardware lead time compensation for 2.4GHz in ms (default: 40ms based on empirical RF lock timing)")
+    parser.add_argument("--lead-time-5g-ms", type=int, default=0, help="Hardware lead time compensation for 5.8GHz in ms (default: 0ms)")
+    parser.add_argument("--drain-retention-ms", type=float, default=5.0, help="Buffer drain retention window in ms for previous channel packet attribution (default: 5.0ms)")
 
     # BLE Options
     parser.add_argument("--coded", action="store_true", help="Enable Bluetooth 5 Long Range (LE Coded PHY) scanning")
@@ -1774,7 +1861,7 @@ def main():
     initial_wifi_ch = args.wifi_channel if args.wifi_channel is not None else SOCIAL_CHANNEL_2G
 
     event_queue: queue.Queue = queue.Queue()
-    channel_state = SharedChannelState(initial_channel=initial_wifi_ch)
+    channel_state = SharedChannelState(initial_channel=initial_wifi_ch, drain_retention_ms=args.drain_retention_ms)
     logger_worker = UnifiedTelemetryLogger(
         log_jsonl_path=args.log_jsonl,
         db_path=args.db_file if args.db_file else None,
@@ -1801,8 +1888,8 @@ def main():
                 non_social_ratio_k=args.non_social_ratio,
                 social_dwell_ms=args.social_dwell_ms,
                 non_social_dwell_ms=args.non_social_dwell_ms,
-                intraband_delay_ms=args.intraband_delay_ms,
-                interband_delay_ms=args.interband_delay_ms,
+                lead_time_2g_ms=args.lead_time_2g_ms,
+                lead_time_5g_ms=args.lead_time_5g_ms,
             )
             threads.append(hopper_thread)
         else:

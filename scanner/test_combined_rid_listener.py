@@ -11,6 +11,7 @@ import struct
 import time
 from scanner.combined_rid_listener import (
     SharedChannelState,
+    WifiChannelHopperThread,
     EncounterTracker,
     rehydrate_db_from_jsonl,
     decode_astm_message,
@@ -23,6 +24,7 @@ from scanner.combined_rid_listener import (
     NON_SOCIAL_CHANNELS_5G,
     get_band_for_channel,
     get_freq_for_channel,
+    get_channel_for_freq,
 )
 
 class TestCombinedRIDListener(unittest.TestCase):
@@ -34,6 +36,11 @@ class TestCombinedRIDListener(unittest.TestCase):
         self.assertEqual(get_band_for_channel(157), "5.8GHz")
         self.assertEqual(get_freq_for_channel(6), 2437)
         self.assertEqual(get_freq_for_channel(149), 5745)
+        self.assertEqual(get_channel_for_freq(2437), 6)
+        self.assertEqual(get_channel_for_freq(2412), 1)
+        self.assertEqual(get_channel_for_freq(2484), 14)
+        self.assertEqual(get_channel_for_freq(5745), 149)
+        self.assertEqual(get_channel_for_freq(5785), 157)
 
     def test_shared_channel_state(self):
         state = SharedChannelState(initial_channel=6)
@@ -47,6 +54,55 @@ class TestCombinedRIDListener(unittest.TestCase):
         self.assertEqual(ch, 149)
         self.assertEqual(band, "5.8GHz")
         self.assertEqual(freq, 5745)
+
+    def test_shared_channel_state_transitions_and_drain_retention(self):
+        state = SharedChannelState(initial_channel=6, drain_retention_ms=5.0)
+        t0 = 1000.0
+
+        # Start transition from Ch 6 to Ch 149
+        state.start_switch(target_channel=149, source_channel=6)
+        state.switch_start_time = t0
+
+        # 1. Packet arriving 2ms into switch (within 5ms drain window) -> attributed to Ch 6
+        ch, band, freq = state.resolve_channel(pkt_ts=t0 + 0.002)
+        self.assertEqual(ch, 6)
+        self.assertEqual(band, "2.4GHz")
+        self.assertEqual(freq, 2437)
+
+        # 2. Packet arriving 10ms into switch (past drain window, e.g. target RF lock) -> attributed to Ch 149
+        ch, band, freq = state.resolve_channel(pkt_ts=t0 + 0.010)
+        self.assertEqual(ch, 149)
+        self.assertEqual(band, "5.8GHz")
+        self.assertEqual(freq, 5745)
+
+        # 3. Radiotap frequency ground-truth override (e.g. hardware header says 2437 MHz)
+        ch, band, freq = state.resolve_channel(pkt_ts=t0 + 0.010, radiotap_freq=2437)
+        self.assertEqual(ch, 6)
+        self.assertEqual(band, "2.4GHz")
+        self.assertEqual(freq, 2437)
+
+        # 4. Finish transition
+        state.finish_switch(target_channel=149)
+        ch, band, freq = state.resolve_channel(pkt_ts=t0 + 0.050)
+        self.assertEqual(ch, 149)
+        self.assertEqual(band, "5.8GHz")
+        self.assertEqual(freq, 5745)
+
+    def test_wifi_channel_hopper_lead_time_compensation(self):
+        state = SharedChannelState(initial_channel=6)
+        hopper = WifiChannelHopperThread(
+            interface="wlan_test",
+            channel_state=state,
+            non_social_ratio_k=1,
+            social_dwell_ms=1000,
+            non_social_dwell_ms=200,
+            lead_time_2g_ms=40,
+            lead_time_5g_ms=0,
+        )
+        self.assertEqual(hopper.lead_time_2g_s, 0.040)
+        self.assertEqual(hopper.lead_time_5g_s, 0.000)
+        self.assertEqual(hopper.social_dwell_s, 1.0)
+        self.assertEqual(hopper.non_social_dwell_s, 0.2)
 
     def test_decode_basic_id(self):
         # Header: (MsgType 0 << 4) | proto 2 = 0x02

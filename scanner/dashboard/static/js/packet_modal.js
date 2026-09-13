@@ -117,8 +117,17 @@ export class DeepPacketInspectorController {
       const rateDesc = pkt.rate_desc || (pkt.rate_mbps ? `${pkt.rate_mbps} Mbps` : '--');
 
       // Build message block tags
-      const blockTags = (pkt.decoded_messages || []).map(msg => {
+      const blockTags = (pkt.decoded_messages || []).map((msg, idx) => {
         const type = msg.type || 'ASTM Block';
+        const isZeroed = Boolean(
+          msg.is_zeroed ||
+          (msg.msg_type === 3 && (!msg.description || msg.description.trim() === '')) ||
+          (msg.msg_type === 5 && (!msg.operator_id || msg.operator_id.trim() === '') && (!msg.id || msg.id.trim() === '')) ||
+          (msg.msg_type === 0 && (!msg.id || msg.id.trim() === '') && (!msg.ua_type || msg.ua_type === 0)) ||
+          (msg.msg_type === 1 && msg.lat == null && msg.lon == null && msg.height_m == null && msg.alt == null && (!msg.status || msg.status === 0)) ||
+          (msg.msg_type === 4 && msg.pilot_lat == null && msg.pilot_lon == null && !msg.classification_type && (!msg.operator_location_type || msg.operator_location_type === 0))
+        );
+
         let cls = 'basic-id';
         if (type.includes('Location')) cls = 'location';
         else if (type.includes('Operator')) cls = 'operator';
@@ -126,41 +135,73 @@ export class DeepPacketInspectorController {
         else if (type.includes('System')) cls = 'system';
         else if (type.includes('Auth')) cls = 'auth';
 
+        if (isZeroed) {
+          cls += ' zeroed';
+        }
+
         let extra = '';
-        if (msg.id) {
-          extra = `: ${msg.id}`;
-        } else if (msg.operator_id) {
-          extra = `: ${msg.operator_id}`;
-        } else if (msg.lat != null && msg.lon != null) {
-          let rxTag = '';
-          if (this.receiverConfig && this.receiverConfig.enabled && this.receiverConfig.latitude != null) {
-            const dM = calculateHaversineDistanceM(this.receiverConfig.latitude, this.receiverConfig.longitude, msg.lat, msg.lon);
-            const dStr = dM >= 1000 ? `${(dM / 1000).toFixed(2)}km` : `${Math.round(dM)}m`;
-            rxTag = ` • Rx:${dStr}`;
+        if (isZeroed) {
+          extra = ` <span class="zero-badge">⊘ ZEROED</span>`;
+        } else if (type.includes('Basic ID') || msg.msg_type === 0) {
+          const uaType = msg.ua_type_name ? ` (${msg.ua_type_name})` : '';
+          extra = msg.id ? `: ${msg.id}${uaType}` : (uaType ? `: ${uaType}` : '');
+        } else if (type.includes('Location') || msg.msg_type === 1) {
+          if (msg.lat != null && msg.lon != null) {
+            let rxTag = '';
+            if (this.receiverConfig && this.receiverConfig.enabled && this.receiverConfig.latitude != null) {
+              const dM = calculateHaversineDistanceM(this.receiverConfig.latitude, this.receiverConfig.longitude, msg.lat, msg.lon);
+              const dStr = dM >= 1000 ? `${(dM / 1000).toFixed(2)}km` : `${Math.round(dM)}m`;
+              rxTag = ` • Rx:${dStr}`;
+            }
+            let altTag = '';
+            if (msg.geodetic_altitude_m != null) {
+              altTag = ` • ${Math.round(msg.geodetic_altitude_m)}m MSL`;
+            } else if (msg.alt != null) {
+              altTag = ` • ${Math.round(msg.alt)}m MSL`;
+            }
+            if (msg.height_m != null) {
+              const hType = msg.height_type === 1 ? 'AGL' : 'ATO';
+              altTag += ` (H:${msg.height_m >= 0 ? '+' : ''}${Math.round(msg.height_m)}m ${hType})`;
+            }
+            let spdTag = (msg.speed_mps != null && msg.speed_mps > 0) ? ` • ${msg.speed_mps.toFixed(1)}m/s` : '';
+            let statTag = msg.status_name ? ` • ${msg.status_name}` : '';
+            extra = `: (${msg.lat.toFixed(4)}, ${msg.lon.toFixed(4)})${altTag}${spdTag}${statTag}${rxTag}`;
+          } else {
+            let altTag = '';
+            if (msg.height_m != null) {
+              const hType = msg.height_type === 1 ? 'AGL' : 'ATO';
+              altTag = ` • H:${msg.height_m >= 0 ? '+' : ''}${Math.round(msg.height_m)}m ${hType}`;
+            }
+            let statTag = msg.status_name ? ` • ${msg.status_name}` : ' • No GPS Fix';
+            let spdTag = (msg.speed_mps != null && msg.speed_mps > 0) ? ` • ${msg.speed_mps.toFixed(1)}m/s` : '';
+            extra = `: ${statTag.replace(/^ • /, '')}${altTag}${spdTag}`;
           }
-          let altTag = '';
-          if (msg.geodetic_altitude_m != null) {
-            altTag = ` • ${Math.round(msg.geodetic_altitude_m)}m MSL`;
-          }
-          if (msg.height_m != null) {
-            const hType = msg.height_type === 1 ? 'AGL' : 'ATO';
-            altTag += ` (H:${msg.height_m >= 0 ? '+' : ''}${Math.round(msg.height_m)}m ${hType})`;
-          }
-          extra = `: (${msg.lat.toFixed(4)}, ${msg.lon.toFixed(4)})${altTag}${rxTag}`;
-        } else if (type.includes('System')) {
-          let sysInfo = '';
+        } else if (type.includes('Operator') || msg.msg_type === 5) {
+          const opId = msg.operator_id || msg.id;
+          extra = opId ? `: ${opId}` : ': (Unset)';
+        } else if (type.includes('Self') || msg.msg_type === 3) {
+          const desc = msg.description || msg.desc;
+          extra = desc ? `: "${desc}"` : ': (Empty)';
+        } else if (type.includes('System') || msg.msg_type === 4) {
+          const sysParts = [];
           if (msg.pilot_lat != null && msg.pilot_lon != null) {
-            sysInfo += `Pilot: (${msg.pilot_lat.toFixed(4)}, ${msg.pilot_lon.toFixed(4)})`;
+            sysParts.push(`Pilot: (${msg.pilot_lat.toFixed(4)}, ${msg.pilot_lon.toFixed(4)})`);
           }
           if (msg.pilot_alt_m != null) {
-            sysInfo += ` • Alt:${Math.round(msg.pilot_alt_m)}m`;
+            sysParts.push(`Alt:${Math.round(msg.pilot_alt_m)}m`);
           }
-          if (msg.category_eu_name) {
-            sysInfo += ` • ${msg.category_eu_name}`;
+          if (msg.class_eu_name) {
+            sysParts.push(msg.class_eu_name);
+          } else if (msg.category_eu_name && msg.category_eu_name !== 'Undeclared') {
+            sysParts.push(msg.category_eu_name);
+          } else if (msg.classification_type_name) {
+            sysParts.push(msg.classification_type_name);
           }
-          extra = sysInfo ? `: ${sysInfo}` : '';
-        } else if (msg.description) {
-          extra = `: ${msg.description}`;
+          extra = sysParts.length > 0 ? `: ${sysParts.join(' • ')}` : '';
+        } else if (type.includes('Auth') || msg.msg_type === 2) {
+          extra = `: Page ${msg.page_number || 0}/${msg.page_count || 1}`;
+        } else if (msg.id) {
+          extra = `: ${msg.id}`;
         }
 
         return `<span class="astm-tag ${cls}">[${type}${extra}]</span>`;
@@ -202,7 +243,7 @@ export class DeepPacketInspectorController {
     this.drawerPktIdx.textContent = pkt.index;
 
     // Decoded JSON
-    this.drawerDecoded.textContent = JSON.stringify(pkt.decoded_messages || {}, null, 2);
+    this.drawerDecoded.textContent = JSON.stringify(pkt.decoded_messages || [], null, 2);
 
     // PHY Layer details
     const phyInfo = [];
@@ -217,10 +258,23 @@ export class DeepPacketInspectorController {
 
     const phyHeader = phyInfo.length > 0 ? `[PHY RF LAYER METRICS]\n${phyInfo.join('\n')}\n\n` : '';
 
-    // Base64 payloads if available
+    // Base64 payloads + Hex Dissection if available
     const b64List = pkt.messages_b64 || [];
     if (b64List.length > 0) {
-      this.drawerRaw.textContent = phyHeader + b64List.map((b64, i) => `Block #${i + 1} (Base64):\n${b64}`).join('\n\n');
+      this.drawerRaw.textContent = phyHeader + b64List.map((b64, i) => {
+        let hexStr = '';
+        let isZeroed = false;
+        try {
+          const rawB = atob(b64);
+          hexStr = Array.from(rawB).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ').toUpperCase();
+          if (rawB.length >= 25) {
+            isZeroed = rawB.slice(1, 25).split('').every(c => c.charCodeAt(0) === 0);
+          }
+        } catch (e) {}
+        const blockName = pkt.decoded_messages && pkt.decoded_messages[i] ? ` - ${pkt.decoded_messages[i].type}` : '';
+        const zeroTag = (isZeroed || (pkt.decoded_messages && pkt.decoded_messages[i]?.is_zeroed)) ? ' [⊘ ZEROED / EMPTY PAYLOAD]' : '';
+        return `Block #${i + 1}${blockName}${zeroTag} (Base64):\n${b64}\nHex Dissection:\n${hexStr}`;
+      }).join('\n\n');
     } else {
       this.drawerRaw.textContent = `${phyHeader}(Synthesized from recorded SQLite telemetry fix)\nLat: ${pkt.decoded_messages?.[1]?.lat || 'N/A'}, Lon: ${pkt.decoded_messages?.[1]?.lon || 'N/A'}`;
     }

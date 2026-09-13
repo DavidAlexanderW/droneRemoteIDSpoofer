@@ -139,7 +139,7 @@ class TestDashboardAPI(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        # Populate Mock JSONL Log
+        # Populate Mock JSONL Log with raw base64 ASTM F3411 blocks
         with open(self.jsonl_path, "w") as f:
             f.write(json.dumps({
                 "encounter_id": "enc_test_001",
@@ -152,14 +152,13 @@ class TestDashboardAPI(unittest.TestCase):
                 "modulation": "GFSK",
                 "rate_desc": "1.0 Mbps (LE 1M GFSK)",
                 "mac": "AA:BB:CC:11:22:33",
-                "serial": "1596E123456789012345",
+                "serial": "1581F5FHC255A00E90R6",
                 "counter": 1,
-                "messages_b64": [],
-                "decoded_messages": [
-                    {"type": "Basic ID", "id": "1596E123456789012345"},
-                    {"type": "Location", "lat": 47.3769, "lon": 8.5417, "alt": 450.0},
-                    {"type": "Operator ID", "operator_id": "CHE87astd57qkgc4"}
-                ]
+                # Real base64 chunks for Basic ID and System messages
+                "messages_b64": [
+                    "ARIxNTgxRjVGSEMyNTVBMDBFOTBSNgAAAA==",  # Basic ID
+                    "QQV8qjwccaEYBQEAAAAAAAADAAAAAAAAAA==",  # System (Pilot)
+                ],
             }) + "\n")
 
         self.client = TestClient(app)
@@ -215,6 +214,11 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(data["dominant_modulation"], "GFSK")
         self.assertEqual(len(data["trajectory"]), 3)
         self.assertEqual(data["pilot_lat"], 47.3765)
+        self.assertIn("conformance_blocks", data)
+        self.assertEqual(data["conformance_blocks"]["basic_id"], "passed")
+        self.assertEqual(data["conformance_blocks"]["location"], "passed")
+        self.assertEqual(data["conformance_blocks"]["system"], "passed")
+        self.assertEqual(data["conformance_blocks"]["operator"], "passed")
 
         # Also verify Encounter 2 (Wi-Fi with 90% DSSS and 10% OFDM)
         resp2 = self.client.get("/api/encounters/enc_test_002")
@@ -227,9 +231,11 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertIn("1.0 Mbps DSSS", d2["phy_rate_distribution"])
         self.assertEqual(d2["phy_rate_distribution"]["1.0 Mbps DSSS"]["percent"], 90.0)
         self.assertEqual(d2["phy_rate_distribution"]["6.0 Mbps OFDM"]["percent"], 10.0)
+        self.assertIn("conformance_blocks", d2)
 
     def test_get_encounter_packets(self):
-        """Verify Deep Packet Inspector packet stream retrieval."""
+        """Verify Deep Packet Inspector packet stream retrieval and ASTM block decoding."""
+        # 1. Test encounter with raw base64 messages in JSONL log
         resp = self.client.get("/api/encounters/enc_test_001/packets")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -241,6 +247,32 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(pkt0["modulation"], "GFSK")
         self.assertEqual(pkt0["rate_mbps"], 1.0)
         self.assertIn("decoded_messages", pkt0)
+        self.assertEqual(len(pkt0["decoded_messages"]), 2)
+        
+        # Verify decoded Basic ID block
+        basic_id_msg = pkt0["decoded_messages"][0]
+        self.assertEqual(basic_id_msg["type"], "Basic ID")
+        self.assertEqual(basic_id_msg["id"], "1581F5FHC255A00E90R6")
+        self.assertEqual(basic_id_msg["ua_type_name"], "Helicopter / Multirotor")
+        
+        # Verify decoded System block
+        sys_msg = pkt0["decoded_messages"][1]
+        self.assertEqual(sys_msg["type"], "System")
+        self.assertAlmostEqual(sys_msg["pilot_lat"], 47.37378, places=4)
+        self.assertAlmostEqual(sys_msg["pilot_lon"], 8.55002, places=4)
+
+        # 2. Test encounter synthesized from SQLite trajectory points
+        resp2 = self.client.get("/api/encounters/enc_test_002/packets")
+        self.assertEqual(resp2.status_code, 200)
+        d2 = resp2.json()
+        self.assertEqual(d2["packet_count"], 2)
+        pkt_synth = d2["packets"][0]
+        self.assertIn("decoded_messages", pkt_synth)
+        self.assertTrue(any(m["type"] == "Location" for m in pkt_synth["decoded_messages"]))
+        loc_msg = [m for m in pkt_synth["decoded_messages"] if m["type"] == "Location"][0]
+        self.assertEqual(loc_msg["lat"], 47.3800)
+        self.assertEqual(loc_msg["lon"], 8.5500)
+        self.assertEqual(loc_msg["alt"], 500.0)
 
     def test_export_geojson(self):
         """Verify GeoJSON RFC 7946 export format."""

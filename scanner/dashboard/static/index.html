@@ -92,11 +92,23 @@
           <input type="text" id="feed-search-input" placeholder="Search MAC, Serial, Operator ID..." autocomplete="off">
           <button id="feed-search-clear" class="btn-clear" style="display: none;">&times;</button>
         </div>
-        <div class="feed-filter-tabs">
-          <button class="filter-tab active" data-filter="all">All Flights</button>
-          <button class="filter-tab" data-filter="active">🔴 Active Only</button>
-          <button class="filter-tab" data-filter="bt">BLE</button>
-          <button class="filter-tab" data-filter="wifi">Wi-Fi</button>
+        <div class="feed-controls-row">
+          <div class="feed-filter-tabs">
+            <button class="filter-tab active" data-filter="all">All</button>
+            <button class="filter-tab" data-filter="active">🔴 Active</button>
+            <button class="filter-tab" data-filter="bt">BLE</button>
+            <button class="filter-tab" data-filter="wifi">Wi-Fi</button>
+          </div>
+          <div class="feed-sort-wrapper">
+            <select id="feed-sort-select" class="feed-sort-select font-mono" title="Sort Flight Encounters">
+              <option value="time_desc">⏱️ Latest Seen</option>
+              <option value="time_asc">⏳ Oldest First</option>
+              <option value="duration_desc">⏱️ Longest Duration</option>
+              <option value="dist_asc">📡 Closest to Rx</option>
+              <option value="dist_desc">📡 Furthest from Rx</option>
+              <option value="packets_desc">📦 Most Packets</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -596,7 +608,7 @@
 
   <!-- Leaflet & App JS Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script type="module" src="/js/app.js"></script>
+  <script type="module" src="/js/app.js?v=20260911_v4"></script>
 
 </body>
 </html>

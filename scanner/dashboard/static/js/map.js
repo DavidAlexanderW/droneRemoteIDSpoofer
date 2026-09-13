@@ -430,20 +430,27 @@ export class TacticalMapController {
   /**
    * Pilot / GCS Home location icon
    */
-  createPilotIcon() {
+  createPilotIcon(label = 'PILOT / GCS') {
     const svgIcon = `
-      <div class="pilot-marker-icon" style="width: 24px; height: 24px;">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="#10b981" stroke="#ffffff" stroke-width="1.5">
-          <circle cx="12" cy="7" r="4" />
-          <path d="M5.5 21a6.5 6.5 0 0 1 13 0H5.5z" />
-        </svg>
+      <div class="pilot-marker-container" style="position: relative; display: flex; flex-direction: column; align-items: center; cursor: pointer; user-select: none;">
+        <div class="pilot-pulse" style="position: absolute; width: 34px; height: 34px; top: 0; border-radius: 50%; background: rgba(16, 185, 129, 0.4); animation: pilotRadarPulse 2s infinite ease-out;"></div>
+        <div class="pilot-marker-circle" style="position: relative; width: 34px; height: 34px; background: #080c16; border: 2.5px solid #10b981; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 16px rgba(16, 185, 129, 0.9);">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="#10b981" stroke="#ffffff" stroke-width="1.2">
+            <circle cx="12" cy="7" r="4" />
+            <path d="M5.5 21a6.5 6.5 0 0 1 13 0H5.5z" />
+          </svg>
+        </div>
+        <div class="pilot-marker-badge" style="margin-top: 3px; background: rgba(8, 12, 22, 0.92); border: 1px solid #10b981; color: #34d399; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 800; padding: 1px 6px; border-radius: 3px; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,0.8); letter-spacing: 0.5px;">
+          ${label}
+        </div>
       </div>
     `;
     return L.divIcon({
       html: svgIcon,
       className: 'custom-pilot-icon',
-      iconSize: [24, 24],
-      iconAnchor: [12, 12],
+      iconSize: [80, 56],
+      iconAnchor: [40, 17],
+      popupAnchor: [0, -20],
     });
   }
 
@@ -502,6 +509,7 @@ export class TacticalMapController {
     }
 
     if (fullEncounter) {
+      fullEncounter._detailsLoaded = true;
       const idx = this.allEncounters.findIndex(e => e.encounter_id === encounterId);
       if (idx >= 0) {
         this.allEncounters[idx] = Object.assign({}, this.allEncounters[idx], fullEncounter);
@@ -509,13 +517,14 @@ export class TacticalMapController {
         this.allEncounters.push(fullEncounter);
       }
     } else {
-      // If full trajectory isn't loaded yet for this encounter, fetch it right away
+      // If full details aren't loaded yet for this encounter, fetch them once
       const existing = this.allEncounters.find(e => e.encounter_id === encounterId);
-      if (!existing || !existing.trajectory || existing.trajectory.length === 0) {
+      if (!existing || !existing._detailsLoaded) {
         try {
           const resp = await fetch(`/api/encounters/${encounterId}`);
           if (resp.ok) {
             const data = await resp.json();
+            data._detailsLoaded = true;
             const idx = this.allEncounters.findIndex(e => e.encounter_id === encounterId);
             if (idx >= 0) {
               this.allEncounters[idx] = Object.assign({}, this.allEncounters[idx], data);
@@ -524,7 +533,7 @@ export class TacticalMapController {
             }
           }
         } catch (e) {
-          console.error('Failed to load trajectory for selected encounter:', e);
+          console.error('Failed to load details for selected encounter:', e);
         }
       }
     }
@@ -532,13 +541,28 @@ export class TacticalMapController {
     this.renderAirspace();
     this.renderReceiverVector();
 
-    // Fit map bounds to selected flight trajectory
+    // Fit map bounds / pan to selected flight trajectory or pilot location
     const selected = this.allEncounters.find(e => e.encounter_id === encounterId);
-    if (selected && selected.trajectory && selected.trajectory.length > 0) {
-      const validPts = selected.trajectory.filter(pt => Array.isArray(pt) && pt.length >= 2 && !isNaN(pt[0]) && !isNaN(pt[1]));
+    if (selected) {
+      const validPts = (selected.trajectory || []).filter(pt => Array.isArray(pt) && pt.length >= 2 && !isNaN(pt[0]) && !isNaN(pt[1]));
       if (validPts.length > 0) {
         const bounds = L.latLngBounds(validPts.map(pt => [pt[0], pt[1]]));
+        if (selected.pilot_lat != null && selected.pilot_lon != null && !isNaN(selected.pilot_lat) && !isNaN(selected.pilot_lon)) {
+          bounds.extend([selected.pilot_lat, selected.pilot_lon]);
+        }
         this.map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
+      } else if (selected.latest_position && selected.latest_position.lat != null && selected.latest_position.lon != null && !isNaN(selected.latest_position.lat) && !isNaN(selected.latest_position.lon)) {
+        if (selected.pilot_lat != null && selected.pilot_lon != null && !isNaN(selected.pilot_lat) && !isNaN(selected.pilot_lon)) {
+          const bounds = L.latLngBounds([
+            [selected.latest_position.lat, selected.latest_position.lon],
+            [selected.pilot_lat, selected.pilot_lon]
+          ]);
+          this.map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
+        } else {
+          this.map.flyTo([selected.latest_position.lat, selected.latest_position.lon], 16, { animate: true });
+        }
+      } else if (selected.pilot_lat != null && selected.pilot_lon != null && !isNaN(selected.pilot_lat) && !isNaN(selected.pilot_lon)) {
+        this.map.flyTo([selected.pilot_lat, selected.pilot_lon], 16, { animate: true });
       }
     }
   }
@@ -596,24 +620,6 @@ export class TacticalMapController {
     const selectedEnc = this.allEncounters.find(e => e.encounter_id === this.selectedEncounterId);
     if (!selectedEnc) return;
 
-    if (!selectedEnc.trajectory || selectedEnc.trajectory.length === 0) {
-      fetch(`/api/encounters/${selectedEnc.encounter_id}`)
-        .then(r => r.json())
-        .then(data => {
-          if (this.selectedEncounterId === selectedEnc.encounter_id) {
-            selectedEnc.trajectory = data.trajectory || [];
-            Object.assign(selectedEnc, data);
-            this.renderAirspace();
-            const validPts = selectedEnc.trajectory.filter(pt => Array.isArray(pt) && pt.length >= 2);
-            if (validPts.length > 0) {
-              const bounds = L.latLngBounds(validPts.map(pt => [pt[0], pt[1]]));
-              this.map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
-            }
-          }
-        })
-        .catch(err => console.error('Error fetching selected flight trajectory:', err));
-    }
-
     const selectedDroneKey = selectedEnc.serial_number || selectedEnc.mac;
 
     const sameDroneEncounters = this.allEncounters.filter(e => {
@@ -624,11 +630,13 @@ export class TacticalMapController {
 
     // 1. Render other flights by the SAME drone in muted slate grey (#475569)
     sameDroneEncounters.forEach(async (enc) => {
-      if (!enc.trajectory || enc.trajectory.length === 0) {
+      if (!enc._detailsLoaded && (!enc.trajectory || enc.trajectory.length === 0)) {
+        enc._detailsLoaded = true;
         try {
           const r = await fetch(`/api/encounters/${enc.encounter_id}`);
           if (r.ok) {
             const data = await r.json();
+            data._detailsLoaded = true;
             enc.trajectory = data.trajectory || [];
             Object.assign(enc, data);
             if (this.selectedEncounterId === selectedEnc.encounter_id) {
@@ -653,22 +661,6 @@ export class TacticalMapController {
     const rawTraj = encounter.trajectory || [];
     const traj = rawTraj.filter(pt => Array.isArray(pt) && pt.length >= 2 && !isNaN(pt[0]) && !isNaN(pt[1]));
     const displayLabel = encounter.serial_number ? encounter.serial_number.slice(-6) : (encounter.mac ? encounter.mac.slice(-5) : '');
-
-    if (traj.length === 0) {
-      const pos = encounter.latest_position;
-      if (pos && pos.lat != null && pos.lon != null && !isNaN(pos.lat) && !isNaN(pos.lon)) {
-        const marker = L.marker([pos.lat, pos.lon], {
-          icon: this.createDroneIcon(encId, pos.heading_deg || 0, isSelected, encounter.is_active, displayLabel),
-          zIndexOffset: isSelected ? 2000 : 300,
-        }).addTo(this.map);
-
-        marker.on('click', () => {
-          if (this.onSelectEncounter) this.onSelectEncounter(encId);
-        });
-        this.droneMarkers.set(encId, marker);
-      }
-      return;
-    }
 
     const latlngs = traj.map(pt => [pt[0], pt[1]]);
 
@@ -704,7 +696,7 @@ export class TacticalMapController {
     }
 
     // 2. Discrete Waypoint Fix Dots (for selected encounter)
-    if (isSelected) {
+    if (isSelected && traj.length > 0) {
       const waypointGroup = L.layerGroup();
       this.activeWaypointMarkers = [];
 
@@ -843,39 +835,69 @@ export class TacticalMapController {
           }, 10);
         }
       }
+    }
 
-      // 3. Pilot / GCS Home Location & Link Line
-      if (encounter.pilot_lat != null && encounter.pilot_lon != null) {
+    // 3. Pilot / GCS Home Location & Link Line (rendered for selected flight or active flights with pilot coordinates)
+    if (encounter.pilot_lat != null && encounter.pilot_lon != null && !isNaN(encounter.pilot_lat) && !isNaN(encounter.pilot_lon)) {
+      if (isSelected || encounter.is_active) {
         const pilotLatLng = [encounter.pilot_lat, encounter.pilot_lon];
         const pilotMarker = L.marker(pilotLatLng, {
-          icon: this.createPilotIcon(),
-          zIndexOffset: 1500,
+          icon: this.createPilotIcon('PILOT / GCS'),
+          zIndexOffset: isSelected ? 3000 : 1500,
         }).bindPopup(`
-          <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 4px; color: #080c16;">
-            <b>Pilot / GCS Home Location</b><br/>
-            <b>Lat:</b> ${encounter.pilot_lat.toFixed(5)}<br/>
-            <b>Lon:</b> ${encounter.pilot_lon.toFixed(5)}<br/>
-            <b>Alt:</b> ${encounter.pilot_alt_m ? encounter.pilot_alt_m.toFixed(1) + 'm' : 'N/A'}
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px; color: #080c16; min-width: 190px;">
+            <div style="font-weight: 800; color: #059669; border-bottom: 1px solid #e2e8f0; padding-bottom: 3px; margin-bottom: 5px;">
+              🎯 Pilot / GCS Home Location
+            </div>
+            <b>Aircraft:</b> ${displayLabel || encounter.encounter_id}<br/>
+            <b>Latitude:</b> ${encounter.pilot_lat.toFixed(6)}°<br/>
+            <b>Longitude:</b> ${encounter.pilot_lon.toFixed(6)}°<br/>
+            <b>Altitude:</b> ${encounter.pilot_alt_m != null ? encounter.pilot_alt_m.toFixed(1) + 'm MSL' : 'N/A'}
           </div>
         `);
+        pilotMarker.bindTooltip(`<b>Pilot / GCS Location</b><br/>${encounter.pilot_lat.toFixed(5)}, ${encounter.pilot_lon.toFixed(5)}`, {
+          direction: 'top',
+          offset: [0, -18],
+          className: 'waypoint-leaflet-tooltip'
+        });
         pilotMarker.addTo(this.map);
         this.pilotMarkers.set(encId, pilotMarker);
 
-        const pilotLine = L.polyline([pilotLatLng, latlngs[0]], {
-          color: '#10b981',
-          weight: 1.5,
-          dashArray: '4, 4',
-          opacity: 0.7,
-        }).addTo(this.map);
-        this.pilotLines.set(encId, pilotLine);
+        // Find best anchor position for the link line (first track point or latest position)
+        let droneAnchor = null;
+        if (latlngs.length > 0) {
+          droneAnchor = latlngs[0];
+        } else if (encounter.latest_position && encounter.latest_position.lat != null && encounter.latest_position.lon != null && !isNaN(encounter.latest_position.lat) && !isNaN(encounter.latest_position.lon)) {
+          droneAnchor = [encounter.latest_position.lat, encounter.latest_position.lon];
+        }
+
+        if (droneAnchor) {
+          const pilotLine = L.polyline([pilotLatLng, droneAnchor], {
+            color: '#10b981',
+            weight: 1.5,
+            dashArray: '4, 4',
+            opacity: 0.7,
+          }).addTo(this.map);
+          this.pilotLines.set(encId, pilotLine);
+        }
       }
     }
 
-    // 4. Aircraft Marker at latest position
-    const latestPt = traj[traj.length - 1];
-    if (latestPt) {
-      const marker = L.marker([latestPt[0], latestPt[1]], {
-        icon: this.createDroneIcon(encId, latestPt[4] || 0, isSelected, encounter.is_active, displayLabel),
+    // 4. Aircraft Marker (either latest trajectory point or latest_position)
+    let dronePos = null;
+    let droneHeading = 0;
+    if (traj.length > 0) {
+      const latestPt = traj[traj.length - 1];
+      dronePos = [latestPt[0], latestPt[1]];
+      droneHeading = latestPt[4] || 0;
+    } else if (encounter.latest_position && encounter.latest_position.lat != null && encounter.latest_position.lon != null && !isNaN(encounter.latest_position.lat) && !isNaN(encounter.latest_position.lon)) {
+      dronePos = [encounter.latest_position.lat, encounter.latest_position.lon];
+      droneHeading = encounter.latest_position.heading_deg || 0;
+    }
+
+    if (dronePos) {
+      const marker = L.marker(dronePos, {
+        icon: this.createDroneIcon(encId, droneHeading, isSelected, encounter.is_active, displayLabel),
         zIndexOffset: isSelected ? 2500 : 300,
       }).addTo(this.map);
 
@@ -989,11 +1011,23 @@ export class TacticalMapController {
             count++;
           }
         });
+        if (enc.latest_position && enc.latest_position.lat != null && enc.latest_position.lon != null && !isNaN(enc.latest_position.lat) && !isNaN(enc.latest_position.lon)) {
+          bounds.extend([enc.latest_position.lat, enc.latest_position.lon]);
+          count++;
+        }
+        if (enc.pilot_lat != null && enc.pilot_lon != null && !isNaN(enc.pilot_lat) && !isNaN(enc.pilot_lon)) {
+          bounds.extend([enc.pilot_lat, enc.pilot_lon]);
+          count++;
+        }
       });
     } else {
       this.allEncounters.forEach(enc => {
         if (enc.latest_position && !isNaN(enc.latest_position.lat) && !isNaN(enc.latest_position.lon)) {
           bounds.extend([enc.latest_position.lat, enc.latest_position.lon]);
+          count++;
+        }
+        if (enc.pilot_lat != null && enc.pilot_lon != null && !isNaN(enc.pilot_lat) && !isNaN(enc.pilot_lon)) {
+          bounds.extend([enc.pilot_lat, enc.pilot_lon]);
           count++;
         }
       });

@@ -389,12 +389,27 @@ export class TelemetryInspectorController {
 
   updateLiveGauges(pt, defaultRssi = null) {
     if (!pt) {
-      document.getElementById('insp-alt').textContent = '--';
-      document.getElementById('insp-height').textContent = '--';
-      document.getElementById('insp-speed').textContent = '--';
+      const enc = this.currentEncounter;
+      const alt = (enc && enc.max_alt_m != null) ? Math.round(enc.max_alt_m) : '--';
+      const speed = (enc && enc.max_speed_mps != null && enc.max_speed_mps > 0) ? enc.max_speed_mps.toFixed(1) : '--';
+      let heightStr = '--';
+      if (enc && enc.max_height_m != null) {
+        const h = Math.round(enc.max_height_m);
+        heightStr = h >= 0 ? `+${h} ATO` : `${h} ATO`;
+      }
+      document.getElementById('insp-alt').textContent = alt;
+      document.getElementById('insp-height').textContent = heightStr;
+      document.getElementById('insp-speed').textContent = speed;
       document.getElementById('insp-heading').textContent = '--';
       document.getElementById('insp-heading-compass').textContent = '--';
       document.getElementById('insp-rssi').textContent = defaultRssi != null ? Math.round(defaultRssi) : '--';
+      
+      const rxRangeEl = document.getElementById('insp-rx-range');
+      const rxUnitEl = document.getElementById('insp-rx-unit');
+      const rxBearingEl = document.getElementById('insp-rx-bearing');
+      if (rxRangeEl) rxRangeEl.textContent = '--';
+      if (rxUnitEl) rxUnitEl.textContent = 'm';
+      if (rxBearingEl) rxBearingEl.textContent = 'Bearing: --';
       return;
     }
 
@@ -469,19 +484,50 @@ export class TelemetryInspectorController {
   }
 
   updateComplianceChecklist(encounter) {
+    const conf = encounter.conformance_blocks || {};
+    const traj = encounter.trajectory || [];
+    const latestPt = traj.length > 0 ? traj[traj.length - 1] : null;
+
+    // Helper to resolve block status strictly from empirical data
+    const getStatus = (key, hasData) => {
+      if (conf[key]) return conf[key];
+      if (hasData) return 'passed';
+      return 'failed';
+    };
+
+    const basicStatus = getStatus('basic_id', Boolean(encounter.serial_number));
+    const locStatus = getStatus('location', Boolean(traj.length > 0));
+    const sysStatus = getStatus('system', Boolean(encounter.pilot_lat != null && encounter.pilot_lon != null));
+    const opStatus = getStatus('operator', Boolean(encounter.operator_id));
+    const selfStatus = getStatus('self_id', Boolean(encounter.self_id_desc));
+    const authStatus = getStatus('auth', false);
+
     // 1. Basic ID [Msg 0x0] (Mandatory under ASD-STAN prEN 4709-002)
     const compBasic = document.getElementById('comp-basic-id');
-    const hasBasic = Boolean(encounter.serial_number);
+    const descBasic = document.getElementById('comp-basic-id-desc');
     if (compBasic) {
-      compBasic.className = `compliance-item clickable ${hasBasic ? 'passed' : 'failed'}`;
-      compBasic.querySelector('.comp-icon').textContent = hasBasic ? '✔' : '✖';
+      if (basicStatus === 'passed') {
+        compBasic.className = 'compliance-item clickable passed';
+        compBasic.querySelector('.comp-icon').textContent = '✔';
+        if (descBasic) descBasic.textContent = encounter.serial_number || 'ANSI/CTA-2063-A';
+      } else if (basicStatus === 'zeroed') {
+        compBasic.className = 'compliance-item clickable zeroed';
+        compBasic.querySelector('.comp-icon').textContent = '⊘';
+        if (descBasic) descBasic.innerHTML = '<span style="color:#fbbf24; font-style:italic;">⊘ Zeroed (Non-Compliant)</span>';
+      } else {
+        compBasic.className = 'compliance-item clickable failed';
+        compBasic.querySelector('.comp-icon').textContent = '✖';
+        if (descBasic) descBasic.textContent = 'Not Broadcast (Missing)';
+      }
       
       const drawer = document.getElementById('drawer-comp-basic-id');
       if (drawer) {
+        const valStatus = basicStatus === 'passed' ? 'Active / Populated' : (basicStatus === 'zeroed' ? '⊘ Non-Compliant (0x00 placeholder)' : 'Not Broadcast (Non-Compliant)');
         drawer.innerHTML = `
-          <div class="comp-field-row"><span class="k">UAS ID / Serial:</span> <span class="v font-mono">${encounter.serial_number || 'None'}</span></div>
+          <div class="comp-field-row"><span class="k">UAS ID / Serial:</span> <span class="v font-mono ${basicStatus === 'passed' ? 'highlight-cyan' : ''}">${encounter.serial_number || (basicStatus === 'zeroed' ? '⊘ Zeroed (0x00)' : 'None')}</span></div>
           <div class="comp-field-row"><span class="k">ID Type:</span> <span class="v">Serial Number (ANSI/CTA-2063-A)</span></div>
           <div class="comp-field-row"><span class="k">UA Type:</span> <span class="v">Helicopter / Multirotor</span></div>
+          <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono ${basicStatus === 'passed' ? 'highlight-green' : (basicStatus === 'zeroed' ? 'highlight-amber' : '')}">${valStatus}</span></div>
           <div class="comp-field-row"><span class="k">Protocol:</span> <span class="v">ASTM F3411-22 / ASD-STAN</span></div>
         `;
       }
@@ -489,115 +535,218 @@ export class TelemetryInspectorController {
 
     // 2. Location / Vector [Msg 0x1] (Mandatory)
     const compLoc = document.getElementById('comp-location');
-    const traj = encounter.trajectory || [];
-    const latestPt = traj.length > 0 ? traj[traj.length - 1] : null;
-    const hasLoc = Boolean(traj.length > 0);
+    const descLoc = document.getElementById('comp-location-desc');
     if (compLoc) {
-      compLoc.className = `compliance-item clickable ${hasLoc ? 'passed' : 'failed'}`;
-      compLoc.querySelector('.comp-icon').textContent = hasLoc ? '✔' : '✖';
+      if (locStatus === 'passed') {
+        compLoc.className = 'compliance-item clickable passed';
+        compLoc.querySelector('.comp-icon').textContent = '✔';
+        if (descLoc) {
+          if (latestPt) {
+            descLoc.textContent = `${latestPt[0].toFixed(4)}°, ${latestPt[1].toFixed(4)}°`;
+          } else {
+            const telemetryParts = [];
+            if (encounter.max_height_m != null) telemetryParts.push(`H:${Math.round(encounter.max_height_m)}m`);
+            if (encounter.max_speed_mps != null && encounter.max_speed_mps > 0) telemetryParts.push(`Spd:${Math.round(encounter.max_speed_mps)}m/s`);
+            descLoc.textContent = telemetryParts.length > 0 
+              ? `${telemetryParts.join(' · ')} (No GNSS Fix)` 
+              : 'Transmitted (No 2D Fix)';
+          }
+        }
+      } else if (locStatus === 'zeroed') {
+        compLoc.className = 'compliance-item clickable zeroed';
+        compLoc.querySelector('.comp-icon').textContent = '⊘';
+        const hTag = encounter.max_height_m != null ? `H:${Math.round(encounter.max_height_m)}m` : 'Airborne';
+        if (descLoc) descLoc.innerHTML = `<span style="color:#fbbf24; font-style:italic;">⊘ Zeroed Coords (${hTag} • Non-Compliant)</span>`;
+      } else {
+        compLoc.className = 'compliance-item clickable failed';
+        compLoc.querySelector('.comp-icon').textContent = '✖';
+        if (descLoc) descLoc.textContent = 'Not Broadcast (Missing)';
+      }
 
       const drawer = document.getElementById('drawer-comp-location');
       if (drawer) {
-        const lat = latestPt ? latestPt[0].toFixed(6) : 'N/A';
-        const lon = latestPt ? latestPt[1].toFixed(6) : 'N/A';
-        const alt = latestPt && latestPt[2] != null ? `${latestPt[2]} m` : 'N/A';
-        const spd = latestPt && latestPt[3] != null ? `${latestPt[3]} m/s` : 'N/A';
+        const lat = latestPt ? latestPt[0].toFixed(6) : (locStatus === 'zeroed' ? '⊘ Zeroed (No 3D Lock)' : 'N/A');
+        const lon = latestPt ? latestPt[1].toFixed(6) : (locStatus === 'zeroed' ? '⊘ Zeroed (No 3D Lock)' : 'N/A');
+        const alt = latestPt && latestPt[2] != null ? `${latestPt[2]} m` : (encounter.max_alt_m != null ? `${encounter.max_alt_m} m` : 'N/A');
+        const spd = latestPt && latestPt[3] != null ? `${latestPt[3]} m/s` : (encounter.max_speed_mps != null ? `${encounter.max_speed_mps} m/s` : 'N/A');
         const hdg = latestPt && latestPt[4] != null ? `${latestPt[4]}°` : 'N/A';
-        const h_rep = (latestPt && latestPt.length > 6 && latestPt[6] != null) ? `${latestPt[6]} m (${latestPt[7] === 1 ? 'AGL' : 'Above Takeoff'})` : 'N/A';
+        const h_rep = (latestPt && latestPt.length > 6 && latestPt[6] != null) ? `${latestPt[6]} m (${latestPt[7] === 1 ? 'AGL' : 'Above Takeoff'})` : (encounter.max_height_m != null ? `${encounter.max_height_m} m` : 'N/A');
         const p_alt = (latestPt && latestPt.length > 8 && latestPt[8] != null) ? `${latestPt[8]} m` : 'N/A';
         const v_spd = (latestPt && latestPt.length > 9 && latestPt[9] != null) ? `${latestPt[9] >= 0 ? '+' : ''}${latestPt[9]} m/s` : 'N/A';
+        const valStatus = locStatus === 'passed' ? 'Active 3D GNSS Fix' : (locStatus === 'zeroed' ? '⊘ Non-Compliant (No 3D GNSS / Zeroed Coordinates)' : 'Not Broadcast (Non-Compliant)');
 
         drawer.innerHTML = `
-          <div class="comp-field-row"><span class="k">Latitude / Longitude:</span> <span class="v font-mono">${lat}°, ${lon}°</span></div>
-          <div class="comp-field-row"><span class="k">Geodetic Altitude (MSL):</span> <span class="v font-mono highlight-cyan">${alt}</span></div>
+          <div class="comp-field-row"><span class="k">Latitude / Longitude:</span> <span class="v font-mono ${locStatus === 'passed' ? 'highlight-cyan' : ''}">${lat}${latestPt ? '°, ' + lon + '°' : ''}</span></div>
+          <div class="comp-field-row"><span class="k">Geodetic Altitude (MSL):</span> <span class="v font-mono">${alt}</span></div>
           <div class="comp-field-row"><span class="k">Pressure Altitude (Baro):</span> <span class="v font-mono">${p_alt}</span></div>
           <div class="comp-field-row"><span class="k">Reported Relative Height:</span> <span class="v font-mono">${h_rep}</span></div>
           <div class="comp-field-row"><span class="k">Speed / Track:</span> <span class="v font-mono">${spd} @ ${hdg}</span></div>
           <div class="comp-field-row"><span class="k">Vertical Speed:</span> <span class="v font-mono">${v_spd}</span></div>
-          <div class="comp-field-row"><span class="k">Accuracy:</span> <span class="v">Horiz &lt; 1m · Vert &lt; 3m · Speed &lt; 0.3m/s</span></div>
+          <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono ${locStatus === 'passed' ? 'highlight-green' : (locStatus === 'zeroed' ? 'highlight-amber' : '')}">${valStatus}</span></div>
         `;
       }
     }
 
     // 3. System / GCS [Msg 0x4] (Mandatory under ASD-STAN)
     const compSys = document.getElementById('comp-system');
-    const hasSys = Boolean(encounter.pilot_lat != null && encounter.pilot_lon != null);
+    const descSys = document.getElementById('comp-system-desc');
     if (compSys) {
-      compSys.className = `compliance-item clickable ${hasSys ? 'passed' : 'failed'}`;
-      compSys.querySelector('.comp-icon').textContent = hasSys ? '✔' : '✖';
+      if (sysStatus === 'passed') {
+        compSys.className = 'compliance-item clickable passed';
+        compSys.querySelector('.comp-icon').textContent = '✔';
+        if (descSys) {
+          if (encounter.pilot_lat != null && encounter.pilot_lon != null) {
+            descSys.textContent = `Pilot: ${encounter.pilot_lat.toFixed(4)}°, ${encounter.pilot_lon.toFixed(4)}°`;
+          } else if (encounter.area_ceil_m != null || encounter.area_floor_m != null) {
+            descSys.textContent = 'Area Limits Defined (No Pilot Coords)';
+          } else {
+            descSys.textContent = 'System Data Populated';
+          }
+        }
+      } else if (sysStatus === 'zeroed') {
+        compSys.className = 'compliance-item clickable zeroed';
+        compSys.querySelector('.comp-icon').textContent = '⊘';
+        if (descSys) descSys.innerHTML = '<span style="color:#fbbf24; font-style:italic;">⊘ Zeroed Pilot (Non-Compliant)</span>';
+      } else {
+        compSys.className = 'compliance-item clickable failed';
+        compSys.querySelector('.comp-icon').textContent = '✖';
+        if (descSys) descSys.textContent = 'Not Broadcast (Missing)';
+      }
 
       const drawer = document.getElementById('drawer-comp-system');
       if (drawer) {
         const ceilFloor = (encounter.area_ceil_m != null || encounter.area_floor_m != null)
           ? `Ceil: ${encounter.area_ceil_m != null ? encounter.area_ceil_m + 'm' : 'None'} · Floor: ${encounter.area_floor_m != null ? encounter.area_floor_m + 'm' : 'None'}`
           : 'None (Unrestricted Area)';
+        const valStatus = sysStatus === 'passed' ? 'Live GCS / Pilot Position' : (sysStatus === 'zeroed' ? '⊘ Non-Compliant (Zeroed Pilot 0.000000°)' : 'Not Broadcast (Non-Compliant)');
 
         drawer.innerHTML = `
-          <div class="comp-field-row"><span class="k">Pilot / GCS Latitude:</span> <span class="v font-mono">${encounter.pilot_lat != null ? encounter.pilot_lat.toFixed(6) + '°' : 'Not Broadcast'}</span></div>
-          <div class="comp-field-row"><span class="k">Pilot / GCS Longitude:</span> <span class="v font-mono">${encounter.pilot_lon != null ? encounter.pilot_lon.toFixed(6) + '°' : 'Not Broadcast'}</span></div>
-          <div class="comp-field-row"><span class="k">Pilot Ground Alt (MSL):</span> <span class="v font-mono highlight-cyan">${encounter.pilot_alt_m != null ? encounter.pilot_alt_m + ' m' : 'N/A'}</span></div>
+          <div class="comp-field-row"><span class="k">Pilot / GCS Latitude:</span> <span class="v font-mono ${sysStatus === 'passed' ? 'highlight-cyan' : ''}">${encounter.pilot_lat != null ? encounter.pilot_lat.toFixed(6) + '°' : (sysStatus === 'zeroed' ? '⊘ Zeroed (0.000000°)' : 'Not Broadcast')}</span></div>
+          <div class="comp-field-row"><span class="k">Pilot / GCS Longitude:</span> <span class="v font-mono ${sysStatus === 'passed' ? 'highlight-cyan' : ''}">${encounter.pilot_lon != null ? encounter.pilot_lon.toFixed(6) + '°' : (sysStatus === 'zeroed' ? '⊘ Zeroed (0.000000°)' : 'Not Broadcast')}</span></div>
+          <div class="comp-field-row"><span class="k">Pilot Ground Alt (MSL):</span> <span class="v font-mono">${encounter.pilot_alt_m != null ? encounter.pilot_alt_m + ' m' : 'N/A'}</span></div>
           <div class="comp-field-row"><span class="k">Operational Area Limits:</span> <span class="v font-mono">${ceilFloor}</span></div>
-          <div class="comp-field-row"><span class="k">Operator Location Type:</span> <span class="v">Takeoff / GCS Home Point</span></div>
-          <div class="comp-field-row"><span class="k">EU Classification:</span> <span class="v">Open Category / Class C1-C3</span></div>
+          <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono ${sysStatus === 'passed' ? 'highlight-green' : (sysStatus === 'zeroed' ? 'highlight-amber' : '')}">${valStatus}</span></div>
         `;
       }
     }
 
     // 4. Operator ID [Msg 0x5] (Mandatory under ASD-STAN EU Direct RID)
     const compOp = document.getElementById('comp-operator');
-    const hasOp = Boolean(encounter.operator_id);
+    const descOp = document.getElementById('comp-operator-desc');
     if (compOp) {
-      compOp.className = `compliance-item clickable ${hasOp ? 'passed' : 'failed'}`;
-      compOp.querySelector('.comp-icon').textContent = hasOp ? '✔' : '✖';
+      if (opStatus === 'passed') {
+        compOp.className = 'compliance-item clickable passed';
+        compOp.querySelector('.comp-icon').textContent = '✔';
+        if (descOp) descOp.textContent = encounter.operator_id;
+      } else if (opStatus === 'zeroed') {
+        compOp.className = 'compliance-item clickable zeroed';
+        compOp.querySelector('.comp-icon').textContent = '⊘';
+        if (descOp) descOp.innerHTML = '<span style="color:#fbbf24; font-style:italic;">⊘ Unset / Zeroed (Non-Compliant)</span>';
+      } else {
+        compOp.className = 'compliance-item clickable failed';
+        compOp.querySelector('.comp-icon').textContent = '✖';
+        if (descOp) descOp.textContent = 'Not Broadcast (Missing)';
+      }
 
       const drawer = document.getElementById('drawer-comp-operator');
       if (drawer) {
+        const valStatus = opStatus === 'passed' ? 'Registered Public ID' : (opStatus === 'zeroed' ? '⊘ Non-Compliant (0x00 unconfigured placeholder)' : 'Not Broadcast (Non-Compliant)');
         drawer.innerHTML = `
-          <div class="comp-field-row"><span class="k">Operator Registration ID:</span> <span class="v font-mono highlight-green">${encounter.operator_id || 'Not Broadcast'}</span></div>
+          <div class="comp-field-row"><span class="k">Operator Registration ID:</span> <span class="v font-mono ${opStatus === 'passed' ? 'highlight-green' : ''}">${encounter.operator_id || (opStatus === 'zeroed' ? '⊘ Zeroed (Unconfigured)' : 'Not Broadcast')}</span></div>
           <div class="comp-field-row"><span class="k">Registration Authority:</span> <span class="v">National Aviation Authority (EASA / CAA)</span></div>
-          <div class="comp-field-row"><span class="k">ID Type:</span> <span class="v">Operator ID (16-char Public Registration)</span></div>
+          <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono ${opStatus === 'passed' ? 'highlight-green' : (opStatus === 'zeroed' ? 'highlight-amber' : '')}">${valStatus}</span></div>
         `;
       }
     }
 
     // 5. Self-ID [Msg 0x3] (OPTIONAL in ASD-STAN)
     const compSelf = document.getElementById('comp-self-id');
-    const hasSelf = Boolean(encounter.self_id_desc);
+    const descSelf = document.getElementById('comp-self-id-desc');
     if (compSelf) {
-      compSelf.className = `compliance-item optional clickable ${hasSelf ? 'passed' : 'optional-item'}`;
-      compSelf.querySelector('.comp-icon').textContent = hasSelf ? '✔' : '○';
-      const descEl = document.getElementById('comp-self-id-desc');
-      if (descEl) descEl.textContent = hasSelf ? encounter.self_id_desc : 'Not Broadcast (Optional)';
+      if (selfStatus === 'passed') {
+        compSelf.className = 'compliance-item optional clickable passed';
+        compSelf.querySelector('.comp-icon').textContent = '✔';
+        if (descSelf) descSelf.textContent = `"${encounter.self_id_desc}"`;
+      } else if (selfStatus === 'zeroed') {
+        compSelf.className = 'compliance-item optional clickable zeroed';
+        compSelf.querySelector('.comp-icon').textContent = '⊘';
+        if (descSelf) descSelf.innerHTML = '<span style="color:#fbbf24; font-style:italic;">⊘ Broadcast (Empty / 0x00)</span>';
+      } else {
+        compSelf.className = 'compliance-item optional clickable optional-item';
+        compSelf.querySelector('.comp-icon').textContent = '○';
+        if (descSelf) descSelf.textContent = 'Not Broadcast (Optional)';
+      }
 
       const drawer = document.getElementById('drawer-comp-self-id');
       if (drawer) {
-        drawer.innerHTML = `
-          <div class="comp-field-row"><span class="k">Description:</span> <span class="v font-mono">${encounter.self_id_desc || 'None (Optional)'}</span></div>
-          <div class="comp-field-row"><span class="k">Description Type:</span> <span class="v">Text / Flight Purpose</span></div>
-        `;
+        if (selfStatus === 'passed') {
+          drawer.innerHTML = `
+            <div class="comp-field-row"><span class="k">Description:</span> <span class="v font-mono highlight-cyan">"${encounter.self_id_desc}"</span></div>
+            <div class="comp-field-row"><span class="k">Description Type:</span> <span class="v">Text / Flight Purpose</span></div>
+            <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono highlight-green">Mission Purpose Populated</span></div>
+          `;
+        } else if (selfStatus === 'zeroed') {
+          drawer.innerHTML = `
+            <div class="comp-field-row"><span class="k">Description:</span> <span class="v font-mono highlight-amber">⊘ Zeroed (Empty String)</span></div>
+            <div class="comp-field-row"><span class="k">Description Type:</span> <span class="v">Text / Flight Purpose</span></div>
+            <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono highlight-amber">⊘ Broadcast but Empty (0x00 placeholder)</span></div>
+          `;
+        } else {
+          drawer.innerHTML = `
+            <div class="comp-field-row"><span class="k">Description:</span> <span class="v font-mono">None (Optional)</span></div>
+            <div class="comp-field-row"><span class="k">Description Type:</span> <span class="v">Text / Flight Purpose</span></div>
+          `;
+        }
       }
     }
 
     // 6. Auth [Msg 0x2] (OPTIONAL in ASD-STAN)
     const compAuth = document.getElementById('comp-auth');
+    const descAuth = document.getElementById('comp-auth-desc');
     if (compAuth) {
-      compAuth.className = 'compliance-item optional clickable optional-item';
-      compAuth.querySelector('.comp-icon').textContent = '○';
+      if (authStatus === 'passed') {
+        compAuth.className = 'compliance-item optional clickable passed';
+        compAuth.querySelector('.comp-icon').textContent = '✔';
+        if (descAuth) descAuth.textContent = 'Digital Signature Verified';
+      } else if (authStatus === 'zeroed') {
+        compAuth.className = 'compliance-item optional clickable zeroed';
+        compAuth.querySelector('.comp-icon').textContent = '⊘';
+        if (descAuth) descAuth.innerHTML = '<span style="color:#fbbf24; font-style:italic;">⊘ Broadcast (Zeroed)</span>';
+      } else {
+        compAuth.className = 'compliance-item optional clickable optional-item';
+        compAuth.querySelector('.comp-icon').textContent = '○';
+        if (descAuth) descAuth.textContent = 'Not Broadcast (Optional)';
+      }
 
       const drawer = document.getElementById('drawer-comp-auth');
       if (drawer) {
-        drawer.innerHTML = `
-          <div class="comp-field-row"><span class="k">Auth Data:</span> <span class="v">Not Transmitted (Optional for Direct RID)</span></div>
-          <div class="comp-field-row"><span class="k">Auth Type:</span> <span class="v">UAS ID / Operator Signature (0x0)</span></div>
-        `;
+        if (authStatus === 'passed') {
+          drawer.innerHTML = `
+            <div class="comp-field-row"><span class="k">Auth Data:</span> <span class="v highlight-green">Signature Attached</span></div>
+            <div class="comp-field-row"><span class="k">Auth Type:</span> <span class="v">UAS ID / Operator Signature (0x0)</span></div>
+            <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono highlight-green">Digital Signature Verified</span></div>
+          `;
+        } else if (authStatus === 'zeroed') {
+          drawer.innerHTML = `
+            <div class="comp-field-row"><span class="k">Auth Data:</span> <span class="v highlight-amber">⊘ Zeroed (0x00)</span></div>
+            <div class="comp-field-row"><span class="k">Auth Type:</span> <span class="v">UAS ID / Operator Signature (0x0)</span></div>
+            <div class="comp-field-row"><span class="k">Block Status:</span> <span class="v font-mono highlight-amber">⊘ Transmitted as 0x00 placeholder</span></div>
+          `;
+        } else {
+          drawer.innerHTML = `
+            <div class="comp-field-row"><span class="k">Auth Data:</span> <span class="v">Not Transmitted (Optional for Direct RID)</span></div>
+            <div class="comp-field-row"><span class="k">Auth Type:</span> <span class="v">UAS ID / Operator Signature (0x0)</span></div>
+          `;
+        }
       }
     }
 
     // Overall ASD-STAN Compliance Evaluation
     const overallBadge = document.getElementById('comp-overall-badge');
     if (overallBadge) {
-      const isCompliant = hasBasic && hasLoc && hasSys && hasOp;
-      if (isCompliant) {
+      const allPassed = (basicStatus === 'passed' && locStatus === 'passed' && sysStatus === 'passed' && opStatus === 'passed');
+      const anyZeroed = (basicStatus === 'zeroed' || locStatus === 'zeroed' || sysStatus === 'zeroed' || opStatus === 'zeroed');
+      if (allPassed) {
         overallBadge.textContent = 'ASD-STAN COMPLIANT';
         overallBadge.className = 'comp-status-pill compliant';
       } else {

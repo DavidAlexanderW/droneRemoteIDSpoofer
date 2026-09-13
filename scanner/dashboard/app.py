@@ -20,7 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,6 +54,14 @@ except ImportError:
         get_default_config_path,
     )
 
+try:
+    from drone_rid_spoofer.parser import decode_astm_message
+except ImportError:
+    try:
+        from parser import decode_astm_message
+    except ImportError:
+        decode_astm_message = None
+
 app = FastAPI(
     title="Tactical Drone Remote ID Airspace Monitor",
     description="Real-time ASTM F3411 Drone Remote ID monitoring, radar mapping, and telemetry analysis API",
@@ -68,6 +76,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path.lower()
+    if any(path.endswith(ext) for ext in [".js", ".css", ".html", ".json"]) or path == "/":
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # Database and Log Paths (Configurable dynamically via environment or run_dashboard.py)
 def get_db_path() -> str:
@@ -329,16 +347,106 @@ def get_encounters(
     return {"encounters": encounters, "count": len(encounters)}
 
 
-@app.get("/api/encounters/{encounter_id}")
-def get_encounter_details(encounter_id: str):
-    """Returns detailed flight inspection data including the complete trajectory array."""
-    timeout_s = get_timeout_s()
-    conn = get_db_connection()
-    reconcile_stale_encounters(conn, timeout_s)
+def get_encounter_sample_packets(encounter_id: str, max_packets: int = 15) -> List[Dict[str, Any]]:
+    """Quickly extracts up to max_packets decoded packets for the encounter to determine exact block transmission status."""
+    packets = []
+    jsonl_log_path = get_jsonl_path()
+    db_path = get_db_path()
+    log_candidates = [
+        jsonl_log_path,
+        os.path.join(os.path.dirname(db_path), "rid_packets.jsonl"),
+        "rid_packets.jsonl",
+    ]
+    log_dir = os.path.dirname(os.path.abspath(jsonl_log_path)) if jsonl_log_path else "."
+    if os.path.exists(log_dir):
+        for fname in sorted(os.listdir(log_dir), reverse=True):
+            if fname.endswith(".jsonl") and ("rid" in fname or "capture" in fname or "replay" in fname):
+                log_candidates.append(os.path.join(log_dir, fname))
 
+    for path in log_candidates:
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or not line.startswith("{"):
+                            continue
+                        try:
+                            rec = json.loads(line)
+                            if rec.get("encounter_id") == encounter_id:
+                                decoded_blocks = []
+                                if decode_astm_message:
+                                    for b64_str in rec.get("messages_b64", []):
+                                        try:
+                                            raw_b = base64.b64decode(b64_str)
+                                            parsed = decode_astm_message(raw_b)
+                                            if parsed:
+                                                decoded_blocks.append(parsed)
+                                        except Exception:
+                                            pass
+                                if not decoded_blocks and rec.get("decoded_messages"):
+                                    decoded_blocks = rec.get("decoded_messages")
+                                packets.append({"decoded_messages": decoded_blocks})
+                                if len(packets) >= max_packets:
+                                    return packets
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+    return packets
+
+
+def compute_conformance_blocks(row: Any, traj: List[Any], packets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
+    """
+    Evaluates ASTM F3411 block statuses strictly based on empirical data:
+      - 'passed': message block was transmitted with valid, non-zero payload data.
+      - 'zeroed': message block was physically broadcast over RF in the frame stream but contains an empty/unset 0x00 payload.
+      - 'missing': message block was NOT broadcast/transmitted at all in the RF stream (omitted).
+    """
+    observed = {}
+    if packets:
+        for pkt in packets:
+            for dm in pkt.get("decoded_messages", []):
+                mtype = dm.get("msg_type")
+                is_z = bool(dm.get("is_zeroed", False))
+                if mtype is not None:
+                    if mtype not in observed:
+                        observed[mtype] = {"seen": True, "has_data": not is_z}
+                    elif not is_z:
+                        observed[mtype]["has_data"] = True
+
+    def eval_stat(mtype: int, has_value: bool) -> str:
+        # 1. Populated with valid data (either stored in DB or parsed in packets)
+        if has_value or observed.get(mtype, {}).get("has_data", False):
+            return "passed"
+        # 2. Physically observed in the RF broadcast stream but with 0x00 payload
+        if mtype in observed:
+            return "passed" if observed[mtype]["has_data"] else "zeroed"
+        # 3. Not transmitted / omitted from RF stream
+        return "missing"
+
+    return {
+        "basic_id": eval_stat(0, bool(row["serial_number"])),
+        "location": eval_stat(1, bool(traj and len(traj) > 0)),
+        "system": eval_stat(4, bool(row["pilot_lat"] is not None and row["pilot_lon"] is not None)),
+        "operator": eval_stat(5, bool(row["operator_id"])),
+        "self_id": eval_stat(3, bool(row["self_id_desc"])),
+        "auth": eval_stat(2, False),
+    }
+
+
+@app.get("/api/encounters/{encounter_id}")
+def get_encounter(encounter_id: str):
+    """Returns single encounter detailed record by ID."""
+    conn = get_db_connection()
     row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
+
+    timeout_s = 300.0
+    cfg = load_scanner_config()
+    if cfg and "encounter_timeout_s" in cfg:
+        timeout_s = float(cfg["encounter_timeout_s"])
 
     traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
     # traj: list of [lat, lon, alt, speed, heading, ts]
@@ -358,6 +466,9 @@ def get_encounter_details(encounter_id: str):
         drone_info["make"] = d_make
     if d_model:
         drone_info["model"] = d_model
+
+    sample_pkts = get_encounter_sample_packets(encounter_id)
+    conf_blocks = compute_conformance_blocks(row, traj, sample_pkts)
 
     return {
         "encounter_id": row["encounter_id"],
@@ -399,6 +510,7 @@ def get_encounter_details(encounter_id: str):
         "area_floor_m": row["area_floor_m"] if "area_floor_m" in row.keys() else None,
         "is_active": is_active,
         "trajectory": traj,
+        "conformance_blocks": conf_blocks,
     }
 
 
@@ -443,14 +555,19 @@ def get_encounter_packets(encounter_id: str):
                             if rec.get("encounter_id") == encounter_id:
                                 # Decode base64 message blocks if present
                                 decoded_blocks = []
-                                for b64_str in rec.get("messages_b64", []):
-                                    try:
-                                        raw_b = base64.b64decode(b64_str)
-                                        parsed = decode_astm_message(raw_b)
-                                        if parsed:
-                                            decoded_blocks.append(parsed)
-                                    except Exception:
-                                        pass
+                                if decode_astm_message:
+                                    for b64_str in rec.get("messages_b64", []):
+                                        try:
+                                            raw_b = base64.b64decode(b64_str)
+                                            parsed = decode_astm_message(raw_b)
+                                            if parsed:
+                                                decoded_blocks.append(parsed)
+                                        except Exception:
+                                            pass
+
+                                # Fallback to pre-decoded messages if available
+                                if not decoded_blocks and rec.get("decoded_messages"):
+                                    decoded_blocks = rec.get("decoded_messages")
 
                                 packets.append({
                                     "index": len(packets) + 1,
@@ -479,7 +596,7 @@ def get_encounter_packets(encounter_id: str):
             except Exception:
                 pass
 
-    # 2. If no JSONL log found, synthesize packet records from SQLite trajectory points
+    # 2. If no JSONL log found, synthesize packet records from SQLite encounter metadata and trajectory
     if not packets:
         conn = get_db_connection()
         row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
@@ -487,52 +604,105 @@ def get_encounter_packets(encounter_id: str):
             raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
         
         traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
-        t0 = row["first_seen"]
-        for idx, pt in enumerate(traj):
-            # pt: [lat, lon, alt, speed, heading, ts]
-            ts = pt[5] if len(pt) > 5 else t0
-            delta_ms = int((ts - t0) * 1000)
-            r_rates = row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else []
-            r_desc = r_rates[0] if r_rates else None
+        t0 = row["first_seen"] or time.time()
+        r_rates = row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else []
+        r_desc = r_rates[0] if r_rates else None
+
+        def build_synth_blocks(lat=None, lon=None, alt=None, spd=None, dir_deg=None, h_m=None, h_t=None, p_alt=None, v_spd=None):
+            blocks = []
+            if row["serial_number"]:
+                blocks.append({
+                    "msg_type": 0,
+                    "type": "Basic ID",
+                    "id": row["serial_number"],
+                    "id_type_name": "Serial Number (ANSI/CTA-2063-A)",
+                    "ua_type_name": "Helicopter / Multirotor",
+                })
+            if lat is not None or lon is not None or alt is not None or h_m is not None:
+                blocks.append({
+                    "msg_type": 1,
+                    "type": "Location",
+                    "lat": lat,
+                    "lon": lon,
+                    "alt": alt,
+                    "geodetic_altitude_m": alt,
+                    "speed_mps": spd,
+                    "direction_deg": dir_deg,
+                    "height_m": h_m,
+                    "height_type": h_t,
+                    "pressure_altitude_m": p_alt,
+                    "vertical_speed_mps": v_spd,
+                    "status_name": "Airborne" if (alt or h_m or spd) else "Ground",
+                })
+            if row["pilot_lat"] is not None and row["pilot_lon"] is not None:
+                blocks.append({
+                    "msg_type": 4,
+                    "type": "System",
+                    "pilot_lat": row["pilot_lat"],
+                    "pilot_lon": row["pilot_lon"],
+                    "pilot_alt_m": row["pilot_alt_m"],
+                    "operator_location_type_name": "Live GNSS (Dynamic Pilot / GCS)",
+                    "classification_type_name": "European Union (EU)",
+                })
+            if row["operator_id"]:
+                blocks.append({
+                    "msg_type": 5,
+                    "type": "Operator ID",
+                    "operator_id": row["operator_id"],
+                    "id": row["operator_id"],
+                })
+            if row["self_id_desc"]:
+                blocks.append({
+                    "msg_type": 3,
+                    "type": "Self-ID",
+                    "description": row["self_id_desc"],
+                })
+            return blocks
+
+        if traj:
+            for idx, pt in enumerate(traj):
+                # pt: [lat, lon, alt, speed, heading, ts, h_m, h_t, p_alt, v_spd]
+                ts = pt[5] if len(pt) > 5 else t0
+                delta_ms = int((ts - t0) * 1000)
+                h_m = pt[6] if len(pt) > 6 else None
+                h_t = pt[7] if len(pt) > 7 else None
+                p_alt = pt[8] if len(pt) > 8 else None
+                v_spd = pt[9] if len(pt) > 9 else None
+                packets.append({
+                    "index": idx + 1,
+                    "time_offset_ms": delta_ms,
+                    "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                    "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
+                    "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
+                    "rssi_dbm": row["avg_rssi_dbm"],
+                    "rate_desc": r_desc,
+                    "mac": row["mac"],
+                    "serial": row["serial_number"],
+                    "counter": idx,
+                    "messages_b64": [],
+                    "decoded_messages": build_synth_blocks(pt[0], pt[1], pt[2], pt[3], pt[4], h_m, h_t, p_alt, v_spd),
+                })
+        else:
+            # Single synthesized summary packet when trajectory points are not stored
             packets.append({
-                "index": idx + 1,
-                "time_offset_ms": delta_ms,
-                "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                "index": 1,
+                "time_offset_ms": 0,
+                "timestamp_iso": row["first_seen_iso"] or datetime.fromtimestamp(t0, timezone.utc).isoformat(),
                 "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
                 "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
                 "rssi_dbm": row["avg_rssi_dbm"],
                 "rate_desc": r_desc,
                 "mac": row["mac"],
                 "serial": row["serial_number"],
-                "counter": idx,
+                "counter": 0,
                 "messages_b64": [],
-                "decoded_messages": [
-                    {
-                        "type": "Basic ID",
-                        "id": row["serial_number"],
-                        "id_type_name": "Serial Number (ANSI/CTA-2063-A)"
-                    } if row["serial_number"] else None,
-                    {
-                        "type": "Location",
-                        "lat": pt[0],
-                        "lon": pt[1],
-                        "alt": pt[2],
-                        "geodetic_altitude_m": pt[2],
-                        "speed_mps": pt[3],
-                        "direction_deg": pt[4],
-                        "height_m": pt[6] if len(pt) > 6 else None,
-                        "height_type": pt[7] if len(pt) > 7 else None,
-                        "pressure_altitude_m": pt[8] if len(pt) > 8 else None,
-                        "vertical_speed_mps": pt[9] if len(pt) > 9 else None,
-                    },
-                    {
-                        "type": "Operator ID",
-                        "operator_id": row["operator_id"],
-                    } if row["operator_id"] else None
-                ],
+                "decoded_messages": build_synth_blocks(
+                    lat=None, lon=None,
+                    alt=row["max_alt_m"],
+                    spd=row["max_speed_mps"],
+                    h_m=row["max_height_m"],
+                ),
             })
-            # Filter out None blocks
-            packets[-1]["decoded_messages"] = [m for m in packets[-1]["decoded_messages"] if m]
 
     return {
         "encounter_id": encounter_id,

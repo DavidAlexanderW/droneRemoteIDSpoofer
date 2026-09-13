@@ -362,6 +362,7 @@ class TacticalApp {
       const data = await resp.json();
       const cfg = data.scanner || data.receiver || data;
       this.receiverConfig = cfg;
+      this.feedCtrl.setReceiverConfig(cfg);
       this.mapCtrl.setReceiverConfig(cfg);
       this.inspectorCtrl.setReceiverConfig(cfg);
       this.scrubberCtrl.setReceiverConfig(cfg);
@@ -389,6 +390,7 @@ class TacticalApp {
       const resJson = await resp.json();
       const savedConfig = resJson.scanner || resJson.receiver || resJson;
       this.receiverConfig = savedConfig;
+      this.feedCtrl.setReceiverConfig(savedConfig);
       this.mapCtrl.setReceiverConfig(savedConfig);
       this.inspectorCtrl.setReceiverConfig(savedConfig);
       this.scrubberCtrl.setReceiverConfig(savedConfig);

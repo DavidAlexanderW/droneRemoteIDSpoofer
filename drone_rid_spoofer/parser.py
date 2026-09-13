@@ -198,12 +198,15 @@ def decode_astm_message(block: bytes) -> Optional[Dict[str, Any]]:
     if msg_type not in (0x0, 0x1, 0x2, 0x3, 0x4, 0x5):
         return None
 
+    is_zeroed = (len(block) >= 25 and block[1:25] == b'\x00' * 24)
+
     result: Dict[str, Any] = {
         "msg_type": msg_type,
         "type": MSG_TYPE_NAMES.get(msg_type, f"Unknown ({msg_type})"),
         "protocol_version": proto_ver,
         "proto_version_name": PROTO_VERSION_NAMES.get(proto_ver, f"Version {proto_ver}"),
         "raw_hex": block[:25].hex().upper(),
+        "is_zeroed": is_zeroed,
     }
 
     try:
