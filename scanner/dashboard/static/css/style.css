@@ -933,6 +933,15 @@ body.has-scrubber #tactical-workspace {
   letter-spacing: 0.5px;
 }
 
+.target-date {
+  font-size: 11px;
+  color: var(--accent-green);
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 .btn-close-banner {
   background: transparent;
   border: none;

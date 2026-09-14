@@ -4,7 +4,7 @@
  */
 
 import { TacticalMapController } from './map.js';
-import { EncountersFeedController } from './feed.js';
+import { EncountersFeedController, formatDmyDate } from './feed.js';
 import { TelemetryInspectorController } from './inspector.js';
 import { TimelineScrubberController } from './scrubber.js';
 import { DeepPacketInspectorController } from './packet_modal.js';
@@ -569,6 +569,12 @@ class TacticalApp {
         banner.style.display = 'flex';
         bannerId.textContent = encounter.serial_number || encounter.mac || encounter.encounter_id;
         bannerOp.textContent = encounter.operator_id ? `[${encounter.operator_id}]` : '';
+        const bannerDate = document.getElementById('target-banner-date');
+        if (bannerDate) {
+          const firstSeen = encounter.first_seen_iso || encounter.first_seen || encounter.last_seen_iso || encounter.last_seen;
+          const dmy = formatDmyDate(firstSeen);
+          bannerDate.textContent = dmy ? `📅 ${dmy}` : '';
+        }
       }
 
       // Update Map Controller with full encounter trajectory & waypoints

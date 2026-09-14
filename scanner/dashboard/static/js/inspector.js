@@ -1,4 +1,5 @@
 import { calculateHaversineDistanceM, calculateBearingDeg, getBearingCompass } from './map.js';
+import { formatDmyDate } from './feed.js';
 
 /**
  * Tactical Drone Remote ID Airspace Monitor - Telemetry Inspector Controller
@@ -308,6 +309,21 @@ export class TelemetryInspectorController {
     if (this.statusBadge) {
       this.statusBadge.textContent = encounter.is_active ? 'LIVE TARGET' : 'CLOSED FLIGHT';
       this.statusBadge.className = `badge-tag ${encounter.is_active ? 'active' : ''}`;
+    }
+
+    // Reception Date & Time
+    const dtEl = document.getElementById('insp-date-time');
+    if (dtEl) {
+      const firstSeen = encounter.first_seen_iso || encounter.first_seen;
+      const lastSeen = encounter.last_seen_iso || encounter.last_seen;
+      const dateObj = firstSeen ? (typeof firstSeen === 'number' ? new Date(firstSeen * 1000) : new Date(firstSeen)) : (lastSeen ? (typeof lastSeen === 'number' ? new Date(lastSeen * 1000) : new Date(lastSeen)) : null);
+      if (dateObj && !isNaN(dateObj.getTime())) {
+        const dmy = formatDmyDate(dateObj);
+        const timeStr = dateObj.toLocaleTimeString();
+        dtEl.textContent = `${dmy} · ${timeStr}`;
+      } else {
+        dtEl.textContent = 'N/A';
+      }
     }
 
     // Identity

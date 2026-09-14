@@ -1,5 +1,15 @@
 import { calculateHaversineDistanceM } from './map.js';
 
+export function formatDmyDate(isoOrTs) {
+  if (!isoOrTs) return '';
+  const d = typeof isoOrTs === 'number' ? new Date(isoOrTs * 1000) : new Date(isoOrTs);
+  if (isNaN(d.getTime())) return '';
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const year = d.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
 /**
  * Tactical Drone Remote ID Airspace Monitor - Encounters Feed Controller
  * Renders flight cards, manages live search, filter tabs, Wi-Fi channel badges,
@@ -229,7 +239,9 @@ export class EncountersFeedController {
 
     const statusClass = enc.is_active ? 'active' : '';
     const displaySerial = enc.serial_number || enc.mac || enc.encounter_id.slice(0, 12);
-    const displayTime = enc.last_seen_iso ? new Date(enc.last_seen_iso).toLocaleTimeString() : '--:--';
+    const dateStr = formatDmyDate(enc.last_seen_iso || enc.last_seen || enc.first_seen_iso || enc.first_seen);
+    const clockTime = enc.last_seen_iso ? new Date(enc.last_seen_iso).toLocaleTimeString() : '--:--';
+    const displayTime = dateStr ? `${dateStr} · ${clockTime}` : clockTime;
     const durationStr = enc.duration_s != null ? `${Math.round(enc.duration_s)}s` : '';
     const pktCount = enc.packet_count || 0;
     const pktStr = `${pktCount} pkt${pktCount === 1 ? '' : 's'}`;
