@@ -13,9 +13,10 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure repository root is in sys.path so drone_rid_spoofer is importable from anywhere
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -40,6 +41,7 @@ PDU_TYPE_MAP = {
 
 # Globals for clean teardown and statistics tracking
 nrf_proc: Optional[subprocess.Popen] = None
+hopper_controller = None
 fifo_created_path: Optional[str] = None
 out_file_handle = None
 
@@ -49,6 +51,125 @@ summary_printed: bool = False
 group_by_mac_enabled: bool = False
 stats_format_choice: str = "table"
 pretty_json_choice: bool = False
+
+
+class BleModeHopperController:
+    """
+    Manages the nrfutil ble-sniffer subprocess lifecycle, supporting dynamic
+    Time-Division Multiplexing (TDM) hopping between BT5 (Extended + Coded) and BT4 (Legacy).
+    """
+    def __init__(
+        self,
+        nrf_port: str,
+        pcap_path: str,
+        mode: str = "hop",
+        bt5_dwell_s: float = 5.0,
+        bt4_dwell_s: float = 1.0,
+        filter_mac: Optional[str] = None,
+        coded_phy: bool = False,
+    ):
+        self.nrf_port = nrf_port
+        self.pcap_path = pcap_path
+        self.mode = mode
+        self.bt5_dwell_s = max(0.1, bt5_dwell_s)
+        self.bt4_dwell_s = max(0.1, bt4_dwell_s)
+        self.filter_mac = filter_mac
+        self.coded_phy = coded_phy
+        self.running = False
+        self.current_mode = "bt5" if mode in ("hop", "extended", "bt5") else ("bt4" if mode in ("legacy", "bt4") else "all")
+        self.proc: Optional[subprocess.Popen] = None
+        self.thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def _get_cmd_for_mode(self, mode: str) -> List[str]:
+        cmd = ["nrfutil", "ble-sniffer", "sniff", "--port", self.nrf_port, "--output-pcap-file", self.pcap_path]
+        if mode == "bt4":
+            cmd.append("--only-legacy_advertising")
+        elif mode == "bt5":
+            cmd.extend([
+                "--only-advertising",
+                "--scan-follow-aux",
+                "--scan-follow-aux-chain",
+                "--coded"
+            ])
+        else:  # "all"
+            cmd.extend([
+                "--only-advertising",
+                "--scan-follow-aux",
+                "--scan-follow-aux-chain"
+            ])
+            if self.coded_phy:
+                cmd.append("--coded")
+
+        if self.filter_mac:
+            cmd.extend(["--follow", self.filter_mac])
+        return cmd
+
+    def _run_loop(self):
+        while self.running:
+            cmd = self._get_cmd_for_mode(self.current_mode)
+            try:
+                with self._lock:
+                    self.proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL, start_new_session=True)
+            except FileNotFoundError:
+                sys.stderr.write("[-] Error: 'nrfutil' command not found in PATH. Please install nrfutil and ble-sniffer plugin.\n")
+                self.running = False
+                break
+            except Exception as e:
+                sys.stderr.write(f"[-] Error launching nrfutil ({self.current_mode}): {e}\n")
+                time.sleep(1.0)
+                continue
+
+            dwell = self.bt5_dwell_s if self.current_mode == "bt5" else (self.bt4_dwell_s if self.current_mode == "bt4" else 3600.0)
+            if self.mode != "hop":
+                dwell = 3600.0
+
+            # Wait for dwell or until stopped
+            t_start = time.time()
+            while self.running and (time.time() - t_start) < dwell:
+                if self.proc and self.proc.poll() is not None:
+                    # Process died unexpectedly
+                    break
+                time.sleep(0.05)
+
+            # Switch mode if hopping
+            if self.mode == "hop" and self.running:
+                self.stop_proc()
+                self.current_mode = "bt4" if self.current_mode == "bt5" else "bt5"
+                time.sleep(0.01)  # brief port settle
+            elif not self.running:
+                self.stop_proc()
+                break
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._run_loop, name="BleModeHopperController", daemon=True)
+        self.thread.start()
+
+    def stop_proc(self):
+        with self._lock:
+            if self.proc and self.proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+                    time.sleep(0.01)
+                    if self.proc.poll() is None:
+                        os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    self.proc.wait(timeout=0.2)
+                except Exception:
+                    pass
+                self.proc = None
+
+    def stop(self):
+        self.running = False
+        self.stop_proc()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.5)
 
 
 def display_mac_stats(
@@ -168,18 +289,21 @@ def display_mac_stats(
 
 
 def cleanup(signum=None, frame=None):
-    global nrf_proc, fifo_created_path, out_file_handle, summary_printed, mac_stats, group_by_mac_enabled, stats_format_choice, pretty_json_choice
+    global nrf_proc, hopper_controller, fifo_created_path, out_file_handle, summary_printed, mac_stats, group_by_mac_enabled, stats_format_choice, pretty_json_choice
     if not summary_printed and mac_stats:
         summary_printed = True
         out_stream = sys.stdout if group_by_mac_enabled else sys.stderr
         display_mac_stats(stats_format=stats_format_choice, pretty=pretty_json_choice, clear_screen=False, stream=out_stream, is_final=True)
 
+    if hopper_controller:
+        hopper_controller.stop()
+        hopper_controller = None
+
     if nrf_proc:
         sys.stderr.write("\n[*] Stopping nRF sniffer subprocess and process group...\n")
         try:
-            # Kill entire process group to ensure nrfutil child plugin processes are terminated
             os.killpg(os.getpgid(nrf_proc.pid), signal.SIGTERM)
-            time.sleep(0.2)
+            time.sleep(0.1)
             os.killpg(os.getpgid(nrf_proc.pid), signal.SIGKILL)
         except Exception:
             try:
@@ -376,7 +500,6 @@ def extract_remote_id_info(data: bytes, pdu_type_str: str) -> Optional[Dict[str,
     }
 
 
-
 def process_packet(
     data: bytes,
     ts: float,
@@ -386,7 +509,8 @@ def process_packet(
     filter_mac: Optional[str] = None,
     filter_mac_bytes_le: Optional[bytes] = None,
     filter_mac_bytes_be: Optional[bytes] = None,
-    group_by_mac: bool = False
+    group_by_mac: bool = False,
+    active_ble_mode: Optional[str] = None,
 ):
     """
     Processes raw link-layer bytes, decodes any present Remote ID ASTM payloads,
@@ -474,7 +598,8 @@ def process_packet(
         "rssi_dbm": rssi_dbm,
         "raw_length": len(data),
         "raw_hex": data.hex().upper(),
-        "remote_id": remote_id_info
+        "remote_id": remote_id_info,
+        "active_ble_mode": active_ble_mode
     }
 
     if not group_by_mac:
@@ -496,11 +621,14 @@ def run_sniffer(
     only_bt5: bool = False,
     filter_mac: Optional[str] = None,
     coded_phy: bool = False,
+    ble_mode: str = "hop",
+    bt5_dwell_s: float = 5.0,
+    bt4_dwell_s: float = 1.0,
     group_by_mac: bool = False,
     stats_format: str = "table",
     stats_interval: float = 2.0
 ):
-    global nrf_proc, fifo_created_path
+    global nrf_proc, hopper_controller, fifo_created_path
 
     filter_mac_bytes_le = None
     filter_mac_bytes_be = None
@@ -535,26 +663,18 @@ def run_sniffer(
         except OSError as e:
             sys.stderr.write(f"[!] Warning: Could not create FIFO at {pcap_path}: {e}\n")
 
-        nrf_cmd = [
-            "nrfutil", "ble-sniffer", "sniff", "--only-advertising",
-            "--port", nrf_port,
-            "--output-pcap-file", pcap_path,
-            "--scan-follow-aux",
-            "--scan-follow-aux-chain"
-        ]
-        if filter_mac:
-            nrf_cmd.extend(["--follow", filter_mac])
-        if coded_phy or only_bt5:
-            nrf_cmd.append("--coded")
-
-        sys.stderr.write(f"[*] Launching nRF sniffer process on {nrf_port}: {' '.join(nrf_cmd)}\n")
-        try:
-            nrf_proc = subprocess.Popen(nrf_cmd, stderr=sys.stderr, start_new_session=True)
-        except FileNotFoundError:
-            sys.stderr.write("[-] Error: 'nrfutil' command not found in PATH. Please install nrfutil and ble-sniffer plugin.\n")
-            cleanup()
-            return
-        time.sleep(1.0)
+        hopper_controller = BleModeHopperController(
+            nrf_port=nrf_port,
+            pcap_path=pcap_path,
+            mode=ble_mode,
+            bt5_dwell_s=bt5_dwell_s,
+            bt4_dwell_s=bt4_dwell_s,
+            filter_mac=filter_mac,
+            coded_phy=coded_phy or only_bt5
+        )
+        sys.stderr.write(f"[*] Starting BLE Hopper Controller on {nrf_port} (Mode: {ble_mode}, BT5: {bt5_dwell_s}s, BT4: {bt4_dwell_s}s)...\n")
+        hopper_controller.start()
+        time.sleep(0.3)
     else:
         sys.stderr.write(f"[*] Reading BLE PCAP stream from {pcap_path}...\n")
 
@@ -571,87 +691,93 @@ def run_sniffer(
 
     f = None
     try:
-        # Wait for the file/FIFO to become available and readable
-        while True:
-            if os.path.exists(pcap_path):
-                try:
-                    f = open(pcap_path, "rb")
-                    break
-                except Exception:
-                    time.sleep(0.1)
-            else:
-                time.sleep(0.2)
-                if nrf_port and (not nrf_proc or nrf_proc.poll() is not None):
-                    sys.stderr.write("[-] Error: nrfutil subprocess terminated unexpectedly.\n")
-                    cleanup()
-                    return
-
-        # Read 24-byte Global PCAP Header manually to avoid third-party PCAP library compatibility errors
-        hdr = f.read(24)
-        if len(hdr) < 24:
-            sys.stderr.write("[-] Error: Invalid or truncated PCAP global header.\n")
-            cleanup()
-            return
-
-        magic, major, minor, tz, sig, snaplen, network = struct.unpack("<IHHiIII", hdr)
-        # Determine byte order (default to little-endian if standard magic numbers don't match exactly)
-        endian = ">" if magic in (0xd4c3b2a1, 0x4d3cb2a1) else "<"
-        
-        linktype_clean = network & 0xFFFF
-        flags_clean = network >> 16
-        sys.stderr.write(f"[*] PCAP stream synchronized (linktype={linktype_clean}, flags=0x{flags_clean:04X}, endian={'little' if endian=='<' else 'big'}). Streaming JSON output:\n\n")
-
-        # Continuously process packets from PCAP stream
         last_display_time = 0.0
         while True:
-            pkthdr = f.read(16)
-            if not pkthdr or len(pkthdr) < 16:
+            # Check controller health if live
+            if hopper_controller and not hopper_controller.running:
+                break
+
+            if not os.path.exists(pcap_path):
+                time.sleep(0.1)
+                continue
+
+            try:
+                f = open(pcap_path, "rb")
+            except Exception:
+                time.sleep(0.05)
+                continue
+
+            # Read 24-byte Global PCAP Header
+            hdr = f.read(24)
+            if len(hdr) < 24:
+                f.close()
+                time.sleep(0.05)
+                continue
+
+            magic, major, minor, tz, sig, snaplen, network = struct.unpack("<IHHiIII", hdr)
+            endian = ">" if magic in (0xd4c3b2a1, 0x4d3cb2a1) else "<"
+
+            # Process packets for this session/hop
+            while True:
+                pkthdr = f.read(16)
+                if not pkthdr or len(pkthdr) < 16:
+                    # Pipe EOF or switch in progress
+                    if group_by_mac and sys.stdout.isatty() and time.time() - last_display_time >= stats_interval and mac_stats:
+                        display_mac_stats(stats_format=stats_format, pretty=pretty, clear_screen=True, stream=sys.stdout, is_final=False)
+                        last_display_time = time.time()
+                    
+                    if not nrf_port:
+                        # Static PCAP file finished
+                        break
+
+                    # Check if controller is still alive
+                    if hopper_controller and not hopper_controller.running:
+                        break
+                    
+                    # FIFO closed by sub-process switch; break inner loop to reopen on next PCAP stream
+                    break
+
+                ts_sec, ts_usec, incl_len, orig_len = struct.unpack(f"{endian}IIII", pkthdr)
+                if incl_len > 65535:
+                    continue
+
+                data = f.read(incl_len)
+                while len(data) < incl_len:
+                    if hopper_controller and not hopper_controller.running:
+                        break
+                    time.sleep(0.002)
+                    more = f.read(incl_len - len(data))
+                    if more:
+                        data += more
+                    else:
+                        time.sleep(0.005)
+                if len(data) < incl_len:
+                    break
+
+                ts = ts_sec + (ts_usec / 1e6)
+                active_mode = hopper_controller.current_mode if hopper_controller else None
+                process_packet(
+                    data, ts,
+                    pretty=pretty,
+                    only_rid=only_rid,
+                    only_bt5=only_bt5,
+                    filter_mac=filter_mac,
+                    filter_mac_bytes_le=filter_mac_bytes_le,
+                    filter_mac_bytes_be=filter_mac_bytes_be,
+                    group_by_mac=group_by_mac,
+                    active_ble_mode=active_mode
+                )
                 if group_by_mac and sys.stdout.isatty() and time.time() - last_display_time >= stats_interval and mac_stats:
                     display_mac_stats(stats_format=stats_format, pretty=pretty, clear_screen=True, stream=sys.stdout, is_final=False)
                     last_display_time = time.time()
-                if nrf_port and (not nrf_proc or nrf_proc.poll() is not None):
-                    break
-                try:
-                    import stat
-                    if not nrf_port and os.path.exists(pcap_path) and not stat.S_ISFIFO(os.stat(pcap_path).st_mode):
-                        break
-                except Exception:
-                    break
-                time.sleep(0.01)
-                continue
 
-            ts_sec, ts_usec, incl_len, orig_len = struct.unpack(f"{endian}IIII", pkthdr)
-            if incl_len > 65535:
-                # Corrupted or desynchronized length header, attempt recovery
-                continue
+            if f:
+                f.close()
+                f = None
 
-            data = f.read(incl_len)
-            while len(data) < incl_len:
-                if nrf_port and (not nrf_proc or nrf_proc.poll() is not None):
-                    break
-                time.sleep(0.005)
-                more = f.read(incl_len - len(data))
-                if more:
-                    data += more
-                else:
-                    time.sleep(0.01)
-            if len(data) < incl_len:
+            if not nrf_port:
+                # Finished static PCAP file
                 break
-
-            ts = ts_sec + (ts_usec / 1e6)
-            process_packet(
-                data, ts,
-                pretty=pretty,
-                only_rid=only_rid,
-                only_bt5=only_bt5,
-                filter_mac=filter_mac,
-                filter_mac_bytes_le=filter_mac_bytes_le,
-                filter_mac_bytes_be=filter_mac_bytes_be,
-                group_by_mac=group_by_mac
-            )
-            if group_by_mac and sys.stdout.isatty() and time.time() - last_display_time >= stats_interval and mac_stats:
-                display_mac_stats(stats_format=stats_format, pretty=pretty, clear_screen=True, stream=sys.stdout, is_final=False)
-                last_display_time = time.time()
 
     except KeyboardInterrupt:
         pass
@@ -695,7 +821,25 @@ def main():
         "-b", "--only-bt5", "--bt5", "--bt5-only", "--only-extended",
         dest="only_bt5",
         action="store_true",
-        help="Only output Bluetooth 5 Extended Advertising packets (PDU type 0x07 ADV_EXT_IND/AUX_ADV_IND or message packs)"
+        help="Only output Bluetooth 5 Extended Advertising packets"
+    )
+    parser.add_argument(
+        "--ble-mode",
+        choices=["hop", "extended", "legacy", "all"],
+        default="hop",
+        help="BLE sniffer operational mode: 'hop' (cycles BT5/BT4), 'extended' (BT5 only), 'legacy' (BT4 only), 'all' (1M uncoded)"
+    )
+    parser.add_argument(
+        "--bt5-dwell",
+        type=float,
+        default=5.0,
+        help="Dwell time in seconds on BT5 Extended / Coded mode when hopping"
+    )
+    parser.add_argument(
+        "--bt4-dwell",
+        type=float,
+        default=1.0,
+        help="Dwell time in seconds on BT4 Legacy mode when hopping"
     )
     parser.add_argument(
         "-o", "--output",
@@ -744,6 +888,8 @@ def main():
             sys.stderr.write(f"[-] Failed to open output file {args.output}: {e}\n")
             sys.exit(1)
 
+    effective_mode = "extended" if args.only_bt5 else args.ble_mode
+
     run_sniffer(
         pcap_path=args.rx_pcap,
         nrf_port=args.nrf_port,
@@ -752,6 +898,9 @@ def main():
         only_bt5=args.only_bt5,
         filter_mac=args.filter_mac,
         coded_phy=args.coded,
+        ble_mode=effective_mode,
+        bt5_dwell_s=args.bt5_dwell,
+        bt4_dwell_s=args.bt4_dwell,
         group_by_mac=args.group_by_mac,
         stats_format=args.stats_format,
         stats_interval=args.stats_interval

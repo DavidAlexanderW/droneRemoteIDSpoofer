@@ -27,6 +27,9 @@ DEFAULT_SCANNER_CONFIG = {
     "hub_ws_url": None,  # e.g., "ws://central-hub.local:8000/stream/node"
     "spool_dir": "spool",
     "max_ram_queue": 10000,
+    "ble_mode": "hop",
+    "ble_bt5_dwell_s": 5.0,
+    "ble_bt4_dwell_s": 1.0,
     "updated_at_iso": None,
 }
 
@@ -90,6 +93,9 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         config["hub_ws_url"] = str(hub_url).strip() if hub_url else None
         config["spool_dir"] = str(config.get("spool_dir", DEFAULT_SCANNER_CONFIG["spool_dir"]))
         config["max_ram_queue"] = int(config.get("max_ram_queue", DEFAULT_SCANNER_CONFIG["max_ram_queue"]))
+        config["ble_mode"] = str(config.get("ble_mode", DEFAULT_SCANNER_CONFIG["ble_mode"])).lower()
+        config["ble_bt5_dwell_s"] = float(config.get("ble_bt5_dwell_s", DEFAULT_SCANNER_CONFIG["ble_bt5_dwell_s"]))
+        config["ble_bt4_dwell_s"] = float(config.get("ble_bt4_dwell_s", DEFAULT_SCANNER_CONFIG["ble_bt4_dwell_s"]))
         if not isinstance(config.get("range_rings_m"), list):
             config["range_rings_m"] = DEFAULT_SCANNER_CONFIG["range_rings_m"]
         

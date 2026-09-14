@@ -1027,10 +1027,11 @@ class WifiChannelHopperThread(threading.Thread):
     - 2.4 GHz Social Channel: Ch 6 (1000 ms dwell)
     - 2.4 GHz Non-Social Channels: (200 ms dwell each)
     - 5.8 GHz Social Channel: Ch 149 (1000 ms dwell)
-    - 5.8 GHz Non-Social Channels: (200 ms dwell each)
+    - 5.8 GHz Non-Social Channels: (extended 250 ms dwell to compensate for mixed/negative PLL lead times)
     - Configurable non-social ratio (2k on 2.4GHz for every k on 5.8GHz)
-    - Lead-Time Dwell Compensation: Compensates for early RF lock (~40ms on 2.4GHz)
-      by adjusting remaining post-switch sleep time to achieve exact on-air dwell.
+    - Transition-Aware Packet Attribution: Packets arriving within the drain retention
+      window (< 5ms) are attributed to the previous channel; all subsequent packets
+      received during and after the switch are attributed to the target channel.
     """
     def __init__(
         self,
@@ -1039,17 +1040,15 @@ class WifiChannelHopperThread(threading.Thread):
         non_social_ratio_k: int = 1,
         social_dwell_ms: int = 1000,
         non_social_dwell_ms: int = 200,
-        lead_time_2g_ms: int = 40,
-        lead_time_5g_ms: int = 0,
+        non_social_dwell_5g_ms: Optional[int] = 250,
     ):
         super().__init__(name="WifiHopperThread", daemon=True)
         self.interface = interface
         self.channel_state = channel_state
         self.k = max(1, non_social_ratio_k)
         self.social_dwell_s = social_dwell_ms / 1000.0
-        self.non_social_dwell_s = non_social_dwell_ms / 1000.0
-        self.lead_time_2g_s = max(0.0, lead_time_2g_ms / 1000.0)
-        self.lead_time_5g_s = max(0.0, lead_time_5g_ms / 1000.0)
+        self.non_social_dwell_2g_s = non_social_dwell_ms / 1000.0
+        self.non_social_dwell_5g_s = (non_social_dwell_5g_ms if non_social_dwell_5g_ms is not None else max(non_social_dwell_ms, 250)) / 1000.0
         self.running = False
         self.current_channel = 6
 
@@ -1101,8 +1100,6 @@ class WifiChannelHopperThread(threading.Thread):
         if not self.running:
             return
 
-        lead_time_s = self.lead_time_2g_s if target_channel <= 14 else self.lead_time_5g_s
-
         self.channel_state.start_switch(target_channel, source_channel=self.current_channel)
         success = self._set_channel(target_channel)
         if success:
@@ -1112,17 +1109,15 @@ class WifiChannelHopperThread(threading.Thread):
         if not self.running:
             return
 
-        # Compensate for RF receiving lead time achieved during switch command
-        remaining_dwell_s = max(0.010, target_dwell_s - lead_time_s)
-        time.sleep(remaining_dwell_s)
+        time.sleep(target_dwell_s)
 
     def run(self):
         self.running = True
         logger.info(
             f"[*] Wi-Fi Hopper started on {self.interface} "
             f"(2.4G Non-Social: {self.n_2g_non_social}/cycle, 5.8G Non-Social: {self.n_5g_non_social}/cycle, "
-            f"Social Dwell: {self.social_dwell_s*1000:.0f}ms, Non-Social Dwell: {self.non_social_dwell_s*1000:.0f}ms, "
-            f"2.4G Lead Compensation: {self.lead_time_2g_s*1000:.0f}ms)"
+            f"Social Dwell: {self.social_dwell_s*1000:.0f}ms, 2.4G Non-Social: {self.non_social_dwell_2g_s*1000:.0f}ms, "
+            f"5.8G Non-Social: {self.non_social_dwell_5g_s*1000:.0f}ms)"
         )
 
         self._set_channel(SOCIAL_CHANNEL_2G)
@@ -1139,7 +1134,7 @@ class WifiChannelHopperThread(threading.Thread):
                         break
                     ch_2g = NON_SOCIAL_CHANNELS_2G[self.idx_2g % len(NON_SOCIAL_CHANNELS_2G)]
                     self.idx_2g += 1
-                    self._hop_step(ch_2g, self.non_social_dwell_s)
+                    self._hop_step(ch_2g, self.non_social_dwell_2g_s)
 
                 # --- Step 3: 2.4 GHz Social Channel (Ch 6) #2 (Priority Channel 6 Return) ---
                 self._hop_step(SOCIAL_CHANNEL_2G, self.social_dwell_s)
@@ -1153,7 +1148,7 @@ class WifiChannelHopperThread(threading.Thread):
                         break
                     ch_5g = NON_SOCIAL_CHANNELS_5G[self.idx_5g % len(NON_SOCIAL_CHANNELS_5G)]
                     self.idx_5g += 1
-                    self._hop_step(ch_5g, self.non_social_dwell_s)
+                    self._hop_step(ch_5g, self.non_social_dwell_5g_s)
 
         except Exception as e:
             if self.running:
@@ -1342,7 +1337,9 @@ class BleNrfSnifferThread(threading.Thread):
         nrf_port: Optional[str] = None,
         rx_pcap: Optional[str] = None,
         coded: bool = False,
-        ble_mode: str = "all",
+        ble_mode: str = "hop",
+        bt5_dwell_s: float = 5.0,
+        bt4_dwell_s: float = 1.0,
     ):
         super().__init__(name="BleNrfSnifferThread", daemon=True)
         self.event_queue = event_queue
@@ -1350,12 +1347,18 @@ class BleNrfSnifferThread(threading.Thread):
         self.rx_pcap = rx_pcap
         self.coded = coded
         self.ble_mode = ble_mode
+        self.bt5_dwell_s = bt5_dwell_s
+        self.bt4_dwell_s = bt4_dwell_s
         self.running = False
         self.proc: Optional[subprocess.Popen] = None
 
+    def stop(self):
+        self.running = False
+        self.stop_process()
+
     def run(self):
         self.running = True
-        logger.info("[*] Starting BLE nRF Sniffer worker thread...")
+        logger.info(f"[*] Starting BLE nRF Sniffer worker thread (Mode: {self.ble_mode}, BT5: {self.bt5_dwell_s}s, BT4: {self.bt4_dwell_s}s)...")
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidate_paths = [
@@ -1385,16 +1388,19 @@ class BleNrfSnifferThread(threading.Thread):
                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             time.sleep(0.3)
 
-            cmd = [sys.executable, nrf_script, "--only-rid"]
+            cmd = [
+                sys.executable, nrf_script,
+                "--only-rid",
+                "--ble-mode", self.ble_mode,
+                "--bt5-dwell", str(self.bt5_dwell_s),
+                "--bt4-dwell", str(self.bt4_dwell_s),
+            ]
+            if self.coded:
+                cmd.append("--coded")
             if active_port:
                 cmd.extend(["--nrf-port", active_port])
             elif self.rx_pcap and os.path.exists(self.rx_pcap):
                 cmd.extend(["--rx-pcap", self.rx_pcap])
-
-            if self.coded or self.ble_mode in ("ble5", "extended", "pure_bt5", "bt5"):
-                cmd.append("--coded")
-            if self.ble_mode in ("ble5", "extended", "pure_bt5", "bt5"):
-                cmd.append("-b")
 
             try:
                 self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr, text=True, start_new_session=True)
@@ -1421,18 +1427,23 @@ class BleNrfSnifferThread(threading.Thread):
 
                         parsed_msgs = rid_info.get("parsed_messages", [])
                         raw_hex = record.get("raw_hex", "")
-                        transport_type = str(rid_info.get("transport", "bt5")).lower()
+                        transport_type = str(rid_info.get("transport", "")).lower()
                         pdu_type = str(record.get("pdu_type", "")).upper()
+                        active_mode = str(record.get("active_ble_mode", "")).lower()
+
                         if (
                             "5" in transport_type
                             or "ext" in transport_type
                             or "AUX" in pdu_type
                             or "EXT" in pdu_type
-                            or self.ble_mode in ("ble5", "extended", "pure_bt5", "bt5")
                         ):
                             transport = "bt5"
-                        else:
+                        elif "4" in transport_type or "legacy" in transport_type or active_mode == "bt4":
                             transport = "bt4"
+                        elif active_mode == "bt5":
+                            transport = "bt5"
+                        else:
+                            transport = "bt5" if self.ble_mode in ("ble5", "extended") else "bt4"
 
                         # If parsed_msgs is empty or missing fields, try parsing raw_hex if available
                         if not parsed_msgs and raw_hex:
@@ -1524,8 +1535,9 @@ class BleNrfSnifferThread(threading.Thread):
         if self.proc and self.proc.poll() is None:
             try:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
-                time.sleep(0.2)
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                time.sleep(0.1)
+                if self.proc.poll() is None:
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
             except Exception:
                 try:
                     self.proc.kill()
@@ -1672,7 +1684,9 @@ class UnifiedTelemetryLogger:
             self.last_heartbeat = now
             iso_str = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             active_cnt = len(self.encounter_tracker.active_encounters) if self.encounter_tracker else 0
-            bt_cnt = self.stats["transports"].get("bt5", 0) + self.stats["transports"].get("bt4", 0)
+            bt5_cnt = self.stats["transports"].get("bt5", 0)
+            bt4_cnt = self.stats["transports"].get("bt4", 0)
+            bt_cnt = bt5_cnt + bt4_cnt
             wifi_cnt = self.stats["transports"].get("wifi", 0) + self.stats["transports"].get("nan", 0)
             hub_str = ""
             if self.forwarder:
@@ -1681,7 +1695,7 @@ class UnifiedTelemetryLogger:
                 hub_str = f" | Hub: {h_status} (Streamed: {streamed})"
             else:
                 hub_str = " | Hub: Disabled (Standalone Mode)"
-            print(f"[STATUS {iso_str}] Total: {self.stats['total_packets']} pkts (BLE: {bt_cnt}, Wi-Fi: {wifi_cnt}) | Active Encounters: {active_cnt} | Unique Drones: {len(self.stats['macs'])}{hub_str}")
+            print(f"[STATUS {iso_str}] Total: {self.stats['total_packets']} pkts (BLE: {bt_cnt} [BT5: {bt5_cnt}, BT4: {bt4_cnt}], Wi-Fi: {wifi_cnt}) | Active Encounters: {active_cnt} | Unique Drones: {len(self.stats['macs'])}{hub_str}")
             sys.stdout.flush()
 
     def process_event(self, event: Dict[str, Any]):
@@ -1983,14 +1997,9 @@ def main():
     parser.add_argument("--non-social-ratio", "-k", type=int, default=1,
                         help="Non-social channel ratio multiplier k (cycles 2k non-social on 2.4GHz for every k on 5.8GHz)")
     parser.add_argument("--social-dwell-ms", type=int, default=1000, help="Social channel dwell time in milliseconds (1 Hz)")
-    parser.add_argument("--non-social-dwell-ms", type=int, default=200, help="Non-social channel dwell time in milliseconds (5 Hz)")
-    parser.add_argument("--lead-time-2g-ms", type=int, default=40, help="Hardware lead time compensation for 2.4GHz in ms (default: 40ms based on empirical RF lock timing)")
-    parser.add_argument("--lead-time-5g-ms", type=int, default=0, help="Hardware lead time compensation for 5.8GHz in ms (default: 0ms)")
+    parser.add_argument("--non-social-dwell-ms", type=int, default=200, help="2.4 GHz non-social channel dwell time in milliseconds (default: 200ms)")
+    parser.add_argument("--non-social-dwell-5g-ms", type=int, default=250, help="5.8 GHz non-social channel dwell time in milliseconds (default: 250ms extended dwell to compensate for mixed/negative PLL lead times)")
     parser.add_argument("--drain-retention-ms", type=float, default=5.0, help="Buffer drain retention window in ms for previous channel packet attribution (default: 5.0ms)")
-
-    # BLE Options
-    parser.add_argument("--coded", action="store_true", help="Enable Bluetooth 5 Long Range (LE Coded PHY) scanning")
-    parser.add_argument("--ble-mode", choices=["all", "legacy", "extended"], default="extended", help="BLE advertisement filter mode (default: extended)")
 
     # Distributed Hub & Forwarding Options
     try:
@@ -2001,6 +2010,15 @@ def main():
     default_hub_url = cfg.get("hub_ws_url")
     default_spool_dir = cfg.get("spool_dir", "spool")
     default_max_ram = int(cfg.get("max_ram_queue", 10000))
+    default_ble_mode = cfg.get("ble_mode", "hop")
+    default_ble_bt5_dwell = float(cfg.get("ble_bt5_dwell_s", 5.0))
+    default_ble_bt4_dwell = float(cfg.get("ble_bt4_dwell_s", 1.0))
+
+    # BLE Options
+    parser.add_argument("--coded", action="store_true", help="Enable Bluetooth 5 Long Range (LE Coded PHY) scanning")
+    parser.add_argument("--ble-mode", choices=["hop", "extended", "legacy", "all"], default=default_ble_mode, help="BLE advertisement filter mode (default: hop)")
+    parser.add_argument("--ble-bt5-dwell", type=float, default=default_ble_bt5_dwell, help="BT5 Extended / Coded dwell time in seconds (default: 5.0s)")
+    parser.add_argument("--ble-bt4-dwell", type=float, default=default_ble_bt4_dwell, help="BT4 Legacy dwell time in seconds (default: 1.0s)")
 
     parser.add_argument("--scanner-config", default=None, help="Path to JSON configuration file for scanner station parameters (default: scanner/scanner_config.json)")
     parser.add_argument("--hub-url", default=default_hub_url, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)")
@@ -2036,6 +2054,12 @@ def main():
             args.spool_dir = cfg.get("spool_dir", default_spool_dir)
         if args.max_ram_queue == default_max_ram:
             args.max_ram_queue = int(cfg.get("max_ram_queue", default_max_ram))
+        if args.ble_mode == default_ble_mode:
+            args.ble_mode = cfg.get("ble_mode", default_ble_mode)
+        if args.ble_bt5_dwell == default_ble_bt5_dwell:
+            args.ble_bt5_dwell = float(cfg.get("ble_bt5_dwell_s", default_ble_bt5_dwell))
+        if args.ble_bt4_dwell == default_ble_bt4_dwell:
+            args.ble_bt4_dwell = float(cfg.get("ble_bt4_dwell_s", default_ble_bt4_dwell))
 
     if not args.no_wifi and not args.wifi_iface:
         args.no_wifi = True
@@ -2148,8 +2172,7 @@ def main():
                 non_social_ratio_k=args.non_social_ratio,
                 social_dwell_ms=args.social_dwell_ms,
                 non_social_dwell_ms=args.non_social_dwell_ms,
-                lead_time_2g_ms=args.lead_time_2g_ms,
-                lead_time_5g_ms=args.lead_time_5g_ms,
+                non_social_dwell_5g_ms=args.non_social_dwell_5g_ms,
             )
             threads.append(hopper_thread)
         else:
@@ -2175,8 +2198,10 @@ def main():
             event_queue=event_queue,
             nrf_port=nrf_port,
             rx_pcap=args.rx_pcap,
-            coded=args.coded or (args.ble_mode in ("ble5", "extended", "pure_bt5", "bt5")),
+            coded=args.coded,
             ble_mode=args.ble_mode,
+            bt5_dwell_s=args.ble_bt5_dwell,
+            bt4_dwell_s=args.ble_bt4_dwell,
         )
         threads.append(ble_thread)
 

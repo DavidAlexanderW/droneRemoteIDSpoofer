@@ -60,3 +60,4 @@ scanner/scanner_config.json
 scanner/dashboard/dashboard_config.json
 
 
+*.bak*
