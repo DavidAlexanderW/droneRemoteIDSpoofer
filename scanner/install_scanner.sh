@@ -54,6 +54,8 @@ fi
 INSTALL_SERVICES=false
 WIFI_IFACE=""
 NRF_PORT=""
+HUB_URL=""
+NODE_ID=""
 SKIP_NRF=false
 SKIP_SYS_PKGS=false
 SKIP_CAPS=false
@@ -84,6 +86,8 @@ print_usage() {
     echo "  --with-services       Configure and install systemd 24/7 background services"
     echo "  --wifi-iface <iface>  Wi-Fi interface to set in drone-scanner.service (e.g. wlan0, wlan1)"
     echo "  --nrf-port <port>     nRF UART serial port to set in drone-scanner.service (e.g. /dev/ttyACM0)"
+    echo "  --hub-url <url>       Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
+    echo "  --node-id <id>        Unique sensor node identifier (e.g. sensor-node-01)"
     echo "  --no-nrf              Skip downloading Nordic nrfutil and ble-sniffer plugin"
     echo "  --no-sys-pkgs         Skip apt package installation (iw, iproute2, rfkill, etc.)"
     echo "  --no-caps             Skip Linux network capabilities (setcap)"
@@ -104,6 +108,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --nrf-port)
             NRF_PORT="$2"
+            shift 2
+            ;;
+        --hub-url)
+            HUB_URL="$2"
+            shift 2
+            ;;
+        --node-id)
+            NODE_ID="$2"
             shift 2
             ;;
         --no-nrf)
@@ -406,6 +418,19 @@ if [ "$INSTALL_SERVICES" = true ]; then
     echo -e "    - Wi-Fi Interface : ${WIFI_IFACE}"
     echo -e "    - nRF Port        : ${NRF_PORT}"
 
+    HUB_ARGS=""
+    if [ -n "${HUB_URL}" ]; then
+        HUB_ARGS="    --hub-url ${HUB_URL} \\"
+        if [ -n "${NODE_ID}" ]; then
+            HUB_ARGS="${HUB_ARGS}
+    --node-id ${NODE_ID} \\"
+        fi
+    else
+        HUB_ARGS="    --db-file ${REPO_DIR}/rid_detections.db \\
+    --log-jsonl ${REPO_DIR}/rid_packets.jsonl \\
+    --rotate-daily \\"
+    fi
+
     # drone-scanner.service
     TMP_SCANNER_SRV="/tmp/drone-scanner-$$.service"
     cat << EOF > "${TMP_SCANNER_SRV}"
@@ -424,9 +449,7 @@ ExecStart=${VENV_DIR}/bin/drone-scanner \\
     --nrf-port ${NRF_PORT} \\
     --ble-mode extended \\
     --coded \\
-    --db-file ${REPO_DIR}/rid_detections.db \\
-    --log-jsonl ${REPO_DIR}/rid_packets.jsonl \\
-    --rotate-daily \\
+${HUB_ARGS}
     --quiet
 
 Restart=always

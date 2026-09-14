@@ -54,8 +54,8 @@ graph TD
 ```
 
 ### Thread Responsibilities
-1. **`WifiChannelHopperThread`**: Executes the precise multi-band 2.4 GHz / 5.8 GHz hopping schedule with dedicated intraband (30ms) and interband (50ms) switching delays.
-2. **`WifiSnifferThread`**: High-throughput Linux `AF_PACKET` raw socket capture parsing 802.11 Beacons (Vendor Specific IE `0xDD` / OUI `FA:0B:BC` / AppCode `0x0D`) and Wi-Fi NAN Action frames.
+1. **`WifiChannelHopperThread`**: Executes the empirical multi-band 2.4 GHz / 5.8 GHz hopping schedule with lead-time compensated dwell timing and transition tracking.
+2. **`WifiSnifferThread`**: High-throughput Linux `AF_PACKET` raw socket capture parsing 802.11 Beacons (Vendor Specific IE `0xDD` / OUI `FA:0B:BC` / AppCode `0x0D`) and Wi-Fi NAN Action frames with transition drain awareness.
 3. **`BleNrfSnifferThread`**: Autonomous driver managing `nrf_bt_sniffer_json.py` over UART to capture BLE 4 Legacy and BLE 5 Extended Remote ID advertisements.
 4. **`UnifiedTelemetryLogger`**: Drains the event queue to print colorized real-time telemetry, append to a replay-compatible `.jsonl` log, and update the 5-minute SQLite flight encounter tracker.
 
@@ -87,34 +87,34 @@ The scanner implements an optimized ASTM F3411 hopping sequence ensuring regular
   - **Social Channel (1 Hz Dwell)**: Channel `149` $\to$ **1000 ms**
   - **Non-Social Channels (5 Hz Dwell)**: Channels `153, 157, 161, 165, 169, 173` $\to$ **200 ms** each
 
-### Switching Latency Overhead & Tunability
-- **Intraband Switching Delay (Default: `30 ms`)**: Delay when hopping within the same band (e.g. $2.4\text{ GHz} \to 2.4\text{ GHz}$ or $5.8\text{ GHz} \to 5.8\text{ GHz}$).
-- **Interband Switching Delay (Default: `50 ms`)**: Delay when crossing frequency bands (e.g. $2.4\text{ GHz} \to 5.8\text{ GHz}$ or $5.8\text{ GHz} \to 2.4\text{ GHz}$).
+### Switching Latency Overhead & Empirical Calibration
+Channel switching overhead is governed by the physical RF PLL lock time and synchronous `iw` kernel/driver syscall execution:
+- **Tuning to 2.4 GHz**: Command duration $\sim 145\,\text{ms}$, RF blind spot $\sim 105\,\text{ms}$, hardware lead time $\sim 40\,\text{ms}$.
+- **Tuning to 5.8 GHz**: Command duration $\sim 158\,\text{ms}$, RF blind spot $\sim 160\,\text{ms}$, hardware lead time $\sim 0\,\text{ms}$.
+- **Source Band Effect**: Switching from 5.8 GHz adds an extra $\sim 5\text{--}6\,\text{ms}$ relative to switching from 2.4 GHz.
+- **Buffer Drain Retention**: Residual packets in the USB FIFO buffer drain for $\sim 5\,\text{ms}$ post-switch and are accurately attributed to the previous channel.
 
-> [!NOTE]
-> **Switching Latency is an Empirical Estimate**:
-> Exact channel switching latency varies across Wi-Fi chipsets (e.g. RTL8812AU vs MT7921 vs AR9271), Linux wireless drivers, and USB bus overhead. The default values (`30 ms` intraband, `50 ms` interband) are conservative baseline estimates and are **fully configurable via CLI flags**:
-> - `--intraband-delay-ms <ms>` (e.g. `--intraband-delay-ms 20`)
-> - `--interband-delay-ms <ms>` (e.g. `--interband-delay-ms 40`)
-> - `--social-dwell-ms <ms>` (default `1000`)
-> - `--non-social-dwell-ms <ms>` (default `200`)
+> [!TIP]
+> **Lead-Time Dwell Compensation**:
+> Because the physical radio on 2.4 GHz locks and starts receiving $\sim 40\,\text{ms}$ *before* the `iw` command unblocks, the hopper compensates by reducing the post-command sleep (`--lead-time-2g-ms 40`), guaranteeing the exact on-air dwell time without wasted pauses.
 
-### Configurable $2k:k$ Ratio (Default $k=1$)
-In every cycle, the hopper sweeps:
-1. **2.4 GHz Social (Ch 6)**: 1000 ms dwell
-2. **2.4 GHz Non-Social ($2k$ channels, e.g. 2)**: 200 ms dwell + 30 ms switch each
-3. **5.8 GHz Social (Ch 149)**: 1000 ms dwell + 50 ms switch
-4. **5.8 GHz Non-Social ($k$ channels, e.g. 1)**: 200 ms dwell + 30 ms switch
+### Configurable $2k:k$ Ratio (Default $k=1$, Dual Ch 6 Visits)
+Because Channel 6 carries the vast majority of commercial drone Remote ID traffic, the hopper visits Channel 6 **twice per cycle** (interleaved before non-social scanning and before switching to 5.8 GHz):
+1. **2.4 GHz Social (Ch 6) #1**: 1000 ms on-air dwell
+2. **2.4 GHz Non-Social ($2k$ channels, e.g. 2)**: 200 ms on-air dwell each
+3. **2.4 GHz Social (Ch 6) #2**: 1000 ms on-air dwell (priority return)
+4. **5.8 GHz Social (Ch 149)**: 1000 ms on-air dwell
+5. **5.8 GHz Non-Social ($k$ channels, e.g. 1)**: 200 ms on-air dwell each
 
+```text
+Cycle 1: Ch 6 (1000ms) -> Ch 1, Ch 2 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000ms) -> Ch 153 (200ms)
+Cycle 2: Ch 6 (1000ms) -> Ch 3, Ch 4 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000ms) -> Ch 157 (200ms)
+Cycle 3: Ch 6 (1000ms) -> Ch 5, Ch 7 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000ms) -> Ch 161 (200ms)
+Cycle 4: Ch 6 (1000ms) -> Ch 8, Ch 9 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000ms) -> Ch 165 (200ms)
+Cycle 5: Ch 6 (1000ms) -> Ch 10, Ch 11 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000ms) -> Ch 169 (200ms)
+Cycle 6: Ch 6 (1000ms) -> Ch 12, Ch 13 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000ms) -> Ch 173 (200ms)
 ```
-Cycle 1: Ch 6 (1000ms) -> Ch 1, Ch 2 (200ms) -> Ch 149 (1000ms) -> Ch 153 (200ms)
-Cycle 2: Ch 6 (1000ms) -> Ch 3, Ch 4 (200ms) -> Ch 149 (1000ms) -> Ch 157 (200ms)
-Cycle 3: Ch 6 (1000ms) -> Ch 5, Ch 7 (200ms) -> Ch 149 (1000ms) -> Ch 161 (200ms)
-Cycle 4: Ch 6 (1000ms) -> Ch 8, Ch 9 (200ms) -> Ch 149 (1000ms) -> Ch 165 (200ms)
-Cycle 5: Ch 6 (1000ms) -> Ch 10, Ch 11 (200ms) -> Ch 149 (1000ms) -> Ch 169 (200ms)
-Cycle 6: Ch 6 (1000ms) -> Ch 12, Ch 13 (200ms) -> Ch 149 (1000ms) -> Ch 173 (200ms)
-```
-*(All 18 channels across both bands are fully scanned every 6 cycles / ~16.74 seconds!)*
+> Total 6-cycle full sweep duration across all 18 channels: **$\sim 27.5\,\text{seconds}$** (6 cycles $\times \sim 4.58\,\text{s}$ per cycle). Every channel is scanned, while Channel 6 receives $12\,\text{seconds}$ ($44\%$) of total listening time.
 
 ---
 
@@ -228,8 +228,9 @@ sudo journalctl -u drone-dashboard.service -f
 | `--non-social-ratio`, `-k` | `1` | Ratio multiplier ($2k$ non-social on 2.4 GHz per $k$ on 5.8 GHz) |
 | `--social-dwell-ms` | `1000` | Social channel dwell time in milliseconds (1 Hz) |
 | `--non-social-dwell-ms` | `200` | Non-social channel dwell time in milliseconds (5 Hz) |
-| `--intraband-delay-ms` | `30` | Intraband switching delay in milliseconds |
-| `--interband-delay-ms` | `50` | Interband switching delay in milliseconds |
+| `--lead-time-2g-ms` | `40` | 2.4 GHz hardware lead time compensation in ms (calibrated from RF lock timing) |
+| `--lead-time-5g-ms` | `0` | 5.8 GHz hardware lead time compensation in ms |
+| `--drain-retention-ms` | `5.0` | Buffer drain retention window in ms for previous channel attribution |
 | `--coded` | `False` | Enable BLE 5 Long Range (LE Coded PHY) scanning |
 | `--ble-mode` | `extended` | Filter BLE advertisements: `extended` (BLE 5 Extended Advertising), `legacy` (BLE 4), `all` |
 | `--db-file` | `rid_detections.db` | SQLite database path for flight encounters (`''` to disable) |
@@ -424,9 +425,59 @@ The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenD
 
 ---
 
-## 14. Running the Unit Tests
+## 14. Distributed Ingestion & Multi-Node Sensor Network
 
-Automated test suites verify ASTM decoding, hopping schedule math, SQLite persistence, make/model inference, receiver geodesy, and dashboard APIs:
+The system supports scaling from standalone listeners into an integrated sensor grid with a **Central Ingestion Hub** (`scanner/central_hub.py` / `drone-central-hub`).
+
+```
++-----------------------------------------------------------------------------------+
+|  [Edge Node 1: ETZ Rooftop]    [Edge Node 2: HG Tower]     [Edge Node 3: Mobile]  |
+|   • Tier 1: Live WS Stream      • Tier 1: Live WS Stream    • Tier 1: Live WS     |
+|   • Tier 2: RAM Buffer (10k)    • Tier 2: RAM Buffer (10k)  • Tier 2: RAM Buffer  |
+|   • Tier 3: Temp Disk Spool     • Tier 3: Temp Disk Spool   • Tier 3: Temp Spool  |
++-----------------------------------------------------------------------------------+
+                                         | (WebSocket / TLS / Catch-Up Sync)
+                                         v
++-----------------------------------------------------------------------------------+
+| CENTRAL INGESTION HUB (`scanner/central_hub.py` / `drone-central-hub.service`)     |
+|  • Zero Radio Hardware / Unprivileged Service / Runs in Cloud VM or Container     |
+|  • Spatial Deduplication, Sighting Fusion & Watermark Catch-Up Sync               |
+|  • Dual-Tier Storage: `rid_detections_central.db` + daily replay `.jsonl`         |
++-----------------------------------------------------------------------------------+
+```
+
+### 14.1 3-Tier Edge Reliability Pipeline
+- **Tier 1 (Connected / Happy Path)**: Live packets stream over WebSockets with **zero continuous disk writes**, protecting SD cards and flash storage.
+- **Tier 2 (Transient Outages < 5-10 min)**: Packets accumulate in a bounded in-memory RAM queue (`max_ram_queue: 10000`).
+- **Tier 3 (Extended Outages / Offline)**: Overflow packets spill over into timestamped local spool files (`spool/spool_*.jsonl`).
+- **Catch-Up Burst & Auto-Purge**: On reconnect, the node executes a high-speed batch stream to the Hub. Upon server commit ACK, the node immediately unlinks/deletes the spool files (`os.remove()`).
+
+### 14.2 Running the Central Hub
+```bash
+# Launch Central Hub on server (requires zero radio hardware)
+drone-central-hub --host 0.0.0.0 --port 8000 --db-file rid_detections_central.db --log-dir central_logs
+```
+
+### 14.3 Transitioning Existing Scanners to Central Mode
+To transition an existing standalone scanner node:
+1. Edit `scanner/scanner_config.json`:
+   ```json
+   {
+     "node_id": "sensor-node-01",
+     "hub_ws_url": "ws://central-server-ip:8000/stream/node"
+   }
+   ```
+2. Restart the scanner service:
+   ```bash
+   sudo systemctl restart drone-scanner.service
+   ```
+3. The node automatically streams any historical `.jsonl` or spool backlog to the Central Hub, deletes them upon confirmation, and switches to live zero-disk streaming.
+
+---
+
+## 15. Running the Unit Tests
+
+Automated test suites verify ASTM decoding, hopping schedule math, SQLite persistence, make/model inference, forwarder 3-tier buffering, central hub deduplication, receiver geodesy, and dashboard APIs:
 
 ```bash
 # Run all unit tests across the scanner module

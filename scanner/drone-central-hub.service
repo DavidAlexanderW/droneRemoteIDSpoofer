@@ -1,0 +1,55 @@
+# ==============================================================================
+# Drone Remote ID Central Ingestion Hub - systemd Service Unit
+# ==============================================================================
+#
+# Runs the headless Central Ingestion Hub and Sensor Fusion engine.
+# Requires ZERO radio hardware. Can run in cloud VMs, servers, or containers.
+#
+# Installation Instructions:
+# 1. Copy or link this service file to /etc/systemd/system/:
+#      sudo cp scanner/drone-central-hub.service /etc/systemd/system/
+#
+# 2. Adjust User, WorkingDirectory and ExecStart paths if needed.
+#
+# 3. Reload systemd daemon and enable service at boot:
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now drone-central-hub.service
+#
+# 4. Check status & live logs:
+#      sudo systemctl status drone-central-hub.service
+#      sudo journalctl -u drone-central-hub.service -f
+# ==============================================================================
+
+[Unit]
+Description=Central Drone Remote ID Ingestion Hub & Sensor Fusion Server
+Documentation=https://github.com/cyber-defence-campus/droneRemoteIDSpoofer
+After=network.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/user/droneRemoteIDSpoofer
+ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/python3 scanner/central_hub.py \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --db-file /home/user/droneRemoteIDSpoofer/rid_detections_central.db \
+    --log-dir /home/user/droneRemoteIDSpoofer/central_logs \
+    --timeout-s 300.0 \
+    --quiet
+
+# Auto-restart on failure
+Restart=always
+RestartSec=5s
+
+# Clean shutdown
+KillMode=mixed
+TimeoutStopSec=10s
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drone-central-hub
+
+[Install]
+WantedBy=multi-user.target

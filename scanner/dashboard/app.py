@@ -35,10 +35,10 @@ if scanner_dir not in sys.path:
     sys.path.insert(0, scanner_dir)
 
 try:
-    from scanner.db import get_db_connection as db_get_connection, reconcile_stale_encounters
+    from scanner.db import get_db_connection as db_get_connection, reconcile_stale_encounters, get_receiver_nodes
     from scanner.drone_models import infer_drone_model
 except ImportError:
-    from db import get_db_connection as db_get_connection, reconcile_stale_encounters
+    from db import get_db_connection as db_get_connection, reconcile_stale_encounters, get_receiver_nodes
     from drone_models import infer_drone_model
 
 try:
@@ -126,6 +126,17 @@ def get_db_connection() -> sqlite3.Connection:
 def get_scanner_config_endpoint():
     """Returns the scanner station parameters, coordinates, and range rings from disk."""
     return get_current_scanner_config()
+
+
+@app.get("/api/nodes")
+def get_nodes_endpoint():
+    """Returns all registered sensor receiver stations from the database."""
+    conn = get_db_connection()
+    try:
+        nodes = get_receiver_nodes(conn)
+        return {"nodes": nodes, "count": len(nodes)}
+    finally:
+        conn.close()
 
 
 @app.post("/api/config/scanner")

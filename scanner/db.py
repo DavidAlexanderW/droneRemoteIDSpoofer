@@ -112,6 +112,35 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
     """
     conn.execute(create_table_sql)
 
+    # 1b. Multi-node receiver stations table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS receiver_nodes (
+            node_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            altitude_m REAL NOT NULL,
+            range_rings_json TEXT DEFAULT '[500, 1000, 2500, 5000]',
+            description TEXT,
+            first_connected_iso TEXT NOT NULL,
+            last_heartbeat_epoch REAL NOT NULL,
+            last_heartbeat_iso TEXT NOT NULL,
+            packets_received_total INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ONLINE'
+        );
+    """)
+
+    # 1c. Node synchronization state / watermark table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS node_sync_state (
+            node_id TEXT PRIMARY KEY,
+            last_synced_epoch REAL NOT NULL DEFAULT 0.0,
+            last_synced_iso TEXT NOT NULL,
+            packets_synced_total INTEGER NOT NULL DEFAULT 0,
+            last_sync_completed_iso TEXT
+        );
+    """)
+
     # 2. Non-destructive schema migration for existing SQLite databases
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(encounters);")
@@ -142,6 +171,7 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_serial ON encounters(serial_number);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_time ON encounters(first_seen, last_seen);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_active ON encounters(is_active);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_status ON receiver_nodes(status);")
 
     # 5. Auto-reconcile lingering active encounters from prior runs
     now = time.time()
@@ -155,7 +185,7 @@ def get_db_connection(db_path: str, timeout_s: float = 300.0) -> sqlite3.Connect
     Returns a SQLite connection configured with Row factory, WAL mode,
     canonical schema, non-destructive migrations, and automated backfill applied.
     """
-    conn = sqlite3.connect(db_path, timeout=10.0)
+    conn = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     init_encounters_db(conn, timeout_s=timeout_s)
     return conn
@@ -172,3 +202,89 @@ def reconcile_stale_encounters(conn: sqlite3.Connection, timeout_s: float = 300.
         conn.commit()
     except Exception:
         pass
+
+
+def upsert_receiver_node(
+    conn: sqlite3.Connection,
+    node_id: str,
+    name: str,
+    latitude: float,
+    longitude: float,
+    altitude_m: float,
+    range_rings_json: Optional[str] = None,
+    description: Optional[str] = None,
+    packets_increment: int = 0,
+    status: str = "ONLINE",
+) -> None:
+    """Registers or updates a receiver station in the receiver_nodes table."""
+    now = time.time()
+    iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    rings = range_rings_json or "[500, 1000, 2500, 5000]"
+
+    conn.execute("""
+        INSERT INTO receiver_nodes (
+            node_id, name, latitude, longitude, altitude_m,
+            range_rings_json, description, first_connected_iso,
+            last_heartbeat_epoch, last_heartbeat_iso, packets_received_total, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+            name = excluded.name,
+            latitude = excluded.latitude,
+            longitude = excluded.longitude,
+            altitude_m = excluded.altitude_m,
+            range_rings_json = excluded.range_rings_json,
+            description = COALESCE(excluded.description, receiver_nodes.description),
+            last_heartbeat_epoch = excluded.last_heartbeat_epoch,
+            last_heartbeat_iso = excluded.last_heartbeat_iso,
+            packets_received_total = receiver_nodes.packets_received_total + excluded.packets_received_total,
+            status = excluded.status;
+    """, (
+        node_id, name, latitude, longitude, altitude_m,
+        rings, description, iso_now, now, iso_now, packets_increment, status
+    ))
+    conn.commit()
+
+
+def get_receiver_nodes(conn: sqlite3.Connection, offline_timeout_s: float = 60.0) -> List[Dict[str, Any]]:
+    """Retrieves all registered receiver nodes, dynamically updating status based on last heartbeat."""
+    now = time.time()
+    rows = conn.execute("SELECT * FROM receiver_nodes ORDER BY name ASC;").fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        last_hb = float(d.get("last_heartbeat_epoch", 0.0))
+        if now - last_hb > (offline_timeout_s * 3):
+            d["status"] = "OFFLINE"
+        elif now - last_hb > offline_timeout_s:
+            d["status"] = "DEGRADED"
+        else:
+            d["status"] = "ONLINE"
+        results.append(d)
+    return results
+
+
+def get_node_sync_watermark(conn: sqlite3.Connection, node_id: str) -> float:
+    """Returns the last synchronized epoch timestamp for a given node, or 0.0 if not found."""
+    row = conn.execute("SELECT last_synced_epoch FROM node_sync_state WHERE node_id = ?;", (node_id,)).fetchone()
+    if row:
+        return float(row[0])
+    return 0.0
+
+
+def update_node_sync_watermark(conn: sqlite3.Connection, node_id: str, last_epoch: float, packets_synced_count: int = 0) -> None:
+    """Updates the synchronization watermark for a node."""
+    iso_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_epoch))
+    now = time.time()
+    iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+
+    conn.execute("""
+        INSERT INTO node_sync_state (
+            node_id, last_synced_epoch, last_synced_iso, packets_synced_total, last_sync_completed_iso
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+            last_synced_epoch = MAX(node_sync_state.last_synced_epoch, excluded.last_synced_epoch),
+            last_synced_iso = excluded.last_synced_iso,
+            packets_synced_total = node_sync_state.packets_synced_total + excluded.packets_synced_total,
+            last_sync_completed_iso = excluded.last_sync_completed_iso;
+    """, (node_id, last_epoch, iso_str, packets_synced_count, iso_now))
+    conn.commit()

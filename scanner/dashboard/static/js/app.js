@@ -76,10 +76,26 @@ class TacticalApp {
     // 6. Start Live Services
     this.fetchStats();
     this.fetchEncounters();
+    this.fetchNodes();
     this.connectWebSocket();
 
     this.statsInterval = setInterval(() => this.fetchStats(), 4000);
     this.feedInterval = setInterval(() => this.fetchEncounters(), 3000);
+    this.nodesInterval = setInterval(() => this.fetchNodes(), 8000);
+  }
+
+  async fetchNodes() {
+    try {
+      const res = await fetch('/api/nodes');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.nodes && this.mapCtrl) {
+          this.mapCtrl.setNodesList(data.nodes);
+        }
+      }
+    } catch (e) {
+      // Standalone mode or transient error
+    }
   }
 
   initHudControls() {

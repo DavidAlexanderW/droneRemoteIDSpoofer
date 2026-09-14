@@ -84,11 +84,17 @@ from drone_rid_spoofer.parser import (
 try:
     from scanner.db import init_encounters_db, get_db_connection as db_get_connection, reconcile_stale_encounters
     from scanner.drone_models import infer_drone_model
+    from scanner.forwarder import CentralStreamForwarder
+    from scanner.scanner_config import load_scanner_config
 except ImportError:
     try:
         from db import init_encounters_db, get_db_connection as db_get_connection, reconcile_stale_encounters
         from drone_models import infer_drone_model
+        from forwarder import CentralStreamForwarder
+        from scanner_config import load_scanner_config
     except ImportError:
+        CentralStreamForwarder = None
+        load_scanner_config = lambda *args, **kwargs: {}
         def infer_drone_model(serial):
             return {"make": None, "model": None, "company": None, "country": None, "is_inferred": False}
 
@@ -1439,6 +1445,7 @@ class UnifiedTelemetryLogger:
     1. Colorized live console display (or periodic quiet heartbeat in daemon mode).
     2. Append-only replay-compatible JSONL log with optional daily date splitting.
     3. SQLite 5-minute flight encounter grouping & throttled persistence with WAL checkpointing.
+    4. Distributed streaming via CentralStreamForwarder (3-tier reliability).
     """
     def __init__(
         self,
@@ -1448,7 +1455,9 @@ class UnifiedTelemetryLogger:
         quiet: bool = False,
         rotate_daily: bool = False,
         persist_interval_s: float = 2.0,
+        forwarder: Optional[Any] = None,
     ):
+        self.forwarder = forwarder
         self.base_log_path = log_jsonl_path
         self.rotate_daily = rotate_daily
         self.quiet = quiet
@@ -1560,12 +1569,16 @@ class UnifiedTelemetryLogger:
             ch_key = str(ch_raw) if ch_raw is not None else "N/A"
             self.stats["wifi_channels"][ch_key] = self.stats["wifi_channels"].get(ch_key, 0) + 1
 
-        # 1. Update SQLite 5-minute Encounter Tracker
+        # 1. Forward to Central Hub (if in distributed streaming mode)
+        if self.forwarder:
+            self.forwarder.enqueue_packet(event)
+
+        # 2. Update SQLite 5-minute Encounter Tracker (if configured)
         encounter_id = None
         if self.encounter_tracker:
             encounter_id = self.encounter_tracker.update_with_packet(event)
 
-        # 2. Write to Replay-Compatible JSONL
+        # 3. Write to Replay-Compatible JSONL (if configured)
         ev_ts = event.get("timestamp", now)
         handle = self._ensure_log_handle(ev_ts)
         if handle:
@@ -1719,6 +1732,8 @@ class UnifiedTelemetryLogger:
         sys.stdout.flush()
 
     def close(self):
+        if self.forwarder:
+            self.forwarder.stop()
         if self.encounter_tracker:
             self.encounter_tracker.finalize_all()
         if self.log_file_handle:
@@ -1830,6 +1845,19 @@ def main():
     parser.add_argument("--coded", action="store_true", help="Enable Bluetooth 5 Long Range (LE Coded PHY) scanning")
     parser.add_argument("--ble-mode", choices=["all", "legacy", "extended"], default="extended", help="BLE advertisement filter mode (default: extended)")
 
+    # Distributed Hub & Forwarding Options
+    cfg = load_scanner_config() if load_scanner_config else {}
+    default_node_id = cfg.get("node_id", "sensor-node-01")
+    default_hub_url = cfg.get("hub_ws_url")
+    default_spool_dir = cfg.get("spool_dir", "spool")
+    default_max_ram = int(cfg.get("max_ram_queue", 10000))
+
+    parser.add_argument("--hub-url", default=default_hub_url, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)")
+    parser.add_argument("--node-id", default=default_node_id, help="Sensor node identifier")
+    parser.add_argument("--standalone", action="store_true", help="Force standalone mode (disables forwarding, enables local SQLite/JSONL)")
+    parser.add_argument("--spool-dir", default=default_spool_dir, help="Directory for temporary spool files during network outages")
+    parser.add_argument("--max-ram-queue", type=int, default=default_max_ram, help="Max in-memory RAM queue size before spilling to disk")
+
     # Storage & Logging
     parser.add_argument("--db-file", default="rid_detections.db", help="SQLite database path for 5-minute flight encounter records (set empty '' to disable)")
     parser.add_argument("--encounter-timeout-s", type=float, default=300.0, help="Flight encounter timeout in seconds (default 300s / 5 minutes)")
@@ -1860,15 +1888,43 @@ def main():
 
     initial_wifi_ch = args.wifi_channel if args.wifi_channel is not None else SOCIAL_CHANNEL_2G
 
+    # Configure Distributed Stream Forwarder or Standalone Mode
+    is_hub_mode = bool(args.hub_url and not args.standalone)
+    forwarder = None
+
+    if is_hub_mode:
+        if CentralStreamForwarder is not None:
+            forwarder = CentralStreamForwarder(
+                hub_ws_url=args.hub_url,
+                node_id=args.node_id,
+                node_meta=cfg,
+                spool_dir=args.spool_dir,
+                max_ram_queue=args.max_ram_queue,
+                quiet=args.quiet,
+            )
+            forwarder.start()
+        else:
+            logger.error("[-] CentralStreamForwarder module could not be loaded. Running standalone.")
+
+    # Determine local storage paths: in hub mode, disable continuous local disk writes unless explicitly specified
+    db_path_to_use = None
+    if not is_hub_mode:
+        db_path_to_use = args.db_file if args.db_file else None
+    elif args.db_file and args.db_file != "rid_detections.db":
+        db_path_to_use = args.db_file
+
+    log_jsonl_to_use = args.log_jsonl if (not is_hub_mode or args.log_jsonl) else None
+
     event_queue: queue.Queue = queue.Queue()
     channel_state = SharedChannelState(initial_channel=initial_wifi_ch, drain_retention_ms=args.drain_retention_ms)
     logger_worker = UnifiedTelemetryLogger(
-        log_jsonl_path=args.log_jsonl,
-        db_path=args.db_file if args.db_file else None,
+        log_jsonl_path=log_jsonl_to_use,
+        db_path=db_path_to_use,
         encounter_timeout_s=args.encounter_timeout_s,
         quiet=args.quiet,
         rotate_daily=args.rotate_daily,
         persist_interval_s=args.persist_interval,
+        forwarder=forwarder,
     )
 
     threads: List[threading.Thread] = []
@@ -1932,10 +1988,14 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
 
     print(f"\n{C_BOLD}{C_GREEN}🚀 COMBINED BLUETOOTH & WI-FI REMOTE ID LISTENER ACTIVE{C_RESET}")
-    if args.db_file:
-        print(f"  • SQLite Encounters DB: {C_MAGENTA}{args.db_file}{C_RESET} (Timeout: {args.encounter_timeout_s:.0f}s / {args.encounter_timeout_s/60:.1f}m)")
-    if args.log_jsonl:
-        print(f"  • Replay JSONL Log   : {C_MAGENTA}{args.log_jsonl}{C_RESET}")
+    if is_hub_mode and forwarder:
+        print(f"  • Central Hub URL    : {C_CYAN}{args.hub_url}{C_RESET} (Node ID: {C_BOLD}{args.node_id}{C_RESET})")
+        print(f"  • Reliability Buffer : {C_MAGENTA}RAM Max: {args.max_ram_queue} pkts | Disk Spool: {args.spool_dir}/{C_RESET} (0 disk writes on happy path)")
+    else:
+        if db_path_to_use:
+            print(f"  • SQLite Encounters DB: {C_MAGENTA}{db_path_to_use}{C_RESET} (Timeout: {args.encounter_timeout_s:.0f}s / {args.encounter_timeout_s/60:.1f}m)")
+        if log_jsonl_to_use:
+            print(f"  • Replay JSONL Log   : {C_MAGENTA}{log_jsonl_to_use}{C_RESET}")
     print(f"{C_GRAY}Press Ctrl+C at any time to stop and view capture statistics.{C_RESET}\n")
 
     # Start capture threads

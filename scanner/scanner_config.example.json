@@ -1,4 +1,5 @@
 {
+  "node_id": "sensor-node-01",
   "name": "Zurich Airspace Tactical Sensor Node",
   "latitude": 47.3763399,
   "longitude": 8.5312562,
@@ -12,5 +13,8 @@
   "show_range_rings": true,
   "enabled": true,
   "locked": false,
-  "description": "Example Ground-Based Drone Remote ID Sniffer & Radar Station"
+  "description": "Example Ground-Based Drone Remote ID Sniffer & Radar Station",
+  "hub_ws_url": "ws://127.0.0.1:8000/stream/node",
+  "spool_dir": "spool",
+  "max_ram_queue": 10000
 }

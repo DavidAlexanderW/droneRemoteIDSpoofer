@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_CONFIG_FILENAME = "scanner_config.json"
 
 DEFAULT_SCANNER_CONFIG = {
+    "node_id": "sensor-node-01",
     "name": "Tactical Sensor Node 1",
     "latitude": 47.3769,
     "longitude": 8.5417,
@@ -23,6 +24,9 @@ DEFAULT_SCANNER_CONFIG = {
     "enabled": True,
     "locked": False,
     "description": "Ground-based Drone Remote ID Sniffer & Radar Station",
+    "hub_ws_url": None,  # e.g., "ws://central-hub.local:8000/stream/node"
+    "spool_dir": "spool",
+    "max_ram_queue": 10000,
     "updated_at_iso": None,
 }
 
@@ -70,6 +74,7 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 config.update(data)
                 
                 # Normalize types
+                config["node_id"] = str(config.get("node_id") or DEFAULT_SCANNER_CONFIG["node_id"]).strip()
                 config["latitude"] = float(config.get("latitude", DEFAULT_SCANNER_CONFIG["latitude"]))
                 config["longitude"] = float(config.get("longitude", DEFAULT_SCANNER_CONFIG["longitude"]))
                 config["altitude_m"] = float(config.get("altitude_m", DEFAULT_SCANNER_CONFIG["altitude_m"]))
@@ -77,6 +82,10 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 config["show_range_rings"] = bool(config.get("show_range_rings", True))
                 config["enabled"] = bool(config.get("enabled", True))
                 config["locked"] = bool(config.get("locked", False))
+                hub_url = config.get("hub_ws_url")
+                config["hub_ws_url"] = str(hub_url).strip() if hub_url else None
+                config["spool_dir"] = str(config.get("spool_dir", DEFAULT_SCANNER_CONFIG["spool_dir"]))
+                config["max_ram_queue"] = int(config.get("max_ram_queue", DEFAULT_SCANNER_CONFIG["max_ram_queue"]))
                 if not isinstance(config.get("range_rings_m"), list):
                     config["range_rings_m"] = DEFAULT_SCANNER_CONFIG["range_rings_m"]
                 

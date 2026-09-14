@@ -50,6 +50,7 @@ dev = [
 [project.scripts]
 drone-scanner = "scanner.combined_rid_listener:main"
 drone-dashboard = "scanner.run_dashboard:main"
+drone-central-hub = "scanner.central_hub:main"
 drone-query = "scanner.query_rid_db:main"
 drone-spoofer = "drone_rid_spoofer.cli:main"
 drone-replay = "replay.replay_drones:main"

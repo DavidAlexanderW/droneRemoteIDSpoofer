@@ -63,6 +63,8 @@ export class TacticalMapController {
     this.receiverMarker = null;
     this.rangeRingLayers = L.layerGroup();
     this.receiverVectorLine = null;
+    this.multiNodeMarkers = new Map();      // node_id -> Leaflet Marker
+    this.multiNodeRingLayers = new Map();   // node_id -> Leaflet LayerGroup
 
     this.showTrails = true;
     this.showWaypoints = true;
@@ -70,6 +72,117 @@ export class TacticalMapController {
     this.pickLocationMode = false;
 
     this.initMap();
+  }
+
+  setNodesList(nodes) {
+    if (!Array.isArray(nodes) || !this.map) return;
+    const activeNodeIds = new Set();
+
+    nodes.forEach(node => {
+      const nodeId = node.node_id;
+      if (!nodeId) return;
+      activeNodeIds.add(nodeId);
+
+      // If this node matches the local single-receiver config, skip to avoid double rendering
+      if (this.receiverConfig && this.receiverConfig.node_id === nodeId) {
+        return;
+      }
+
+      const lat = parseFloat(node.latitude);
+      const lon = parseFloat(node.longitude);
+      if (isNaN(lat) || isNaN(lon)) return;
+
+      const name = node.name || nodeId;
+      const status = node.status || 'ONLINE';
+      const statusColor = status === 'ONLINE' ? '#10b981' : (status === 'DEGRADED' ? '#f59e0b' : '#ef4444');
+      const isOnline = status === 'ONLINE';
+
+      // 1. Create or update Node Marker
+      if (!this.multiNodeMarkers.has(nodeId)) {
+        const icon = L.divIcon({
+          html: `
+            <div class="receiver-marker-container" style="position: relative; display: flex; flex-direction: column; align-items: center;">
+              <div class="receiver-marker-icon" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; position: relative;">
+                <svg viewBox="0 0 36 36" width="32" height="32" fill="none">
+                  <circle cx="18" cy="18" r="16" stroke="${statusColor}" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.8" />
+                  <circle cx="18" cy="18" r="7" fill="${statusColor}" stroke="#ffffff" stroke-width="1.5" />
+                  <line x1="18" y1="4" x2="18" y2="18" stroke="#ffffff" stroke-width="2" stroke-linecap="round" />
+                  <polygon points="18,3 15,9 21,9" fill="#ffffff" />
+                </svg>
+                <div style="position: absolute; bottom: 0; right: 0; width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}; border: 1px solid #ffffff;"></div>
+              </div>
+              <div class="receiver-marker-label" style="font-size: 10px; font-weight: 700; color: #cbd5e1; background: rgba(8, 12, 22, 0.85); padding: 1px 4px; border-radius: 3px; margin-top: 1px; border: 1px solid ${statusColor}44;">
+                ${name}
+              </div>
+            </div>
+          `,
+          className: 'custom-multi-node-icon',
+          iconSize: [36, 44],
+          iconAnchor: [18, 16],
+          popupAnchor: [0, -16],
+        });
+
+        const marker = L.marker([lat, lon], { icon, zIndexOffset: 2500 }).addTo(this.map);
+        marker.bindPopup(`
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px; color: #080c16; line-height: 1.5; min-width: 210px;">
+            <div style="font-weight: 800; color: #0284c7; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+              <span>📡 ${name}</span>
+              <span style="font-size: 9px; font-weight: 800; color: #fff; background: ${statusColor}; padding: 1px 4px; border-radius: 3px;">${status}</span>
+            </div>
+            <b>Node ID:</b> ${nodeId}<br/>
+            <b>Position:</b> (${lat.toFixed(5)}°, ${lon.toFixed(5)}°)<br/>
+            <b>Altitude:</b> ${parseFloat(node.altitude_m || 0).toFixed(1)}m MSL<br/>
+            <b>Total Packets:</b> ${node.packets_received_total || 0}<br/>
+            <b>Last Heartbeat:</b> ${node.last_heartbeat_iso ? node.last_heartbeat_iso.replace('T', ' ').replace('Z', '') : 'N/A'}
+          </div>
+        `);
+        this.multiNodeMarkers.set(nodeId, marker);
+      } else {
+        const marker = this.multiNodeMarkers.get(nodeId);
+        marker.setLatLng([lat, lon]);
+      }
+
+      // 2. Render Range Rings for this node if enabled
+      let ringGroup = this.multiNodeRingLayers.get(nodeId);
+      if (!ringGroup) {
+        ringGroup = L.layerGroup();
+        if (this.showRangeRings) ringGroup.addTo(this.map);
+        this.multiNodeRingLayers.set(nodeId, ringGroup);
+      }
+      ringGroup.clearLayers();
+
+      if (this.showRangeRings && isOnline) {
+        let rings = [500, 1000, 2500, 5000];
+        try {
+          if (node.range_rings_json) rings = JSON.parse(node.range_rings_json);
+        } catch (e) {}
+
+        rings.forEach(r => {
+          L.circle([lat, lon], {
+            radius: r,
+            color: '#0284c7',
+            weight: 1,
+            dashArray: '4, 4',
+            opacity: 0.35,
+            fillColor: '#0284c7',
+            fillOpacity: 0.02,
+            interactive: false,
+          }).addTo(ringGroup);
+        });
+      }
+    });
+
+    // Clean up removed nodes
+    for (const [nodeId, marker] of this.multiNodeMarkers.entries()) {
+      if (!activeNodeIds.has(nodeId)) {
+        this.map.removeLayer(marker);
+        this.multiNodeMarkers.delete(nodeId);
+        if (this.multiNodeRingLayers.has(nodeId)) {
+          this.map.removeLayer(this.multiNodeRingLayers.get(nodeId));
+          this.multiNodeRingLayers.delete(nodeId);
+        }
+      }
+    }
   }
 
   initMap() {
