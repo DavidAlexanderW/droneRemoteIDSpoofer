@@ -1535,7 +1535,14 @@ class UnifiedTelemetryLogger:
             active_cnt = len(self.encounter_tracker.active_encounters) if self.encounter_tracker else 0
             bt_cnt = self.stats["transports"].get("bt5", 0) + self.stats["transports"].get("bt4", 0)
             wifi_cnt = self.stats["transports"].get("wifi", 0) + self.stats["transports"].get("nan", 0)
-            print(f"[STATUS {iso_str}] Total: {self.stats['total_packets']} pkts (BLE: {bt_cnt}, Wi-Fi: {wifi_cnt}) | Active Encounters: {active_cnt} | Unique Drones: {len(self.stats['macs'])}")
+            hub_str = ""
+            if self.forwarder:
+                h_status = "CONNECTED" if self.forwarder.connected else "CONNECTING/RETRYING"
+                streamed = self.forwarder.stats.get("packets_streamed_live", 0)
+                hub_str = f" | Hub: {h_status} (Streamed: {streamed})"
+            else:
+                hub_str = " | Hub: Disabled (Standalone Mode)"
+            print(f"[STATUS {iso_str}] Total: {self.stats['total_packets']} pkts (BLE: {bt_cnt}, Wi-Fi: {wifi_cnt}) | Active Encounters: {active_cnt} | Unique Drones: {len(self.stats['macs'])}{hub_str}")
             sys.stdout.flush()
 
     def process_event(self, event: Dict[str, Any]):
@@ -1852,6 +1859,7 @@ def main():
     default_spool_dir = cfg.get("spool_dir", "spool")
     default_max_ram = int(cfg.get("max_ram_queue", 10000))
 
+    parser.add_argument("--scanner-config", default=None, help="Path to JSON configuration file for scanner station parameters (default: scanner/scanner_config.json)")
     parser.add_argument("--hub-url", default=default_hub_url, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)")
     parser.add_argument("--node-id", default=default_node_id, help="Sensor node identifier")
     parser.add_argument("--standalone", action="store_true", help="Force standalone mode (disables forwarding, enables local SQLite/JSONL)")
@@ -1868,6 +1876,17 @@ def main():
     parser.add_argument("--rehydrate", action="store_true", help="Retroactively re-parse all raw base64 ASTM messages from rid_packets_*.jsonl files and update the SQLite database")
 
     args = parser.parse_args()
+
+    if args.scanner_config:
+        cfg = load_scanner_config(args.scanner_config)
+        if args.hub_url == default_hub_url:
+            args.hub_url = cfg.get("hub_ws_url")
+        if args.node_id == default_node_id:
+            args.node_id = cfg.get("node_id", default_node_id)
+        if args.spool_dir == default_spool_dir:
+            args.spool_dir = cfg.get("spool_dir", default_spool_dir)
+        if args.max_ram_queue == default_max_ram:
+            args.max_ram_queue = int(cfg.get("max_ram_queue", default_max_ram))
 
     if args.rehydrate:
         rehydrated = rehydrate_db_from_jsonl(db_path=args.db_file if args.db_file else "rid_detections.db")
@@ -1903,8 +1922,11 @@ def main():
                 quiet=args.quiet,
             )
             forwarder.start()
+            logger.info(f"[*] Operational Mode: CENTRALIZED STREAMING -> Hub: {args.hub_url} | Node ID: {args.node_id}")
         else:
             logger.error("[-] CentralStreamForwarder module could not be loaded. Running standalone.")
+    else:
+        logger.info(f"[*] Operational Mode: STANDALONE LOCAL -> Encounters DB: {args.db_file or 'disabled'} (No Hub URL configured)")
 
     # Determine local storage paths: in hub mode, disable continuous local disk writes unless explicitly specified
     db_path_to_use = None

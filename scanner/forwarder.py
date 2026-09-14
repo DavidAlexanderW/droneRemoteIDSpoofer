@@ -86,8 +86,7 @@ class CentralStreamForwarder:
         self.running = True
         self.thread = threading.Thread(target=self._thread_entry, name="ForwarderWorker", daemon=True)
         self.thread.start()
-        if not self.quiet:
-            logger.info(f"[*] CentralStreamForwarder started for node '{self.node_id}' -> {self.hub_ws_url}")
+        logger.info(f"[*] CentralStreamForwarder started for node '{self.node_id}' -> {self.hub_ws_url}")
 
     def stop(self):
         """Gracefully stops the worker, flushing remaining in-memory packets to disk if disconnected."""
@@ -158,8 +157,7 @@ class CentralStreamForwarder:
             os.replace(tmp_path, spool_path)
             with self.lock:
                 self.stats["spool_files_written"] += 1
-            if not self.quiet:
-                logger.warning(f"[!] RAM queue full: Spooled {len(items)} packets to disk: {spool_filename}")
+            logger.warning(f"[!] RAM queue full: Spooled {len(items)} packets to disk: {spool_filename}")
         except Exception as e:
             logger.error(f"[-] Failed to write spill-over spool file: {e}")
 
@@ -185,8 +183,7 @@ class CentralStreamForwarder:
                 break
         if remaining:
             self._write_batch_to_spool(remaining)
-            if not self.quiet:
-                logger.info(f"[*] Flushed {len(remaining)} remaining in-memory packets to disk spool on shutdown.")
+            logger.info(f"[*] Flushed {len(remaining)} remaining in-memory packets to disk spool on shutdown.")
 
     def _thread_entry(self):
         """Background thread running asyncio event loop."""
@@ -218,8 +215,7 @@ class CentralStreamForwarder:
                     self.connected = True
                     self.last_connected_time = time.time()
                     retry_delay = 2.0  # Reset backoff on success
-                    if not self.quiet:
-                        logger.info(f"[+] Connected to Central Ingestion Hub: {self.hub_ws_url}")
+                    logger.info(f"[+] Connected to Central Ingestion Hub: {self.hub_ws_url}")
 
                     # 1. Handshake Phase
                     handshake_payload = {
@@ -233,8 +229,7 @@ class CentralStreamForwarder:
                     raw_ack = await asyncio.wait_for(ws.recv(), timeout=10.0)
                     ack = json.loads(raw_ack)
                     last_synced_epoch = float(ack.get("last_synced_epoch", 0.0))
-                    if not self.quiet:
-                        logger.info(f"[+] Handshake complete with Hub. Node '{self.node_id}' sync watermark: {last_synced_epoch:.2f}")
+                    logger.info(f"[+] Handshake complete with Hub. Node '{self.node_id}' sync watermark: {last_synced_epoch:.2f}")
 
                     # 2. Historical & Spool Catch-Up Phase (Drains spool files & backlog)
                     await self._sync_all_spool_and_backlog(ws, last_synced_epoch)
@@ -261,8 +256,8 @@ class CentralStreamForwarder:
                 self.connected = False
                 with self.lock:
                     self.stats["last_error"] = str(e)
-                if not self.quiet and self.running:
-                    logger.debug(f"[!] Forwarder connection to Hub failed ({e}). Retrying in {retry_delay:.1f}s...")
+                if self.running:
+                    logger.warning(f"[!] Forwarder connection to Hub failed ({e}). Retrying in {retry_delay:.1f}s...")
 
                 # Wait with exponential backoff before reconnecting
                 await asyncio.sleep(retry_delay)

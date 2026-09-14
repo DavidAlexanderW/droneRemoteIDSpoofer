@@ -28,14 +28,24 @@ Wants=time-sync.target
 Type=simple
 User=root
 WorkingDirectory=/home/user/droneRemoteIDSpoofer
-ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/python3 scanner/combined_rid_listener.py \
+# Option A: Centralized Streaming Mode (reads node_id and hub_ws_url from scanner_config.json)
+ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-scanner \
     --wifi-iface wlan0 \
     --ble-mode extended \
     --coded \
-    --db-file /home/user/droneRemoteIDSpoofer/rid_detections.db \
-    --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
-    --rotate-daily \
+    --scanner-config /home/user/droneRemoteIDSpoofer/scanner/scanner_config.json \
     --quiet
+
+# Option B: Standalone Local Mode (writes to local SQLite and daily JSONL logs)
+# ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-scanner \
+#     --wifi-iface wlan0 \
+#     --ble-mode extended \
+#     --coded \
+#     --scanner-config /home/user/droneRemoteIDSpoofer/scanner/scanner_config.json \
+#     --db-file /home/user/droneRemoteIDSpoofer/rid_detections.db \
+#     --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
+#     --rotate-daily \
+#     --quiet
 
 # Auto-restart on hardware disconnect or transient error
 Restart=always

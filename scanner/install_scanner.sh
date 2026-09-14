@@ -83,23 +83,39 @@ print_usage() {
     echo -e "${C_BOLD}Usage:${C_RESET} $0 [OPTIONS]"
     echo ""
     echo -e "${C_BOLD}Options:${C_RESET}"
-    echo "  --with-services       Configure and install systemd 24/7 background services"
-    echo "  --wifi-iface <iface>  Wi-Fi interface to set in drone-scanner.service (e.g. wlan0, wlan1)"
-    echo "  --nrf-port <port>     nRF UART serial port to set in drone-scanner.service (e.g. /dev/ttyACM0)"
-    echo "  --hub-url <url>       Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
-    echo "  --node-id <id>        Unique sensor node identifier (e.g. sensor-node-01)"
-    echo "  --no-nrf              Skip downloading Nordic nrfutil and ble-sniffer plugin"
-    echo "  --no-sys-pkgs         Skip apt package installation (iw, iproute2, rfkill, etc.)"
-    echo "  --no-caps             Skip Linux network capabilities (setcap)"
-    echo "  -h, --help            Show this help message and exit"
+    echo "  --with-services          Configure and install systemd 24/7 background scanner service"
+    echo "  --with-dashboard-service Configure and install systemd 24/7 Tactical Radar Dashboard service"
+    echo "  --with-hub-service       Configure and install systemd 24/7 Central Ingestion Hub service"
+    echo "  --wifi-iface <iface>     Wi-Fi interface to set in drone-scanner.service (e.g. wlan0, wlan1)"
+    echo "  --nrf-port <port>        nRF UART serial port to set in drone-scanner.service (e.g. /dev/ttyACM0)"
+    echo "  --scanner-config <path>  Path to scanner_config.json (default: <repo>/scanner/scanner_config.json)"
+    echo "  --hub-url <url>          Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
+    echo "  --node-id <id>           Unique sensor node identifier (e.g. sensor-node-01)"
+    echo "  --no-nrf                 Skip downloading Nordic nrfutil and ble-sniffer plugin"
+    echo "  --no-sys-pkgs            Skip apt package installation (iw, iproute2, rfkill, etc.)"
+    echo "  --no-caps                Skip Linux network capabilities (setcap)"
+    echo "  -h, --help               Show this help message and exit"
     echo ""
 }
 
 # Parse Arguments
+INSTALL_SERVICES=false
+INSTALL_DASHBOARD_SERVICE=false
+INSTALL_HUB_SERVICE=false
+SCANNER_CONFIG="${REPO_DIR}/scanner/scanner_config.json"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --with-services)
             INSTALL_SERVICES=true
+            shift
+            ;;
+        --with-dashboard-service)
+            INSTALL_DASHBOARD_SERVICE=true
+            shift
+            ;;
+        --with-hub-service)
+            INSTALL_HUB_SERVICE=true
             shift
             ;;
         --wifi-iface)
@@ -108,6 +124,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --nrf-port)
             NRF_PORT="$2"
+            shift 2
+            ;;
+        --scanner-config)
+            SCANNER_CONFIG="$2"
             shift 2
             ;;
         --hub-url)
@@ -349,20 +369,27 @@ echo ""
 echo -e "${C_BOLD}${C_GREEN}[4/6] Setting Up Python Virtual Environment & Installing Package...${C_RESET}"
 VENV_DIR="${REPO_DIR}/.venv"
 VENV_PYTHON="${VENV_DIR}/bin/python3"
-VENV_PIP="${VENV_DIR}/bin/pip"
 
-if [ -f "${VENV_PYTHON}" ] && [ -x "${VENV_PYTHON}" ]; then
-    echo -e "${C_GREEN}[+] Python virtualenv found at ${VENV_DIR}.${C_RESET}"
+# Verify virtualenv exists AND pip is functional inside it
+if [ -f "${VENV_PYTHON}" ] && [ -x "${VENV_PYTHON}" ] && "${VENV_PYTHON}" -m pip --version >/dev/null 2>&1; then
+    echo -e "${C_GREEN}[+] Python virtualenv verified at ${VENV_DIR}.${C_RESET}"
 else
-    echo -e "${C_CYAN}[*] Creating Python virtualenv at ${VENV_DIR}...${C_RESET}"
-    python3 -m venv "${VENV_DIR}"
+    echo -e "${C_CYAN}[*] Creating clean Python virtualenv at ${VENV_DIR}...${C_RESET}"
+    rm -rf "${VENV_DIR}"
+    python3 -m venv "${VENV_DIR}" || {
+        echo -e "${C_YELLOW}[!] Standard venv creation failed. Attempting with --without-pip and bootstrapping ensurepip...${C_RESET}"
+        python3 -m venv --without-pip "${VENV_DIR}"
+        "${VENV_PYTHON}" -m ensurepip --upgrade 2>/dev/null || {
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py | "${VENV_PYTHON}"
+        }
+    }
 fi
 
 echo -e "${C_CYAN}[*] Upgrading pip, setuptools, and wheel...${C_RESET}"
-"${VENV_PIP}" install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
+"${VENV_PYTHON}" -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
 
 echo -e "${C_CYAN}[*] Installing/updating drone-remote-id package with CLI tools (pip install -e '.[all]')...${C_RESET}"
-(cd "${REPO_DIR}" && "${VENV_PIP}" install -e ".[all]" >/dev/null 2>&1 || "${VENV_PIP}" install -e ".[all]")
+(cd "${REPO_DIR}" && "${VENV_PYTHON}" -m pip install -e ".[all]" >/dev/null 2>&1 || "${VENV_PYTHON}" -m pip install -e ".[all]")
 echo -e "${C_GREEN}[+] Python package and CLI executables verified in ${VENV_DIR}/bin/.${C_RESET}\n"
 
 # ------------------------------------------------------------------------------
@@ -399,6 +426,36 @@ fi
 echo -e "${C_BOLD}${C_GREEN}[6/6] systemd Background Service Units Setup...${C_RESET}"
 
 if [ "$INSTALL_SERVICES" = true ]; then
+    # Ensure scanner_config.json exists
+    if [ ! -f "${SCANNER_CONFIG}" ]; then
+        if [ -f "${REPO_DIR}/scanner/scanner_config.example.json" ]; then
+            echo -e "${C_CYAN}[*] Initializing ${SCANNER_CONFIG} from example template...${C_RESET}"
+            cp "${REPO_DIR}/scanner/scanner_config.example.json" "${SCANNER_CONFIG}"
+        else
+            echo -e "${C_CYAN}[*] Initializing default ${SCANNER_CONFIG}...${C_RESET}"
+            "${VENV_PYTHON}" -c "from scanner.scanner_config import load_scanner_config; load_scanner_config('${SCANNER_CONFIG}')" 2>/dev/null || true
+        fi
+    fi
+
+    # Update hub_url or node_id in scanner_config.json if specified on CLI
+    if [ -n "${HUB_URL}" ] || [ -n "${NODE_ID}" ]; then
+        "${VENV_PYTHON}" -c "
+import json, os
+path = '${SCANNER_CONFIG}'
+try:
+    with open(path, 'r') as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+if '${HUB_URL}':
+    data['hub_ws_url'] = '${HUB_URL}'
+if '${NODE_ID}':
+    data['node_id'] = '${NODE_ID}'
+with open(path, 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null || true
+    fi
+
     # Auto-detect Wi-Fi monitor interface if not supplied
     if [ -z "${WIFI_IFACE}" ]; then
         DETECTED_IFACE=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | head -n 1 || true)
@@ -411,25 +468,11 @@ if [ "$INSTALL_SERVICES" = true ]; then
         NRF_PORT="${DETECTED_NRF:-/dev/ttyACM0}"
     fi
 
-    SCANNER_SERVICE_SRC="${SCRIPT_DIR}/drone-scanner.service"
-
     echo -e "${C_CYAN}[*] Generating customized drone-scanner.service for this node...${C_RESET}"
     echo -e "    - WorkingDirectory: ${REPO_DIR}"
     echo -e "    - Wi-Fi Interface : ${WIFI_IFACE}"
     echo -e "    - nRF Port        : ${NRF_PORT}"
-
-    HUB_ARGS=""
-    if [ -n "${HUB_URL}" ]; then
-        HUB_ARGS="    --hub-url ${HUB_URL} \\"
-        if [ -n "${NODE_ID}" ]; then
-            HUB_ARGS="${HUB_ARGS}
-    --node-id ${NODE_ID} \\"
-        fi
-    else
-        HUB_ARGS="    --db-file ${REPO_DIR}/rid_detections.db \\
-    --log-jsonl ${REPO_DIR}/rid_packets.jsonl \\
-    --rotate-daily \\"
-    fi
+    echo -e "    - Scanner Config  : ${SCANNER_CONFIG}"
 
     # drone-scanner.service
     TMP_SCANNER_SRV="/tmp/drone-scanner-$$.service"
@@ -449,7 +492,7 @@ ExecStart=${VENV_DIR}/bin/drone-scanner \\
     --nrf-port ${NRF_PORT} \\
     --ble-mode extended \\
     --coded \\
-${HUB_ARGS}
+    --scanner-config ${SCANNER_CONFIG} \\
     --quiet
 
 Restart=always
@@ -469,12 +512,102 @@ EOF
     run_sudo systemctl daemon-reload
     run_sudo systemctl enable drone-scanner.service || true
 
-    echo -e "${C_GREEN}[+] Service installed and enabled:${C_RESET}"
+    echo -e "${C_GREEN}[+] Scanner service installed and enabled:${C_RESET}"
     echo "      sudo systemctl start drone-scanner.service"
     echo "      sudo systemctl status drone-scanner.service"
     echo "      sudo journalctl -u drone-scanner.service -f"
-else
-    echo -e "${C_CYAN}[*] To install the scanner systemd service for 24/7 background operation, re-run with: ${C_BOLD}$0 --with-services${C_RESET}"
+fi
+
+if [ "$INSTALL_DASHBOARD_SERVICE" = true ]; then
+    echo -e "${C_CYAN}[*] Generating customized drone-dashboard.service for this node...${C_RESET}"
+    echo -e "    - WorkingDirectory: ${REPO_DIR}"
+    echo -e "    - Scanner Config  : ${SCANNER_CONFIG}"
+
+    TMP_DASH_SRV="/tmp/drone-dashboard-$$.service"
+    cat << EOF > "${TMP_DASH_SRV}"
+[Unit]
+Description=Tactical ASTM F3411 Drone Remote ID Web Dashboard & Airspace Radar
+Documentation=https://github.com/cyber-defence-campus/droneRemoteIDSpoofer
+After=network.target time-sync.target drone-scanner.service
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${REPO_DIR}
+ExecStart=${VENV_DIR}/bin/drone-dashboard \\
+    --host 0.0.0.0 \\
+    --port 8080 \\
+    --scanner-config ${SCANNER_CONFIG}
+
+Restart=always
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drone-dashboard
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    run_sudo mv "${TMP_DASH_SRV}" /etc/systemd/system/drone-dashboard.service
+    run_sudo chmod 644 /etc/systemd/system/drone-dashboard.service
+    run_sudo systemctl daemon-reload
+    run_sudo systemctl enable drone-dashboard.service || true
+
+    echo -e "${C_GREEN}[+] Dashboard service installed and enabled:${C_RESET}"
+    echo "      sudo systemctl start drone-dashboard.service"
+    echo "      sudo systemctl status drone-dashboard.service"
+    echo "      sudo journalctl -u drone-dashboard.service -f"
+fi
+
+if [ "$INSTALL_HUB_SERVICE" = true ]; then
+    echo -e "${C_CYAN}[*] Generating customized drone-central-hub.service for this server...${C_RESET}"
+    echo -e "    - WorkingDirectory: ${REPO_DIR}"
+
+    TMP_HUB_SRV="/tmp/drone-central-hub-$$.service"
+    cat << EOF > "${TMP_HUB_SRV}"
+[Unit]
+Description=Central Drone Remote ID Ingestion Hub & Sensor Fusion Server
+Documentation=https://github.com/cyber-defence-campus/droneRemoteIDSpoofer
+After=network.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${REPO_DIR}
+ExecStart=${VENV_DIR}/bin/drone-central-hub \\
+    --host 0.0.0.0 \\
+    --port 8000 \\
+    --db-file ${REPO_DIR}/rid_detections_central.db \\
+    --log-dir ${REPO_DIR}/central_logs \\
+    --timeout-s 300.0 \\
+    --quiet
+
+Restart=always
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drone-central-hub
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    run_sudo mv "${TMP_HUB_SRV}" /etc/systemd/system/drone-central-hub.service
+    run_sudo chmod 644 /etc/systemd/system/drone-central-hub.service
+    run_sudo systemctl daemon-reload
+    run_sudo systemctl enable drone-central-hub.service || true
+
+    echo -e "${C_GREEN}[+] Central Hub service installed and enabled:${C_RESET}"
+    echo "      sudo systemctl start drone-central-hub.service"
+    echo "      sudo systemctl status drone-central-hub.service"
+    echo "      sudo journalctl -u drone-central-hub.service -f"
 fi
 echo ""
 
