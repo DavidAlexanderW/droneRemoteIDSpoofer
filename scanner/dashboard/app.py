@@ -41,7 +41,7 @@ try:
         get_receiver_nodes,
         update_receiver_node_position,
     )
-    from scanner.drone_models import infer_drone_model
+    from scanner.drone_models import infer_drone_model, register_learned_drone_model
 except ImportError:
     from db import (
         get_db_connection as db_get_connection,
@@ -49,7 +49,7 @@ except ImportError:
         get_receiver_nodes,
         update_receiver_node_position,
     )
-    from drone_models import infer_drone_model
+    from drone_models import infer_drone_model, register_learned_drone_model
 
 try:
     from scanner.dashboard.dashboard_config import (
@@ -360,10 +360,11 @@ def get_encounters(
         d_model = r["drone_model"] if "drone_model" in r.keys() else None
         s_num = r["serial_number"]
         drone_info = infer_drone_model(s_num) if s_num else {}
-        if not d_make and drone_info.get("make"):
-            d_make = drone_info.get("make")
-        if not d_model and drone_info.get("model"):
-            d_model = drone_info.get("model")
+        if (not d_make or not d_model or "Unspecified" in (d_model or "")) and drone_info.get("is_inferred"):
+            if drone_info.get("make"):
+                d_make = drone_info.get("make")
+            if drone_info.get("model"):
+                d_model = drone_info.get("model")
         if d_make:
             drone_info["make"] = d_make
         if d_model:
@@ -576,10 +577,11 @@ def get_encounter(encounter_id: str):
     d_model = row["drone_model"] if "drone_model" in row.keys() else None
     s_num = row["serial_number"]
     drone_info = infer_drone_model(s_num) if s_num else {}
-    if not d_make and drone_info.get("make"):
-        d_make = drone_info.get("make")
-    if not d_model and drone_info.get("model"):
-        d_model = drone_info.get("model")
+    if (not d_make or not d_model or "Unspecified" in (d_model or "")) and drone_info.get("is_inferred"):
+        if drone_info.get("make"):
+            d_make = drone_info.get("make")
+        if drone_info.get("model"):
+            d_model = drone_info.get("model")
     if d_make:
         drone_info["make"] = d_make
     if d_model:
@@ -1004,11 +1006,11 @@ async def websocket_live_stream(websocket: WebSocket):
                 latest = traj[-1] if traj else None
                 d_make = r["drone_make"] if "drone_make" in r.keys() else None
                 d_model = r["drone_model"] if "drone_model" in r.keys() else None
-                if not d_make and r["serial_number"]:
+                if (not d_make or not d_model or "Unspecified" in (d_model or "")) and r["serial_number"]:
                     inf = infer_drone_model(r["serial_number"])
                     if inf.get("is_inferred"):
-                        d_make = inf.get("make")
-                        d_model = inf.get("model")
+                        d_make = inf.get("make") or d_make
+                        d_model = inf.get("model") or d_model
 
                 active_drones.append({
                     "encounter_id": r["encounter_id"],
@@ -1122,11 +1124,30 @@ def query_faa_doc_registry(serial: str = Query(..., description="Drone Serial Nu
                 # Persist verified official make & model to encounters SQLite database
                 try:
                     db_conn = get_db_connection()
+                    # 1. Update exact matching serials
                     db_conn.execute(
                         "UPDATE encounters SET drone_make = ?, drone_model = ? WHERE serial_number = ? OR serial_number LIKE ?",
                         (faa_make, full_model or faa_model, clean_serial, f"%{clean_serial}%")
                     )
+                    # 2. Update all other historical encounters sharing the same 6-char hardware sub-prefix that have unspecified/null model
+                    if len(clean_serial) >= 6:
+                        sub_prefix = clean_serial[:6]
+                        db_conn.execute(
+                            "UPDATE encounters SET drone_make = ?, drone_model = ? WHERE (serial_number LIKE ?) AND (drone_model IS NULL OR drone_model LIKE '%Unspecified%');",
+                            (faa_make, full_model or faa_model, f"{sub_prefix}%")
+                        )
                     db_conn.commit()
+                except Exception:
+                    pass
+
+                # Persist newly verified drone model to learned drone models database on disk
+                try:
+                    register_learned_drone_model(
+                        serial_number=clean_serial,
+                        make=faa_make,
+                        model=full_model or faa_model,
+                        company=doc.get("applicantName"),
+                    )
                 except Exception:
                     pass
 

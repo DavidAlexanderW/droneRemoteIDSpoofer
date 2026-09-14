@@ -498,6 +498,19 @@ class TestDashboardAPI(unittest.TestCase):
         mock_resp_obj.__enter__.return_value = mock_resp_obj
         mock_resp_obj.__exit__.return_value = None
 
+        # Pre-insert past encounters: one with the exact serial and one with the same sub-prefix but unspecified model
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            INSERT INTO encounters (encounter_id, mac, serial_number, drone_make, drone_model, first_seen, first_seen_iso, last_seen, last_seen_iso, duration_s, packet_count, transports, channels, is_active)
+            VALUES ('enc_past_exact', '11:22:33:44:55:66', '1581F4TEST001', 'DJI', 'DJI Drone (Unspecified Model)', 1725790000.0, '2026-09-08T10:06:40+00:00', 1725790010.0, '2026-09-08T10:06:50+00:00', 10.0, 5, 'bt5', '37,38,39', 0);
+        """)
+        conn.execute("""
+            INSERT INTO encounters (encounter_id, mac, serial_number, drone_make, drone_model, first_seen, first_seen_iso, last_seen, last_seen_iso, duration_s, packet_count, transports, channels, is_active)
+            VALUES ('enc_past_family', '11:22:33:44:55:77', '1581F4OTHER999', 'DJI', 'DJI Drone (Unspecified Model)', 1725790020.0, '2026-09-08T10:07:00+00:00', 1725790030.0, '2026-09-08T10:07:10+00:00', 10.0, 5, 'bt5', '37,38,39', 0);
+        """)
+        conn.commit()
+        conn.close()
+
         with patch("urllib.request.urlopen", return_value=mock_resp_obj):
             resp = self.client.get("/api/faa_lookup?serial=1581F4TEST001")
             self.assertEqual(resp.status_code, 200)
@@ -508,6 +521,27 @@ class TestDashboardAPI(unittest.TestCase):
             self.assertEqual(data["series"], "Mavic 3 Series")
             self.assertEqual(data["tracking_number"], "RID000000456")
             self.assertEqual(data["doc_status"], "ACCEPTED")
+
+            # Verify that learned model registry was updated
+            from drone_models import infer_drone_model
+            inf = infer_drone_model("1581F4TEST001")
+            self.assertTrue(inf["is_inferred"])
+            self.assertEqual(inf["make"], "DJI")
+            self.assertIn("Mavic 3 Pro", inf["model"])
+
+            # Verify that past encounters in SQLite DB were updated
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row_exact = conn.execute("SELECT * FROM encounters WHERE encounter_id = 'enc_past_exact';").fetchone()
+            self.assertIn("Mavic 3 Pro", row_exact["drone_model"])
+            row_family = conn.execute("SELECT * FROM encounters WHERE encounter_id = 'enc_past_family';").fetchone()
+            self.assertIn("Mavic 3 Pro", row_family["drone_model"])
+            conn.close()
+
+            # Verify /api/encounters returns updated model
+            resp_enc = self.client.get("/api/encounters/enc_past_family")
+            self.assertEqual(resp_enc.status_code, 200)
+            self.assertIn("Mavic 3 Pro", resp_enc.json()["drone_model"])
 
         # 3. Test not found response
         mock_empty_resp = {"data": {"items": []}}

@@ -1,0 +1,17 @@
+{
+  "prefixes": {
+    "1581F4": {
+      "make": "DJI",
+      "model": "Mavic 3 Pro (Mavic 3 Series)"
+    }
+  },
+  "exact_serials": {
+    "1581F4TEST001": {
+      "make": "DJI",
+      "model": "Mavic 3 Pro (Mavic 3 Series)",
+      "company": "SZ DJI TECHNOLOGY CO., LTD",
+      "country": null
+    }
+  },
+  "manufacturers": {}
+}

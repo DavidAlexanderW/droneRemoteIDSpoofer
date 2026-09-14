@@ -8,6 +8,15 @@ sub-type prefixes into human-readable drone make, model family, and manufacturer
 
 from typing import Any, Dict, Optional
 
+import json
+import os
+from typing import Any, Dict, Optional
+
+# Persistent Learned Models Registry Path on Disk
+DEFAULT_LEARNED_MODELS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "learned_drone_models.json"
+)
+
 # CTA-2063-A 4-character Manufacturer Prefix Database
 # Standard format: MFR code (base32/alphanumeric, chars 1-4)
 CTA_MANUFACTURERS: Dict[str, Dict[str, str]] = {
@@ -81,11 +90,147 @@ MODEL_PREFIX_MAP: Dict[str, Dict[str, str]] = {
     "1716": {"make": "Flyability", "model": "Elios 3 Confined Space Drone"},
 }
 
+EXACT_SERIAL_MAP: Dict[str, Dict[str, Any]] = {}
+
+
+def get_learned_models_file_path(custom_path: Optional[str] = None) -> str:
+    """Returns the effective absolute path to the learned drone models JSON file."""
+    if custom_path:
+        return os.path.abspath(custom_path)
+    env_path = os.environ.get("RID_LEARNED_MODELS_PATH")
+    if env_path:
+        return os.path.abspath(env_path)
+    return DEFAULT_LEARNED_MODELS_PATH
+
+
+def load_learned_drone_models(path: Optional[str] = None) -> Dict[str, Any]:
+    """Loads learned prefix and serial mappings from disk."""
+    file_path = get_learned_models_file_path(path)
+    if os.path.isfile(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {
+                        "prefixes": data.get("prefixes", {}),
+                        "exact_serials": data.get("exact_serials", {}),
+                        "manufacturers": data.get("manufacturers", {}),
+                    }
+        except Exception:
+            pass
+    return {"prefixes": {}, "exact_serials": {}, "manufacturers": {}}
+
+
+def save_learned_drone_models(data: Dict[str, Any], path: Optional[str] = None) -> bool:
+    """Persists learned prefix and serial mappings to disk atomically."""
+    file_path = get_learned_models_file_path(path)
+    try:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        temp_path = f"{file_path}.tmp.{os.getpid()}"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, file_path)
+        return True
+    except Exception:
+        return False
+
+
+_LAST_LOADED_MTIME: float = 0.0
+
+
+def _sync_learned_models_from_disk(path: Optional[str] = None) -> None:
+    """Synchronizes in-memory maps from the on-disk learned models file if updated."""
+    global _LAST_LOADED_MTIME
+    file_path = get_learned_models_file_path(path)
+    if os.path.isfile(file_path):
+        try:
+            mtime = os.path.getmtime(file_path)
+            if mtime != _LAST_LOADED_MTIME:
+                learned = load_learned_drone_models(path)
+                for mfr_code, mfr_info in learned.get("manufacturers", {}).items():
+                    CTA_MANUFACTURERS[mfr_code] = mfr_info
+                for prefix, prefix_info in learned.get("prefixes", {}).items():
+                    MODEL_PREFIX_MAP[prefix] = prefix_info
+                for serial, info in learned.get("exact_serials", {}).items():
+                    EXACT_SERIAL_MAP[serial] = info
+                _LAST_LOADED_MTIME = mtime
+        except Exception:
+            pass
+
+
+def _init_learned_models() -> None:
+    """Initializes in-memory maps from the on-disk learned models file."""
+    _sync_learned_models_from_disk()
+
+
+# Initialize learned models upon module import
+_init_learned_models()
+
+
+def register_learned_drone_model(
+    serial_number: str,
+    make: str,
+    model: str,
+    company: Optional[str] = None,
+    country: Optional[str] = None,
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Registers a verified drone make and model (e.g. from an FAA Declaration of Compliance query)
+    into the persistent learned models database on disk and in-memory caches.
+
+    Learns:
+      1. Exact serial mapping (e.g. "1581F4TEST001" -> {"make": "DJI", "model": "Mini 3 Pro"}).
+      2. Hardware generation sub-prefix mapping if ANSI/CTA-2063-A compliant (e.g. "1581F4" -> {"make": "DJI", "model": "Mini 3 Pro"}).
+      3. Manufacturer code mapping if new (e.g. "1581" -> {"make": "DJI", "company": ...}).
+    """
+    clean = serial_number.strip().upper()
+    if not clean or not make or not model:
+        return {}
+
+    learned = load_learned_drone_models(path)
+
+    # 1. Update exact serial mapping
+    serial_entry = {
+        "make": make.strip(),
+        "model": model.strip(),
+        "company": company.strip() if company else None,
+        "country": country.strip() if country else None,
+    }
+    learned["exact_serials"][clean] = serial_entry
+    EXACT_SERIAL_MAP[clean] = serial_entry
+
+    # 2. Extract manufacturer prefix (first 4 characters)
+    if len(clean) >= 4:
+        mfr_code = clean[:4]
+        if mfr_code not in CTA_MANUFACTURERS and mfr_code not in learned["manufacturers"]:
+            mfr_entry = {
+                "make": make.strip(),
+                "company": company.strip() if company else f"{make.strip()} OEM",
+                "country": country.strip() if country else "Unknown",
+            }
+            learned["manufacturers"][mfr_code] = mfr_entry
+            CTA_MANUFACTURERS[mfr_code] = mfr_entry
+
+    # 3. Extract hardware sub-prefix (first 6 characters)
+    if len(clean) >= 6:
+        sub_prefix = clean[:6]
+        prefix_entry = {
+            "make": make.strip(),
+            "model": model.strip(),
+        }
+        learned["prefixes"][sub_prefix] = prefix_entry
+        MODEL_PREFIX_MAP[sub_prefix] = prefix_entry
+
+    # Persist to disk
+    save_learned_drone_models(learned, path)
+    return serial_entry
+
 
 def infer_drone_model(serial_number: Optional[str]) -> Dict[str, Any]:
     """
     Infers drone make, model family, manufacturer company, and country of origin
-    from an ANSI/CTA-2063-A compliant serial number string.
+    from an ANSI/CTA-2063-A compliant serial number string or learned database.
 
     Returns:
         Dict containing:
@@ -115,6 +260,22 @@ def infer_drone_model(serial_number: Optional[str]) -> Dict[str, Any]:
             "company": None,
             "country": None,
             "is_inferred": False,
+        }
+
+    _sync_learned_models_from_disk()
+
+    # 0. Check Exact Serial Number match (from learned database)
+    if clean in EXACT_SERIAL_MAP:
+        ex = EXACT_SERIAL_MAP[clean]
+        mfr_code = clean[:4] if len(clean) >= 4 else None
+        mfr_info = CTA_MANUFACTURERS.get(mfr_code, {}) if mfr_code else {}
+        return {
+            "make": ex.get("make") or mfr_info.get("make"),
+            "model": ex.get("model"),
+            "mfr_code": mfr_code,
+            "company": ex.get("company") or mfr_info.get("company"),
+            "country": ex.get("country") or mfr_info.get("country"),
+            "is_inferred": True,
         }
 
     # 1. Check Sub-model prefix matches (first 6 chars, then 5, then 4)

@@ -185,5 +185,52 @@ class TestDroneModelDatabasePersistence(unittest.TestCase):
             self.assertIn("EVO II", row["drone_model"])
 
 
+class TestLearnedDroneModelRegistry(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.learned_json_path = os.path.join(self.temp_dir.name, "test_learned_models.json")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_register_and_infer_learned_drone_model(self):
+        from drone_models import (
+            register_learned_drone_model,
+            load_learned_drone_models,
+            infer_drone_model,
+        )
+
+        # 1. Register a new custom drone model discovered from FAA DOC query
+        reg = register_learned_drone_model(
+            serial_number="2050X9CUSTOMDRONE12345",
+            make="Apex Aero",
+            model="Apex Recon Pro VTOL",
+            company="Apex Aerospace LLC",
+            country="United States",
+            path=self.learned_json_path,
+        )
+        self.assertEqual(reg["make"], "Apex Aero")
+        self.assertEqual(reg["model"], "Apex Recon Pro VTOL")
+
+        # 2. Verify file was persisted to disk
+        self.assertTrue(os.path.isfile(self.learned_json_path))
+        data = load_learned_drone_models(self.learned_json_path)
+        self.assertIn("2050X9CUSTOMDRONE12345", data["exact_serials"])
+        self.assertIn("2050X9", data["prefixes"])
+        self.assertIn("2050", data["manufacturers"])
+
+        # 3. Verify exact serial inference
+        inf_exact = infer_drone_model("2050X9CUSTOMDRONE12345")
+        self.assertTrue(inf_exact["is_inferred"])
+        self.assertEqual(inf_exact["make"], "Apex Aero")
+        self.assertEqual(inf_exact["model"], "Apex Recon Pro VTOL")
+
+        # 4. Verify prefix family inference on another drone of the same model family
+        inf_family = infer_drone_model("2050X9ANOTHERDRONE999")
+        self.assertTrue(inf_family["is_inferred"])
+        self.assertEqual(inf_family["make"], "Apex Aero")
+        self.assertEqual(inf_family["model"], "Apex Recon Pro VTOL")
+
+
 if __name__ == "__main__":
     unittest.main()

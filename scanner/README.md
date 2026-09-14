@@ -85,18 +85,18 @@ The scanner implements an optimized ASTM F3411 hopping sequence ensuring regular
   - **Non-Social Channels (5 Hz Dwell)**: Channels `1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13` $\to$ **200 ms** each
 - **5.8 GHz Band (5725 – 5875 MHz)**:
   - **Social Channel (1 Hz Dwell)**: Channel `149` $\to$ **1000 ms**
-  - **Non-Social Channels (5 Hz Dwell)**: Channels `153, 157, 161, 165, 169, 173` $\to$ **200 ms** each
+  - **Non-Social Channels (5 Hz Dwell)**: Channels `153, 157, 161, 165, 169, 173` $\to$ **250 ms** each (extended to compensate for mixed/negative PLL lead times)
 
-### Switching Latency Overhead & Empirical Calibration
+### Switching Latency Overhead & Transition-Aware Channel Attribution
 Channel switching overhead is governed by the physical RF PLL lock time and synchronous `iw` kernel/driver syscall execution:
-- **Tuning to 2.4 GHz**: Command duration $\sim 145\,\text{ms}$, RF blind spot $\sim 105\,\text{ms}$, hardware lead time $\sim 40\,\text{ms}$.
-- **Tuning to 5.8 GHz**: Command duration $\sim 158\,\text{ms}$, RF blind spot $\sim 160\,\text{ms}$, hardware lead time $\sim 0\,\text{ms}$.
+- **Tuning to 2.4 GHz**: Command duration $\sim 145\,\text{ms}$, RF blind spot $\sim 105\,\text{ms}$, hardware lead time $\sim +40\,\text{ms}$ (predominantly positive).
+- **Tuning to 5.8 GHz**: Command duration $\sim 158\,\text{ms}$, RF blind spot $\sim 160\text{--}220\,\text{ms}$, hardware lead time $\sim -33\,\text{ms}$ on intra-5G (mixed/bimodal across band).
 - **Source Band Effect**: Switching from 5.8 GHz adds an extra $\sim 5\text{--}6\,\text{ms}$ relative to switching from 2.4 GHz.
-- **Buffer Drain Retention**: Residual packets in the USB FIFO buffer drain for $\sim 5\,\text{ms}$ post-switch and are accurately attributed to the previous channel.
+- **Buffer Drain Retention**: Residual packets in the USB FIFO buffer drain for $\sim 5\,\text{ms}$ post-switch and are accurately attributed to the previous channel. All subsequent packets received past the retention window are attributed to the target channel.
 
 > [!TIP]
-> **Lead-Time Dwell Compensation**:
-> Because the physical radio on 2.4 GHz locks and starts receiving $\sim 40\,\text{ms}$ *before* the `iw` command unblocks, the hopper compensates by reducing the post-command sleep (`--lead-time-2g-ms 40`), guaranteeing the exact on-air dwell time without wasted pauses.
+> **Transition-Aware Attribution & 5.8 GHz Dwell Extension**:
+> Because RF lead times are mixed (and negative on intra-5 GHz switches where PLL settling takes up to 220 ms), the hopper does not shorten dwell times programmatically. Instead, 5.8 GHz non-social dwell is extended to 250 ms (`--non-social-dwell-5g-ms 250`), guaranteeing that the effective receiving window exceeds the 200 ms beacon period of 5 Hz drone Remote ID transmitters.
 
 ### Configurable $2k:k$ Ratio (Default $k=1$, Dual Ch 6 Visits)
 Because Channel 6 carries the vast majority of commercial drone Remote ID traffic, the hopper visits Channel 6 **twice per cycle** (interleaved before non-social scanning and before switching to 5.8 GHz):
@@ -227,9 +227,8 @@ sudo journalctl -u drone-dashboard.service -f
 | `--no-hop` | `False` | Disable Wi-Fi channel hopping (listen on initial channel) |
 | `--non-social-ratio`, `-k` | `1` | Ratio multiplier ($2k$ non-social on 2.4 GHz per $k$ on 5.8 GHz) |
 | `--social-dwell-ms` | `1000` | Social channel dwell time in milliseconds (1 Hz) |
-| `--non-social-dwell-ms` | `200` | Non-social channel dwell time in milliseconds (5 Hz) |
-| `--lead-time-2g-ms` | `40` | 2.4 GHz hardware lead time compensation in ms (calibrated from RF lock timing) |
-| `--lead-time-5g-ms` | `0` | 5.8 GHz hardware lead time compensation in ms |
+| `--non-social-dwell-ms` | `200` | 2.4 GHz non-social channel dwell time in milliseconds (5 Hz) |
+| `--non-social-dwell-5g-ms` | `250` | 5.8 GHz non-social channel dwell time in ms (extended to offset negative lead time) |
 | `--drain-retention-ms` | `5.0` | Buffer drain retention window in ms for previous channel attribution |
 | `--coded` | `False` | Enable BLE 5 Long Range (LE Coded PHY) scanning |
 | `--ble-mode` | `extended` | Filter BLE advertisements: `extended` (BLE 5 Extended Advertising), `legacy` (BLE 4), `all` |

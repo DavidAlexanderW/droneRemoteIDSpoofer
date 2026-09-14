@@ -88,7 +88,7 @@ class TestCombinedRIDListener(unittest.TestCase):
         self.assertEqual(band, "5.8GHz")
         self.assertEqual(freq, 5745)
 
-    def test_wifi_channel_hopper_lead_time_compensation(self):
+    def test_wifi_channel_hopper_dwell_timing(self):
         state = SharedChannelState(initial_channel=6)
         hopper = WifiChannelHopperThread(
             interface="wlan_test",
@@ -96,13 +96,13 @@ class TestCombinedRIDListener(unittest.TestCase):
             non_social_ratio_k=1,
             social_dwell_ms=1000,
             non_social_dwell_ms=200,
-            lead_time_2g_ms=40,
-            lead_time_5g_ms=0,
+            non_social_dwell_5g_ms=250,
         )
-        self.assertEqual(hopper.lead_time_2g_s, 0.040)
-        self.assertEqual(hopper.lead_time_5g_s, 0.000)
         self.assertEqual(hopper.social_dwell_s, 1.0)
-        self.assertEqual(hopper.non_social_dwell_s, 0.2)
+        self.assertEqual(hopper.non_social_dwell_2g_s, 0.200)
+        self.assertEqual(hopper.non_social_dwell_5g_s, 0.250)
+        self.assertEqual(hopper.n_2g_non_social, 2)
+        self.assertEqual(hopper.n_5g_non_social, 1)
 
     def test_decode_basic_id(self):
         # Header: (MsgType 0 << 4) | proto 2 = 0x02

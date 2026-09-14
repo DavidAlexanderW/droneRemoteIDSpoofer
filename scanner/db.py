@@ -167,13 +167,15 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
 
     # 3. Backfill drone_make and drone_model for any existing records with a serial number
     try:
-        unfilled = conn.execute("SELECT encounter_id, serial_number FROM encounters WHERE drone_make IS NULL AND serial_number IS NOT NULL;").fetchall()
+        unfilled = conn.execute(
+            "SELECT encounter_id, serial_number, drone_make, drone_model FROM encounters WHERE serial_number IS NOT NULL AND (drone_make IS NULL OR drone_model IS NULL OR drone_model LIKE '%Unspecified%');"
+        ).fetchall()
         for r in unfilled:
             # Supports both sqlite3.Row and tuple
             enc_id = r[0]
             s_num = r[1]
             inf = infer_drone_model(s_num)
-            if inf.get("is_inferred"):
+            if inf.get("is_inferred") and inf.get("model"):
                 conn.execute("UPDATE encounters SET drone_make = ?, drone_model = ? WHERE encounter_id = ?;", (inf["make"], inf["model"], enc_id))
     except Exception:
         pass
