@@ -256,13 +256,25 @@ class CentralStreamForwarder:
                     await self._sync_all_spool_and_backlog(ws, last_synced_epoch)
 
                     # 3. Live Streaming Phase
+                    last_heartbeat_time = time.time()
                     while self.running:
                         try:
+                            now = time.time()
+                            if now - last_heartbeat_time >= 15.0:
+                                last_heartbeat_time = now
+                                heartbeat_payload = {
+                                    "type": "heartbeat",
+                                    "node_id": self.node_id,
+                                    "node_meta": self.node_meta,
+                                    "timestamp_epoch": now,
+                                }
+                                await ws.send(json.dumps(heartbeat_payload))
+
                             # Non-blocking get with short sleep in asyncio
                             try:
                                 pkt = self.live_queue.get_nowait()
                             except queue.Empty:
-                                await asyncio.sleep(0.02)
+                                await asyncio.sleep(0.05)
                                 continue
 
                             # Send live packet envelope

@@ -261,6 +261,25 @@ def upsert_receiver_node(
     conn.commit()
 
 
+def touch_receiver_node_heartbeat(
+    conn: sqlite3.Connection,
+    node_id: str,
+    packets_increment: int = 0,
+) -> None:
+    """Refreshes the heartbeat timestamp and increments packet count for a receiver node."""
+    now = time.time()
+    iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    conn.execute("""
+        UPDATE receiver_nodes SET
+            last_heartbeat_epoch = ?,
+            last_heartbeat_iso = ?,
+            packets_received_total = packets_received_total + ?,
+            status = 'ONLINE'
+        WHERE node_id = ?;
+    """, (now, iso_now, packets_increment, node_id))
+    conn.commit()
+
+
 def update_receiver_node_position(
     conn: sqlite3.Connection,
     node_id: str,

@@ -82,13 +82,25 @@ from drone_rid_spoofer.parser import (
 )
 
 try:
-    from scanner.db import init_encounters_db, get_db_connection as db_get_connection, reconcile_stale_encounters
+    from scanner.db import (
+        init_encounters_db,
+        get_db_connection as db_get_connection,
+        reconcile_stale_encounters,
+        touch_receiver_node_heartbeat,
+        upsert_receiver_node,
+    )
     from scanner.drone_models import infer_drone_model
     from scanner.forwarder import CentralStreamForwarder
     from scanner.scanner_config import load_scanner_config
 except ImportError:
     try:
-        from db import init_encounters_db, get_db_connection as db_get_connection, reconcile_stale_encounters
+        from db import (
+            init_encounters_db,
+            get_db_connection as db_get_connection,
+            reconcile_stale_encounters,
+            touch_receiver_node_heartbeat,
+            upsert_receiver_node,
+        )
         from drone_models import infer_drone_model
         from forwarder import CentralStreamForwarder
         from scanner_config import load_scanner_config
@@ -1529,9 +1541,11 @@ class UnifiedTelemetryLogger:
         persist_interval_s: float = 2.0,
         forwarder: Optional[Any] = None,
         node_id: Optional[str] = None,
+        node_meta: Optional[Dict[str, Any]] = None,
     ):
         self.forwarder = forwarder
         self.node_id = node_id
+        self.node_meta = node_meta or {}
         self.base_log_path = log_jsonl_path
         self.rotate_daily = rotate_daily
         self.quiet = quiet
@@ -1544,6 +1558,25 @@ class UnifiedTelemetryLogger:
             persist_interval_s=persist_interval_s,
             default_node_id=self.node_id,
         ) if db_path else None
+
+        # Register local node in database if local SQLite DB active
+        if db_path and self.node_id:
+            try:
+                with sqlite3.connect(db_path) as conn:
+                    upsert_receiver_node(
+                        conn,
+                        node_id=self.node_id,
+                        name=self.node_meta.get("name", self.node_id),
+                        latitude=float(self.node_meta.get("latitude", 0.0)),
+                        longitude=float(self.node_meta.get("longitude", 0.0)),
+                        altitude_m=float(self.node_meta.get("altitude_m", 0.0)),
+                        range_rings_json=json.dumps(self.node_meta.get("range_rings_m", [500, 1000, 2500, 5000])),
+                        description=self.node_meta.get("description", ""),
+                        locked=bool(self.node_meta.get("locked", False)),
+                        status="ONLINE",
+                    )
+            except Exception as e:
+                logger.debug(f"Could not register local receiver node in DB: {e}")
 
         self.stats = {
             "total_packets": 0,
@@ -1558,6 +1591,7 @@ class UnifiedTelemetryLogger:
         self.first_packet_time: Optional[float] = None
         self.last_timeout_check = time.time()
         self.last_heartbeat = time.time()
+        self.last_node_heartbeat = time.time()
 
     def _ensure_log_handle(self, now: float):
         if not self.base_log_path:
@@ -1591,6 +1625,7 @@ class UnifiedTelemetryLogger:
         Periodic maintenance task called continuously from the main loop even when the event queue is empty.
         1. Sweeps for encounters exceeding the silence timeout (> 5 minutes) and closes them in SQLite.
         2. In quiet / daemon mode, prints a periodic status heartbeat every 30 seconds.
+        3. Refreshes local node heartbeat in SQLite so local dashboards show node ONLINE.
         """
         if now is None:
             now = time.time()
@@ -1603,7 +1638,17 @@ class UnifiedTelemetryLogger:
                     print(f"{C_GRAY}[*] Flight Encounter {c_id} closed ({self.encounter_tracker.timeout_s:.0f}s silence timeout).{C_RESET}")
             self.last_timeout_check = now
 
-        # 2. In quiet mode, emit periodic heartbeat every 30s even when 0 packets arrive
+        # 2. Touch local receiver node heartbeat in SQLite every 15s
+        if self.encounter_tracker and self.encounter_tracker.db_path and self.node_id:
+            if now - self.last_node_heartbeat >= 15.0:
+                self.last_node_heartbeat = now
+                try:
+                    with sqlite3.connect(self.encounter_tracker.db_path) as conn:
+                        touch_receiver_node_heartbeat(conn, self.node_id)
+                except Exception:
+                    pass
+
+        # 3. In quiet mode, emit periodic heartbeat every 30s even when 0 packets arrive
         if self.quiet and (now - self.last_heartbeat >= 30.0):
             self.last_heartbeat = now
             iso_str = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -2064,6 +2109,7 @@ def main():
         persist_interval_s=args.persist_interval,
         forwarder=forwarder,
         node_id=args.node_id,
+        node_meta=cfg,
     )
 
     threads: List[threading.Thread] = []

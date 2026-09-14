@@ -42,6 +42,7 @@ try:
         get_node_sync_watermark,
         get_receiver_nodes,
         init_encounters_db,
+        touch_receiver_node_heartbeat,
         update_node_sync_watermark,
         upsert_receiver_node,
     )
@@ -52,6 +53,7 @@ except ImportError:
         get_node_sync_watermark,
         get_receiver_nodes,
         init_encounters_db,
+        touch_receiver_node_heartbeat,
         update_node_sync_watermark,
         upsert_receiver_node,
     )
@@ -265,6 +267,10 @@ class CentralIngestionHub:
             status="ONLINE",
         )
 
+    def heartbeat_node(self, node_id: str, packets_increment: int = 0):
+        """Refreshes node heartbeat timestamp in database."""
+        touch_receiver_node_heartbeat(self.db_conn, node_id, packets_increment=packets_increment)
+
     def update_node_watermark(self, node_id: str, last_epoch: float, count: int = 0):
         update_node_sync_watermark(self.db_conn, node_id, last_epoch, packets_synced_count=count)
 
@@ -395,7 +401,19 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
                 data = json.loads(msg_text)
                 msg_type = data.get("type", "packet")
 
-                if msg_type == "batch":
+                if msg_type == "heartbeat":
+                    hb_node_id = data.get("node_id", actual_node_id)
+                    hb_meta = data.get("node_meta")
+                    if hb_meta:
+                        hub.register_node(hb_node_id, hb_meta)
+                    else:
+                        hub.heartbeat_node(hb_node_id)
+                    await websocket.send_text(json.dumps({
+                        "type": "heartbeat_ack",
+                        "status": "ok",
+                        "timestamp": time.time(),
+                    }))
+                elif msg_type == "batch":
                     batch_id = data.get("batch_id", "unknown")
                     count = await hub.ingest_batch(data)
                     # Send explicit batch_ack to authorize edge node to purge spool file
@@ -409,6 +427,7 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
                     await websocket.send_text(json.dumps(batch_ack))
                 else:
                     await hub.ingest_packet(data)
+                    hub.heartbeat_node(actual_node_id, packets_increment=1)
 
         except WebSocketDisconnect:
             logger.info(f"[*] Node '{node_id}' disconnected from WebSocket stream.")

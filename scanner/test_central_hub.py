@@ -177,6 +177,22 @@ class TestCentralHub(unittest.TestCase):
 
         loop.close()
 
+    def test_node_heartbeat_keeps_online(self):
+        # Register node
+        self.hub.register_node(
+            node_id="sensor-node-hb",
+            node_meta={"name": "HB Sensor", "latitude": 47.37, "longitude": 8.54},
+        )
+        # Heartbeat node
+        self.hub.heartbeat_node("sensor-node-hb", packets_increment=5)
+
+        nodes = get_receiver_nodes(self.hub.db_conn)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["node_id"], "sensor-node-hb")
+        self.assertEqual(nodes[0]["status"], "ONLINE")
+        self.assertEqual(nodes[0]["packets_received_total"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()
+
