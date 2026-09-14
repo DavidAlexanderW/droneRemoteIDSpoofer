@@ -106,11 +106,31 @@ async def add_no_cache_headers(request: Request, call_next):
 
 # Database, Log, and Config Paths (Configurable dynamically via environment or run_dashboard.py)
 def get_db_path() -> str:
-    return os.environ.get("RID_DB_PATH", "rid_detections.db")
+    env_path = os.environ.get("RID_DB_PATH")
+    if env_path:
+        return env_path
+    for candidate in [
+        "rid_detections_central.db",
+        os.path.join(repo_root, "rid_detections_central.db"),
+        "rid_detections.db",
+        os.path.join(repo_root, "rid_detections.db"),
+    ]:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return os.path.join(repo_root, "rid_detections.db") if os.path.isdir(repo_root) else "rid_detections.db"
 
 
 def get_jsonl_path() -> str:
-    return os.environ.get("RID_JSONL_PATH", "rid_packets.jsonl")
+    env_path = os.environ.get("RID_JSONL_PATH")
+    if env_path:
+        return env_path
+    for candidate in [
+        "rid_packets.jsonl",
+        os.path.join(repo_root, "rid_packets.jsonl"),
+    ]:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return "rid_packets.jsonl"
 
 
 def get_timeout_s() -> float:

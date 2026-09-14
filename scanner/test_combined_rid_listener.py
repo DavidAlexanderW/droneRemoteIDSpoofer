@@ -742,5 +742,56 @@ class TestCombinedRIDListener(unittest.TestCase):
                 self.assertEqual(dist["6.0 Mbps OFDM"]["count"], 1)
                 self.assertEqual(dist["6.0 Mbps OFDM"]["percent"], 25.0)
 
+    def test_rehydrate_db_from_jsonl(self):
+        import tempfile
+        import json
+        import os
+        import sqlite3
+
+        temp_dir = tempfile.mkdtemp()
+        db_path = os.path.join(temp_dir, "test_rehydrated.db")
+        jsonl_path = os.path.join(temp_dir, "rid_packets_20260907.jsonl")
+
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "transport": "wifi",
+                "counter": 1,
+                "mac": "00:0E:8E:9F:62:83",
+                "serial": "1744510470",
+                "channel": 6,
+                "rssi_dbm": -65,
+                "timestamp_iso": "2026-09-07T13:10:45.866025+00:00",
+                "encounter_id": "ENC-20260907-131045-9F6283",
+                "messages_b64": ["AhQxNzQ0NTEwNDcwAAAAAAAAAAAAAAAAAA=="],
+            }) + "\n")
+            f.write(json.dumps({
+                "transport": "wifi",
+                "counter": 2,
+                "mac": "00:0E:8E:9F:62:83",
+                "serial": "1744510470",
+                "channel": 6,
+                "rssi_dbm": -62,
+                "timestamp_iso": "2026-09-07T13:10:55.000000+00:00",
+                "encounter_id": "ENC-20260907-131045-9F6283",
+                "messages_b64": ["AhQxNzQ0NTEwNDcwAAAAAAAAAAAAAAAAAA=="],
+            }) + "\n")
+
+        count = rehydrate_db_from_jsonl(db_path=db_path, log_dir=temp_dir, node_id="node-zurich-01")
+        self.assertEqual(count, 1)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM encounters WHERE encounter_id = 'ENC-20260907-131045-9F6283';").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["serial_number"], "1744510470")
+            self.assertEqual(row["node_id"], "node-zurich-01")
+            self.assertEqual(row["packet_count"], 2)
+            self.assertEqual(row["is_active"], 0)
+            self.assertEqual(row["first_seen_iso"], "2026-09-07T13:10:45.866025+00:00")
+
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

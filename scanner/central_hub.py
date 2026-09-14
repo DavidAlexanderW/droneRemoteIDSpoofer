@@ -95,7 +95,16 @@ class CentralDailyReplayLogger:
 
     async def log_packet(self, packet_envelope: Dict[str, Any], encounter_id: Optional[str] = None):
         """Asynchronously writes a standardized packet record to the central daily JSONL."""
-        ts = packet_envelope.get("timestamp", packet_envelope.get("timestamp_epoch", time.time()))
+        ts = packet_envelope.get("timestamp") or packet_envelope.get("timestamp_epoch")
+        if ts is None and packet_envelope.get("timestamp_iso"):
+            try:
+                dt = datetime.fromisoformat(packet_envelope["timestamp_iso"].replace("Z", "+00:00"))
+                ts = dt.timestamp()
+            except Exception:
+                ts = time.time()
+        if ts is None:
+            ts = time.time()
+
         async with self.lock:
             handle = self._get_file_handle(ts)
             record = {
@@ -107,7 +116,7 @@ class CentralDailyReplayLogger:
                 "channel": packet_envelope.get("channel"),
                 "rssi_dbm": packet_envelope.get("rssi_dbm"),
                 "mac": packet_envelope.get("mac", "UNKNOWN"),
-                "serial": packet_envelope.get("serial_number"),
+                "serial": packet_envelope.get("serial_number") or packet_envelope.get("serial"),
                 "counter": packet_envelope.get("counter", 0),
                 "messages_b64": packet_envelope.get("messages_b64", []),
                 "messages": packet_envelope.get("messages", []),
@@ -145,9 +154,17 @@ class MultiNodeDeduplicator:
             self._cleanup(now)
 
         mac = envelope.get("mac", "UNKNOWN")
-        serial = envelope.get("serial_number")
+        serial = envelope.get("serial_number") or envelope.get("serial")
         entity_id = serial or mac
-        ts = envelope.get("timestamp", envelope.get("timestamp_epoch", now))
+        ts = envelope.get("timestamp") or envelope.get("timestamp_epoch")
+        if ts is None and envelope.get("timestamp_iso"):
+            try:
+                dt = datetime.fromisoformat(envelope["timestamp_iso"].replace("Z", "+00:00"))
+                ts = dt.timestamp()
+            except Exception:
+                ts = now
+        if ts is None:
+            ts = now
         counter = envelope.get("counter", 0)
         transport = envelope.get("transport", "")
         node_id = envelope.get("node_id", "default_node")
@@ -253,6 +270,29 @@ class CentralIngestionHub:
 
     async def ingest_packet(self, envelope: Dict[str, Any]) -> Optional[str]:
         """Ingests a single packet envelope through deduplication, encounter tracker, and replay log."""
+        ts = envelope.get("timestamp") or envelope.get("timestamp_epoch")
+        if ts is None and envelope.get("timestamp_iso"):
+            try:
+                dt = datetime.fromisoformat(envelope["timestamp_iso"].replace("Z", "+00:00"))
+                ts = dt.timestamp()
+            except Exception:
+                ts = time.time()
+        if ts is None:
+            ts = time.time()
+        envelope["timestamp"] = ts
+
+        if not envelope.get("serial_number") and envelope.get("serial"):
+            envelope["serial_number"] = envelope["serial"]
+
+        if not envelope.get("messages") and envelope.get("messages_b64"):
+            try:
+                import base64
+                from drone_rid_spoofer.parser import decode_astm_message
+                raw_blocks = [base64.b64decode(b) for b in envelope["messages_b64"]]
+                envelope["messages"] = [decode_astm_message(b) for b in raw_blocks if decode_astm_message(b)]
+            except Exception:
+                pass
+
         is_new, node_rssi_map, primary_node = self.deduplicator.process(envelope)
 
         # Attach multi-node spatial attribution

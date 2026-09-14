@@ -460,9 +460,20 @@ class EncounterTracker:
     def update_with_packet(self, packet: Dict[str, Any]) -> str:
         """Update or create an active encounter from an incoming packet. Returns encounter_id."""
         mac = packet.get("mac", "UNKNOWN")
-        serial = packet.get("serial_number")
+        serial = packet.get("serial_number") or packet.get("serial")
         node_id = packet.get("node_id") or packet.get("primary_node_id") or self.default_node_id
-        ts = packet.get("timestamp", time.time())
+        
+        # Robust timestamp resolution
+        ts = packet.get("timestamp") or packet.get("timestamp_epoch")
+        if ts is None and packet.get("timestamp_iso"):
+            try:
+                dt = datetime.fromisoformat(packet["timestamp_iso"].replace("Z", "+00:00"))
+                ts = dt.timestamp()
+            except Exception:
+                ts = time.time()
+        if ts is None:
+            ts = time.time()
+
         transport = packet.get("transport", "unknown")
         ch_raw = packet.get("channel", "N/A")
         if transport in ("bt4", "bt5"):
@@ -478,20 +489,21 @@ class EncounterTracker:
         now = time.time()
 
         with self.lock:
-            # Check if existing encounter timed out (> 5 minutes)
+            # Check if existing encounter timed out (> 5 minutes), belongs to different encounter_id, or has backward time jump
             if key in self.active_encounters:
                 enc = self.active_encounters[key]
-                if ts - enc["last_seen"] > self.timeout_s:
+                pkt_enc_id = packet.get("encounter_id")
+                if (pkt_enc_id and pkt_enc_id != enc["encounter_id"]) or (ts - enc["last_seen"] > self.timeout_s) or (ts < enc["first_seen"]):
                     # Finalize old encounter
                     enc["is_active"] = 0
                     self._persist_encounter(enc)
                     del self.active_encounters[key]
 
             if key not in self.active_encounters:
-                # Generate unique encounter ID
+                # Generate unique encounter ID or preserve existing
                 enc_slug = mac.replace(":", "")[-6:]
                 dt_tag = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%d-%H%M%S")
-                encounter_id = f"ENC-{dt_tag}-{enc_slug}"
+                encounter_id = packet.get("encounter_id") or f"ENC-{dt_tag}-{enc_slug}"
 
                 drone_info = infer_drone_model(serial) if serial else {}
                 self.active_encounters[key] = {
@@ -560,8 +572,22 @@ class EncounterTracker:
             if rssi is not None:
                 enc["rssi_values"].append(rssi)
 
+            # Resolve messages: decode messages_b64 if messages list is empty
+            msgs_to_process = packet.get("messages", [])
+            if not msgs_to_process and packet.get("messages_b64"):
+                msgs_to_process = []
+                import base64
+                for b64_str in packet["messages_b64"]:
+                    try:
+                        raw_b = base64.b64decode(b64_str)
+                        dm = decode_astm_message(raw_b)
+                        if dm:
+                            msgs_to_process.append(dm)
+                    except Exception:
+                        pass
+
             # Parse message telemetry fields
-            for msg in packet.get("messages", []):
+            for msg in msgs_to_process:
                 m_type = msg.get("type")
                 if m_type == "Location":
                     lat = msg.get("lat")
@@ -749,6 +775,8 @@ class EncounterTracker:
         wifi_rates_str = ", ".join(wifi_rates_list) if wifi_rates_list else None
         trajectory_str = json.dumps(enc["trajectory"])
 
+        persisted_is_active = 0 if (time.time() - enc["last_seen"] > self.timeout_s) else enc["is_active"]
+
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
@@ -807,23 +835,47 @@ class EncounterTracker:
             logger.debug(f"Error persisting encounter to SQLite: {e}")
 
 
-def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optional[str] = None) -> int:
+def rehydrate_db_from_jsonl(
+    db_path: str = "rid_detections.db",
+    log_dir: Optional[str] = None,
+    node_id: Optional[str] = None,
+) -> int:
     """
     Retroactively parses all raw base64 ASTM messages in JSONL log files (rid_packets_*.jsonl)
     and re-populates/upgrades the SQLite encounter database with full 10-element trajectory fixes,
-    min/max heights, pressure altitudes, and system telemetry limits.
+    min/max heights, pressure altitudes, system telemetry limits, and node_id attribution.
     """
     import glob
     import base64
 
+    if node_id is None:
+        try:
+            cfg = load_scanner_config() if load_scanner_config else {}
+            node_id = cfg.get("node_id", "sensor-node-01")
+        except Exception:
+            node_id = "sensor-node-01"
+
     if log_dir is None:
         search_patterns = [
             "rid_packets_*.jsonl",
-            os.path.join(repo_root, "rid_packets_*.jsonl"),
-            os.path.join(os.path.dirname(__file__), "..", "rid_packets_*.jsonl"),
+            "rid_packets*.jsonl",
+            "central_logs/rid_packets*.jsonl",
+            "central_logs/*.jsonl",
+            os.path.join(repo_root, "rid_packets*.jsonl"),
+            os.path.join(repo_root, "central_logs", "rid_packets*.jsonl"),
+            os.path.join(repo_root, "central_logs", "*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "..", "rid_packets*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "..", "central_logs", "rid_packets*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "rid_packets*.jsonl"),
         ]
     else:
         search_patterns = [os.path.join(log_dir, "rid_packets_*.jsonl"), os.path.join(log_dir, "*.jsonl")]
+
+    if db_path == "rid_detections.db":
+        if os.path.isfile("rid_detections_central.db") and not os.path.isfile("rid_detections.db"):
+            db_path = "rid_detections_central.db"
+        elif os.path.isfile(os.path.join(repo_root, "rid_detections_central.db")) and not os.path.isfile(os.path.join(repo_root, "rid_detections.db")):
+            db_path = os.path.join(repo_root, "rid_detections_central.db")
 
     log_files = []
     for pattern in search_patterns:
@@ -838,35 +890,41 @@ def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optiona
 
     logger.info(f"[*] Rehydration: Found {len(log_files)} packet log file(s): {[os.path.basename(f) for f in log_files]}")
 
-    encounters_data: Dict[str, Dict[str, Any]] = {}
+    all_packets: List[Dict[str, Any]] = []
     for fpath in sorted(log_files):
         try:
             with open(fpath, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
-                    if not line:
+                    if not line or not line.startswith("{"):
                         continue
                     try:
                         rec = json.loads(line)
+                        all_packets.append(rec)
                     except Exception:
                         continue
-                    enc_id = rec.get("encounter_id")
-                    if not enc_id:
-                        mac = rec.get("mac", "UNKNOWN")
-                        enc_id = f"ENC-{mac}"
-                    if enc_id not in encounters_data:
-                        encounters_data[enc_id] = {
-                            "encounter_id": enc_id,
-                            "mac": rec.get("mac", "UNKNOWN"),
-                            "serial_number": rec.get("serial"),
-                            "packets": []
-                        }
-                    encounters_data[enc_id]["packets"].append(rec)
         except Exception as e:
             logger.debug(f"Error reading {fpath} for rehydration: {e}")
 
+    if not all_packets:
+        logger.info("[*] Rehydration: No valid packet records found in JSONL logs.")
+        return 0
+
+    def _resolve_ts(p: Dict[str, Any]) -> float:
+        ts = p.get("timestamp") or p.get("timestamp_epoch")
+        if ts is None and p.get("timestamp_iso"):
+            try:
+                dt = datetime.fromisoformat(p["timestamp_iso"].replace("Z", "+00:00"))
+                ts = dt.timestamp()
+            except Exception:
+                pass
+        return float(ts) if ts is not None else 0.0
+
+    # Sort all packets chronologically so encounters build accurately over time
+    all_packets.sort(key=_resolve_ts)
+
     try:
-        tracker = EncounterTracker(db_path=db_path, persist_interval_s=0.0)
+        tracker = EncounterTracker(db_path=db_path, persist_interval_s=0.0, default_node_id=node_id)
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower() or "permission" in str(e).lower():
             logger.error(f"[-] Database permission error opening '{db_path}': {e}\n"
@@ -877,47 +935,53 @@ def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optiona
             return 0
         raise
 
-    rehydrated_count = 0
-    for enc_id, data in encounters_data.items():
-        pkts = data["packets"]
-        for p in pkts:
-            decoded_msgs = p.get("messages", [])
-            if not decoded_msgs and p.get("messages_b64"):
-                for b64_str in p["messages_b64"]:
-                    try:
-                        raw_b = base64.b64decode(b64_str)
-                        dm = decode_astm_message(raw_b)
-                        if dm:
-                            decoded_msgs.append(dm)
-                    except Exception:
-                        pass
+    for p in all_packets:
+        decoded_msgs = p.get("messages", [])
+        if not decoded_msgs and p.get("messages_b64"):
+            try:
+                raw_blocks = [base64.b64decode(b) for b in p["messages_b64"]]
+                if parse_astm_payload:
+                    parsed_msgs, _ = parse_astm_payload(b"".join(raw_blocks))
+                    decoded_msgs = parsed_msgs
+                elif decode_astm_message:
+                    decoded_msgs = [decode_astm_message(b) for b in raw_blocks if decode_astm_message(b)]
+            except Exception:
+                pass
 
-            ts = p.get("timestamp")
-            if ts is None and p.get("timestamp_iso"):
-                try:
-                    ts = datetime.fromisoformat(p["timestamp_iso"]).timestamp()
-                except Exception:
-                    pass
-            if ts is None:
-                ts = time.time()
+        ts = _resolve_ts(p)
+        if ts <= 0.0:
+            ts = time.time()
 
-            pkt_obj = {
-                "timestamp": ts,
-                "transport": p.get("transport", "wifi"),
-                "channel": p.get("channel", "N/A"),
-                "mac": p.get("mac", data["mac"]),
-                "node_id": p.get("node_id"),
-                "rssi_dbm": p.get("rssi_dbm"),
-                "rate_desc": p.get("rate_desc"),
-                "rate_mbps": p.get("rate_mbps"),
-                "modulation": p.get("modulation"),
-                "serial_number": p.get("serial", data["serial_number"]),
-                "messages": decoded_msgs,
-            }
-            tracker.update_with_packet(pkt_obj)
-        rehydrated_count += 1
+        mac = p.get("mac", "UNKNOWN")
+        serial = p.get("serial_number") or p.get("serial")
+        pkt_node_id = p.get("node_id") or node_id
+
+        pkt_obj = {
+            "timestamp": ts,
+            "transport": p.get("transport", "wifi"),
+            "channel": p.get("channel", "N/A"),
+            "mac": mac,
+            "node_id": pkt_node_id,
+            "rssi_dbm": p.get("rssi_dbm"),
+            "rate_desc": p.get("rate_desc"),
+            "rate_mbps": p.get("rate_mbps"),
+            "modulation": p.get("modulation"),
+            "serial_number": serial,
+            "encounter_id": p.get("encounter_id"),
+            "messages": decoded_msgs,
+        }
+        tracker.update_with_packet(pkt_obj)
 
     tracker.finalize_all()
+
+    # Query count of encounters in DB
+    rehydrated_count = 0
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rehydrated_count = conn.execute("SELECT COUNT(*) FROM encounters;").fetchone()[0]
+    except Exception:
+        pass
+
     logger.info(f"[+] Rehydration complete: {rehydrated_count} encounter(s) updated in {db_path}")
     return rehydrated_count
 
@@ -1888,6 +1952,7 @@ def main():
     parser.add_argument("--log-jsonl", default=None, help="Optional replay-compatible JSONL log file path")
     parser.add_argument("--rotate-daily", action="store_true", help="Automatically split JSONL log file daily (<name>_YYYYMMDD.jsonl)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Quiet / daemon mode: suppress per-packet console banner and print periodic heartbeat status")
+    parser.add_argument("--sync-only", action="store_true", help="Synchronize pending spool files and historical backlog to Central Hub and exit")
     parser.add_argument("--rehydrate", action="store_true", help="Retroactively re-parse all raw base64 ASTM messages from rid_packets_*.jsonl files and update the SQLite database")
 
     args = parser.parse_args()
@@ -1908,24 +1973,22 @@ def main():
         if args.max_ram_queue == default_max_ram:
             args.max_ram_queue = int(cfg.get("max_ram_queue", default_max_ram))
 
-    if args.rehydrate:
-        rehydrated = rehydrate_db_from_jsonl(db_path=args.db_file if args.db_file else "rid_detections.db")
-        print(f"{C_GREEN}[+] Database rehydration complete: {rehydrated} encounter(s) updated in {args.db_file or 'rid_detections.db'}.{C_RESET}")
-        if (args.no_wifi or not args.wifi_iface) and (args.no_ble):
-            return
-
-    if args.no_wifi and args.no_ble:
-        logger.error("[-] Both Wi-Fi and BLE are disabled. Nothing to do!")
-        sys.exit(1)
-
     if not args.no_wifi and not args.wifi_iface:
-        logger.warning("[!] No --wifi-iface specified. Wi-Fi capture will be disabled unless --wifi-iface is provided.")
         args.no_wifi = True
 
     if os.geteuid() != 0 and not args.no_wifi:
         logger.warning("[!] Warning: Root privileges (sudo) are recommended for Wi-Fi monitor mode and raw socket capture.")
 
     initial_wifi_ch = args.wifi_channel if args.wifi_channel is not None else SOCIAL_CHANNEL_2G
+
+    if args.rehydrate:
+        rehydrated = rehydrate_db_from_jsonl(
+            db_path=args.db_file if args.db_file else "rid_detections.db",
+            node_id=args.node_id,
+        )
+        print(f"{C_GREEN}[+] Database rehydration complete: {rehydrated} encounter(s) updated in {args.db_file or 'rid_detections.db'}.{C_RESET}")
+        if not args.hub_url and not args.wifi_iface and not args.nrf_port:
+            return
 
     # Configure Distributed Stream Forwarder or Standalone Mode
     is_hub_mode = bool(args.hub_url and not args.standalone)
@@ -1954,10 +2017,32 @@ def main():
             )
             forwarder.start()
             logger.info(f"[*] Operational Mode: CENTRALIZED STREAMING -> Hub: {args.hub_url} | Node ID: {args.node_id}")
+
+            if args.sync_only:
+                logger.info("[*] --sync-only specified: Waiting for catch-up backlog upload to complete...")
+                forwarder.catchup_complete.wait(timeout=120.0)
+                time.sleep(1.0)
+                forwarder.stop()
+                logger.info("[+] Catch-up backlog synchronization complete. Exiting.")
+                return
         else:
             logger.error("[-] CentralStreamForwarder module could not be loaded. Running standalone.")
     else:
         logger.info(f"[*] Operational Mode: STANDALONE LOCAL -> Encounters DB: {args.db_file or 'disabled'} (No Hub URL configured)")
+
+    if args.no_wifi and args.no_ble:
+        if is_hub_mode and forwarder:
+            logger.info("[*] Radios disabled (--no-wifi --no-ble). Stream forwarder is running in background to drain spool/backlog.")
+            try:
+                while True:
+                    time.sleep(1.0)
+            except KeyboardInterrupt:
+                logger.info("[*] Stopping forwarder...")
+                forwarder.stop()
+                return
+        else:
+            logger.error("[-] Both Wi-Fi and BLE are disabled and no Hub URL configured. Nothing to do!")
+            sys.exit(1)
 
     # Determine local storage paths: in hub mode, disable continuous local disk writes unless explicitly specified
     db_path_to_use = None

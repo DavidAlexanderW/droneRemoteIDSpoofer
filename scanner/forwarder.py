@@ -17,10 +17,28 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+
+# Ensure repository root in sys.path for parser imports
+_scanner_dir = os.path.abspath(os.path.dirname(__file__))
+_repo_root = os.path.abspath(os.path.join(_scanner_dir, ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+if _scanner_dir not in sys.path:
+    sys.path.insert(0, _scanner_dir)
+
+try:
+    from drone_rid_spoofer.parser import decode_astm_message, parse_astm_payload
+except ImportError:
+    try:
+        from parser import decode_astm_message, parse_astm_payload
+    except ImportError:
+        decode_astm_message = None
+        parse_astm_payload = None
 
 try:
     import websockets
@@ -46,6 +64,7 @@ class CentralStreamForwarder:
         backlog_paths: Optional[List[str]] = None,
         max_ram_queue: int = 10000,
         batch_size: int = 250,
+        force_resync: bool = False,
         quiet: bool = False,
     ):
         self.hub_ws_url = hub_ws_url.strip()
@@ -55,11 +74,13 @@ class CentralStreamForwarder:
         self.backlog_paths = backlog_paths or []
         self.max_ram_queue = max(1, max_ram_queue)
         self.batch_size = max(10, batch_size)
+        self.force_resync = force_resync
         self.quiet = quiet
 
         self.live_queue: queue.Queue = queue.Queue(maxsize=self.max_ram_queue)
         self.running = False
         self.connected = False
+        self.catchup_complete = threading.Event()
         self.last_connected_time: Optional[float] = None
         self.stats = {
             "packets_enqueued": 0,
@@ -267,7 +288,7 @@ class CentralStreamForwarder:
         """
         Discovers all pending spool files and historical JSONL logs,
         streams un-synced packets in batches, waits for Hub commit ACKs,
-        and safely unlinks/purges the files once acknowledged.
+        and safely unlinks/purges the temporary spool files once acknowledged.
         """
         candidate_files = []
 
@@ -277,11 +298,14 @@ class CentralStreamForwarder:
                 if f.endswith(".jsonl") and not f.endswith(".tmp"):
                     candidate_files.append(os.path.join(self.spool_dir, f))
 
-        # 2. Collect any backlog glob paths
-        for pat in self.backlog_paths:
+        # 2. Collect backlog glob paths
+        search_paths = list(self.backlog_paths)
+
+        for pat in search_paths:
             for p in sorted(glob.glob(pat)):
-                if os.path.isfile(p) and p not in candidate_files:
-                    candidate_files.append(p)
+                abs_p = os.path.abspath(p)
+                if os.path.isfile(abs_p) and abs_p not in candidate_files:
+                    candidate_files.append(abs_p)
 
         if candidate_files:
             logger.info(f"[*] Catch-up sync found {len(candidate_files)} file(s) to inspect/synchronize: {[os.path.basename(p) for p in candidate_files]}")
@@ -295,13 +319,17 @@ class CentralStreamForwarder:
                 logger.error(f"[-] Error synchronizing file {file_path}: {e}")
                 break  # If connection drops during batch sync, break to reconnect
 
+        self.catchup_complete.set()
+
     async def _sync_single_file(self, ws, file_path: str, last_synced_epoch: float):
-        """Streams packets from a single file in batches and deletes the file upon Hub commit confirmation."""
+        """Streams packets from a single file in batches and deletes only temporary spool files upon Hub commit confirmation."""
         if not os.path.exists(file_path):
             return
 
+        is_spool = os.path.abspath(file_path).startswith(self.spool_dir)
         batch_items = []
         synced_count = 0
+        total_lines = 0
         file_basename = os.path.basename(file_path)
 
         with open(file_path, "r", encoding="utf-8") as f:
@@ -309,6 +337,7 @@ class CentralStreamForwarder:
                 line_str = line.strip()
                 if not line_str or not line_str.startswith("{"):
                     continue
+                total_lines += 1
                 try:
                     pkt = json.loads(line_str)
                     ts = pkt.get("timestamp") or pkt.get("timestamp_epoch")
@@ -320,19 +349,32 @@ class CentralStreamForwarder:
                                 dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
                                 ts = dt.timestamp()
                             except Exception:
-                                ts = 0.0
+                                ts = time.time()
                         else:
-                            ts = 0.0
+                            ts = time.time()
 
-                    if ts > last_synced_epoch or last_synced_epoch <= 0.0:
+                    # Spool files obey watermark; historical archive backlog files sync in full (unless older than watermark and not forced)
+                    should_sync = False
+                    if is_spool:
+                        should_sync = (ts > last_synced_epoch) or (last_synced_epoch <= 0.0)
+                    else:
+                        should_sync = self.force_resync or (last_synced_epoch <= 0.0) or (ts > last_synced_epoch)
+
+                    if should_sync:
+                        # Normalize serial number key
+                        if not pkt.get("serial_number") and pkt.get("serial"):
+                            pkt["serial_number"] = pkt["serial"]
+
                         # If messages list is missing but raw messages_b64 is present, decode it
                         if not pkt.get("messages") and pkt.get("messages_b64"):
                             try:
                                 import base64
-                                from drone_rid_spoofer.parser import parse_astm_payload
                                 raw_blocks = [base64.b64decode(b) for b in pkt["messages_b64"]]
-                                parsed_msgs, _ = parse_astm_payload(b"".join(raw_blocks))
-                                pkt["messages"] = parsed_msgs
+                                if parse_astm_payload:
+                                    parsed_msgs, _ = parse_astm_payload(b"".join(raw_blocks))
+                                    pkt["messages"] = parsed_msgs
+                                elif decode_astm_message:
+                                    pkt["messages"] = [decode_astm_message(b) for b in raw_blocks if decode_astm_message(b)]
                             except Exception:
                                 pass
 
@@ -356,15 +398,23 @@ class CentralStreamForwarder:
             await self._send_and_ack_batch(ws, file_basename, batch_items)
             synced_count += len(batch_items)
 
-        # Batch sync completed successfully -> delete / purge spool file
-        try:
-            os.remove(file_path)
+        # Batch sync completed successfully -> purge temporary spool files, preserve historical archive files
+        if is_spool:
+            try:
+                os.remove(file_path)
+                with self.lock:
+                    self.stats["spool_files_purged"] += 1
+                    self.stats["packets_synced_backlog"] += synced_count
+                logger.info(f"[+] Catch-up sync complete: {file_basename} ({synced_count} pkts). Spool purged from disk.")
+            except Exception as e:
+                logger.warning(f"[!] Could not remove synchronized spool file {file_path}: {e}")
+        else:
             with self.lock:
-                self.stats["spool_files_purged"] += 1
                 self.stats["packets_synced_backlog"] += synced_count
-            logger.info(f"[+] Catch-up sync complete: {file_basename} ({synced_count} pkts). Purged from disk.")
-        except Exception as e:
-            logger.warning(f"[!] Could not remove synchronized file {file_path}: {e}")
+            if synced_count > 0:
+                logger.info(f"[+] Historical sync complete: {file_basename} ({synced_count} pkts). Archive preserved on disk.")
+            elif total_lines > 0:
+                logger.info(f"[*] Historical file {file_basename} is already synchronized with Hub watermark (0 new pkts).")
 
     async def _send_and_ack_batch(self, ws, file_basename: str, items: List[Dict[str, Any]]):
         """Sends a batch of packets and awaits explicit Hub commit ACK."""
@@ -383,3 +433,109 @@ class CentralStreamForwarder:
         ack = json.loads(raw_ack)
         if ack.get("type") != "batch_ack" or ack.get("batch_id") != batch_id or ack.get("status") != "committed":
             raise RuntimeError(f"Invalid batch ACK from Hub: {raw_ack}")
+
+
+# ============================================================================
+# CLI Entry Point & Standalone Backlog Upload Utility
+# ============================================================================
+
+def main():
+    import argparse
+
+    try:
+        from scanner.scanner_config import load_scanner_config
+    except ImportError:
+        try:
+            from scanner_config import load_scanner_config
+        except ImportError:
+            load_scanner_config = None
+
+    cfg = load_scanner_config() if load_scanner_config else {}
+    default_node_id = cfg.get("node_id", "sensor-node-01")
+    default_hub_url = cfg.get("hub_ws_url", "ws://127.0.0.1:8000/stream/node")
+    default_spool_dir = cfg.get("spool_dir", "spool")
+
+    parser = argparse.ArgumentParser(
+        description="Tactical Drone Remote ID - Distributed Stream Forwarder & Historical Data Upload Utility",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--hub-url", default=default_hub_url, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)")
+    parser.add_argument("--node-id", default=default_node_id, help="Sensor node identifier")
+    parser.add_argument("--files", "--backlog", "-f", nargs="*", default=None, help="Specific JSONL capture file(s) or glob patterns to upload")
+    parser.add_argument("--scanner-config", default=None, help="Path to scanner_config.json")
+    parser.add_argument("--spool-dir", default=default_spool_dir, help="Spool directory for temporary outage buffers")
+    parser.add_argument("--batch-size", type=int, default=250, help="Number of packets per catch-up batch")
+    parser.add_argument("--force", action="store_true", help="Force upload of all historical records regardless of watermark")
+    parser.add_argument("--sync-only", action="store_true", default=True, help="Exit cleanly after catch-up backlog synchronization finishes")
+    parser.add_argument("--stream", dest="sync_only", action="store_false", help="Keep running after sync for live streaming")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose console logs")
+
+    args = parser.parse_args()
+
+    if args.scanner_config and load_scanner_config:
+        try:
+            cfg = load_scanner_config(args.scanner_config)
+            if args.hub_url == default_hub_url:
+                args.hub_url = cfg.get("hub_ws_url", default_hub_url)
+            if args.node_id == default_node_id:
+                args.node_id = cfg.get("node_id", default_node_id)
+        except Exception as e:
+            logger.warning(f"Failed to load scanner config '{args.scanner_config}': {e}")
+
+    if args.files:
+        backlog_files = list(args.files)
+    else:
+        backlog_files = [
+            os.path.join(os.getcwd(), "rid_packets*.jsonl"),
+            os.path.join(os.getcwd(), "capture*.jsonl"),
+            os.path.join(_repo_root, "rid_packets*.jsonl"),
+            os.path.join(_repo_root, "capture*.jsonl"),
+            os.path.join(_scanner_dir, "rid_packets*.jsonl"),
+        ]
+
+    print("\n\033[1;32m📡 DRONE REMOTE ID DISTRIBUTED STREAM FORWARDER\033[0m")
+    print(f"  • Central Hub URL: \033[1;36m{args.hub_url}\033[0m")
+    print(f"  • Node Identifier: \033[1;35m{args.node_id}\033[0m")
+    print(f"  • Spool Directory: \033[1;33m{os.path.abspath(args.spool_dir)}\033[0m")
+    if backlog_files:
+        print(f"  • Target Files   : \033[1;34m{backlog_files}\033[0m")
+    else:
+        print(f"  • Backlog Search : \033[1;34mAuto-detecting rid_packets_*.jsonl\033[0m")
+    print(f"  • Force Re-sync  : \033[1;33m{'YES' if args.force else 'NO (Watermarked)'}\033[0m\n")
+
+    forwarder = CentralStreamForwarder(
+        hub_ws_url=args.hub_url,
+        node_id=args.node_id,
+        node_meta=cfg,
+        spool_dir=args.spool_dir,
+        backlog_paths=backlog_files,
+        batch_size=args.batch_size,
+        force_resync=args.force,
+        quiet=args.quiet,
+    )
+    forwarder.start()
+
+    if args.sync_only:
+        print("[*] Waiting for historical catch-up sync to complete...")
+        completed = forwarder.catchup_complete.wait(timeout=120.0)
+        # Allow short grace period for background ACKs
+        time.sleep(1.0)
+        forwarder.stop()
+        if completed:
+            print(f"\n\033[1;32m[✓] Historical backlog upload finished successfully!\033[0m")
+            print(f"    • Total Backlog Packets Synced: {forwarder.stats['packets_synced_backlog']}")
+            print(f"    • Spool Files Purged:          {forwarder.stats['spool_files_purged']}\n")
+        else:
+            print("\n\033[1;31m[-] Catch-up sync timed out or was interrupted.\033[0m\n")
+            sys.exit(1)
+    else:
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            print("\n[*] Stopping forwarder...")
+            forwarder.stop()
+
+
+if __name__ == "__main__":
+    main()

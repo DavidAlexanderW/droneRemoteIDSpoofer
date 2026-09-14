@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 # Ensure repo and scanner paths in sys.path
@@ -483,8 +484,25 @@ class TestDashboardAPI(unittest.TestCase):
             self.assertFalse(data_nf["found"])
             self.assertIn("No matching Declaration of Compliance", data_nf["message"])
 
+    def test_db_path_resolution(self):
+        from dashboard.app import get_db_path
+        # 1. When RID_DB_PATH is set
+        os.environ["RID_DB_PATH"] = "/custom/path/detections.db"
+        self.assertEqual(get_db_path(), "/custom/path/detections.db")
+
+        # 2. When RID_DB_PATH is unset and central DB exists
+        os.environ.pop("RID_DB_PATH", None)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            central_db = os.path.join(tmpdir, "rid_detections_central.db")
+            with open(central_db, "w") as f:
+                f.write("")
+            with patch("dashboard.app.repo_root", tmpdir):
+                resolved = get_db_path()
+                self.assertEqual(resolved, os.path.abspath(central_db))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

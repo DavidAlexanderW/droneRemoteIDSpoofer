@@ -168,6 +168,91 @@ class TestCentralStreamForwarder(unittest.TestCase):
         self.assertEqual(forwarder.stats["spool_files_purged"], 2)
         self.assertEqual(forwarder.stats["packets_synced_backlog"], 3)
 
+    def test_historical_archive_sync_and_preservation(self):
+        # Create a historical archive log file (e.g. rid_packets_20260907.jsonl)
+        archive_file = os.path.join(self.test_dir, "rid_packets_20260907.jsonl")
+        with open(archive_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "mac": "00:0E:8E:9F:62:83",
+                "serial": "1744510470",
+                "timestamp_iso": "2026-09-07T13:10:45.866025+00:00",
+                "encounter_id": "ENC-20260907-131045-9F6283",
+                "messages_b64": ["AhQxNzQ0NTEwNDcwAAAAAAAAAAAAAAAAAA=="],
+            }) + "\n")
+            f.write(json.dumps({
+                "mac": "00:0E:8E:9F:62:83",
+                "serial": "1744510470",
+                "timestamp_iso": "2026-09-07T13:10:56.246292+00:00",
+                "encounter_id": "ENC-20260907-131045-9F6283",
+                "messages_b64": ["AhQxNzQ0NTEwNDcwAAAAAAAAAAAAAAAAAA=="],
+            }) + "\n")
+
+        forwarder = CentralStreamForwarder(
+            hub_ws_url="ws://127.0.0.1:9999/stream/node",
+            node_id="test-node-archive",
+            spool_dir=self.spool_dir,
+            backlog_paths=[archive_file],
+            max_ram_queue=100,
+            quiet=True,
+        )
+        forwarder.running = True
+
+        class MockWebSocket:
+            def __init__(self):
+                self.sent_messages = []
+
+            async def send(self, data):
+                self.sent_messages.append(json.loads(data))
+
+            async def recv(self):
+                last_sent = self.sent_messages[-1]
+                batch_id = last_sent.get("batch_id", "test_batch")
+                return json.dumps({
+                    "type": "batch_ack",
+                    "batch_id": batch_id,
+                    "status": "committed",
+                })
+
+        mock_ws = MockWebSocket()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # Run catch-up sync with watermark 0.0 (initial sync)
+        loop.run_until_complete(forwarder._sync_all_spool_and_backlog(mock_ws, last_synced_epoch=0.0))
+
+        # Verify archive file is PRESERVED on disk (not deleted!)
+        self.assertTrue(os.path.exists(archive_file))
+        self.assertEqual(forwarder.stats["packets_synced_backlog"], 2)
+        self.assertEqual(forwarder.stats["spool_files_purged"], 0)
+
+        # Verify envelope structure sent over WebSocket
+        self.assertEqual(len(mock_ws.sent_messages), 1)
+        batch_payload = mock_ws.sent_messages[0]
+        self.assertEqual(batch_payload["type"], "batch")
+        self.assertEqual(len(batch_payload["items"]), 2)
+        first_item = batch_payload["items"][0]
+        self.assertEqual(first_item["node_id"], "test-node-archive")
+        self.assertEqual(first_item["serial_number"], "1744510470")
+        self.assertIn("timestamp", first_item)
+        self.assertGreater(first_item["timestamp"], 1700000000.0)
+
+        # Verify watermark filtering on subsequent sync without force
+        watermark = first_item["timestamp"] + 1000.0
+        mock_ws.sent_messages.clear()
+        forwarder.stats["packets_synced_backlog"] = 0
+
+        loop.run_until_complete(forwarder._sync_all_spool_and_backlog(mock_ws, last_synced_epoch=watermark))
+        self.assertEqual(len(mock_ws.sent_messages), 0)
+        self.assertEqual(forwarder.stats["packets_synced_backlog"], 0)
+
+        # Verify force_resync overrides watermark
+        forwarder.force_resync = True
+        loop.run_until_complete(forwarder._sync_all_spool_and_backlog(mock_ws, last_synced_epoch=watermark))
+        self.assertEqual(len(mock_ws.sent_messages), 1)
+        self.assertEqual(forwarder.stats["packets_synced_backlog"], 2)
+
+        loop.close()
+
 
 if __name__ == "__main__":
     unittest.main()

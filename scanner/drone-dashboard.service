@@ -31,8 +31,6 @@ WorkingDirectory=/home/user/droneRemoteIDSpoofer
 ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-dashboard \
     --host 0.0.0.0 \
     --port 8080 \
-    --db /home/user/droneRemoteIDSpoofer/rid_detections.db \
-    --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
     --dashboard-config /home/user/droneRemoteIDSpoofer/scanner/dashboard/dashboard_config.json
 
 # Auto-restart on unexpected termination

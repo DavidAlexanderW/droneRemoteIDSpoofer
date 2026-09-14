@@ -454,11 +454,25 @@ def cmd_stats(args):
 # ============================================================================
 
 def main():
+    scanner_dir = os.path.abspath(os.path.dirname(__file__))
+    repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+    
+    default_db = "rid_detections.db"
+    for cand in [
+        "rid_detections_central.db",
+        os.path.join(repo_root, "rid_detections_central.db"),
+        "rid_detections.db",
+        os.path.join(repo_root, "rid_detections.db"),
+    ]:
+        if os.path.isfile(cand):
+            default_db = os.path.abspath(cand)
+            break
+
     parser = argparse.ArgumentParser(
         description="Drone Remote ID SQLite Database Search, Inspection & Export Utility",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--db", default="rid_detections.db", help="Path to SQLite database file")
+    parser.add_argument("--db", default=default_db, help="Path to SQLite database file")
     parser.add_argument("--timeout-s", "--timeout", dest="timeout_s", type=float, default=300.0,
                         help="Flight encounter silence timeout in seconds (default: 300s)")
 

@@ -30,8 +30,8 @@ def parse_args():
     parser.add_argument(
         "--db",
         type=str,
-        default="rid_detections.db",
-        help="Path to SQLite detections database",
+        default=None,
+        help="Path to SQLite detections database (default: auto-detects rid_detections_central.db if present, else rid_detections.db)",
     )
     parser.add_argument(
         "--log-jsonl",
@@ -131,8 +131,27 @@ def main():
         dash_config.update(updates)
         save_dashboard_config(dash_config, config_path)
 
+    # Resolve database path (explicit flag > central DB on disk > standard DB)
+    repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+    if args.db is not None:
+        db_path = os.path.abspath(args.db)
+    else:
+        candidates = [
+            "rid_detections_central.db",
+            os.path.join(repo_root, "rid_detections_central.db"),
+            "rid_detections.db",
+            os.path.join(repo_root, "rid_detections.db"),
+        ]
+        db_path = None
+        for cand in candidates:
+            if os.path.isfile(cand):
+                db_path = os.path.abspath(cand)
+                break
+        if db_path is None:
+            db_path = os.path.abspath("rid_detections.db")
+
     # Pass configuration to FastAPI app via environment variables
-    os.environ["RID_DB_PATH"] = os.path.abspath(args.db)
+    os.environ["RID_DB_PATH"] = db_path
     os.environ["RID_JSONL_PATH"] = os.path.abspath(args.log_jsonl)
     os.environ["RID_TIMEOUT_S"] = str(args.timeout)
     os.environ["RID_DASHBOARD_CONFIG_PATH"] = config_path
@@ -146,7 +165,7 @@ def main():
     print(f"  {title.upper()}")
     print("  ASTM F3411 / ASD-STAN Direct Broadcast Real-Time Radar")
     print("=" * 72)
-    print(f"  Database         : {os.path.abspath(args.db)}")
+    print(f"  Database         : {db_path}")
     print(f"  JSONL Log        : {os.path.abspath(args.log_jsonl)}")
     print(f"  Dashboard Config : {config_path}")
     print(f"  Default Viewport : {c_lat:.5f}°N, {c_lon:.5f}°E (Zoom: {zoom})")
