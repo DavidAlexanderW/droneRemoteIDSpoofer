@@ -495,6 +495,13 @@ class EncounterTracker:
         else:
             ch_str = str(ch_raw)
         rssi = packet.get("rssi_dbm")
+        if rssi is None:
+            rssi = packet.get("rssi")
+        if packet.get("rssi_dbm_invalid"):
+            rssi = None
+        counter = packet.get("counter")
+        if counter is None:
+            counter = packet.get("msg_counter")
 
         # Group encounters by transmitter MAC address within the 5-minute flight window
         key = mac
@@ -531,6 +538,7 @@ class EncounterTracker:
                     "last_seen_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                     "duration_s": 0.0,
                     "packet_count": 0,
+                    "counter": counter,
                     "transports": set([transport]),
                     "channels": set([ch_str]),
                     "wifi_rates": set(),
@@ -554,6 +562,8 @@ class EncounterTracker:
                 }
 
             enc = self.active_encounters[key]
+            if counter is not None:
+                enc["counter"] = counter
             if node_id and not enc.get("node_id"):
                 enc["node_id"] = node_id
             enc["last_seen"] = ts
@@ -627,7 +637,7 @@ class EncounterTracker:
                         enc["vert_speeds"].append(v_spd)
 
                     if lat is not None and lon is not None:
-                        # Append 10-element trajectory fix [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt_m, vert_spd]
+                        # Append 12-element trajectory fix [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt_m, vert_spd, rssi, counter]
                         # Downsample trajectory if stationary or dense (<1s dt and <~1m movement)
                         last_pt = enc["trajectory"][-1] if enc["trajectory"] else None
                         should_record = False
@@ -638,7 +648,9 @@ class EncounterTracker:
                             if dt_pt >= 1.0 or abs(lat - last_pt[0]) > 0.00001 or abs(lon - last_pt[1]) > 0.00001:
                                 should_record = True
                         if should_record:
-                            enc["trajectory"].append([lat, lon, alt, spd, heading, round(ts, 2), h_m, h_type, p_alt, v_spd])
+                            pt_rssi = rssi if rssi is not None else (enc["rssi_values"][-1] if enc.get("rssi_values") else None)
+                            pt_counter = counter if counter is not None else enc.get("counter")
+                            enc["trajectory"].append([lat, lon, alt, spd, heading, round(ts, 2), h_m, h_type, p_alt, v_spd, pt_rssi, pt_counter])
 
                 elif m_type == "Basic ID":
                     b_id = msg.get("id")
@@ -968,13 +980,20 @@ def rehydrate_db_from_jsonl(
         serial = p.get("serial_number") or p.get("serial")
         pkt_node_id = p.get("node_id") or node_id
 
+        pkt_rssi = p.get("rssi_dbm")
+        if pkt_rssi is None:
+            pkt_rssi = p.get("rssi")
+        if p.get("rssi_dbm_invalid"):
+            pkt_rssi = None
+
         pkt_obj = {
             "timestamp": ts,
             "transport": p.get("transport", "wifi"),
             "channel": p.get("channel", "N/A"),
             "mac": mac,
             "node_id": pkt_node_id,
-            "rssi_dbm": p.get("rssi_dbm"),
+            "rssi_dbm": pkt_rssi,
+            "counter": p.get("counter") if p.get("counter") is not None else p.get("msg_counter"),
             "rate_desc": p.get("rate_desc"),
             "rate_mbps": p.get("rate_mbps"),
             "modulation": p.get("modulation"),

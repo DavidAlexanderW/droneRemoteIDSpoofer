@@ -394,10 +394,11 @@ def cmd_export_csv(args):
         writer.writerow([
             "index", "timestamp_epoch", "latitude", "longitude",
             "altitude_geo_msl_m", "speed_mps", "heading_deg",
-            "height_m", "height_type", "pressure_altitude_m", "vertical_speed_mps"
+            "height_m", "height_type", "pressure_altitude_m", "vertical_speed_mps", "rssi_dbm"
         ])
         for idx, pt in enumerate(traj):
-            # pt: [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt, vert_spd]
+            # pt: [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt, vert_spd, rssi]
+            pt_rssi = pt[10] if len(pt) > 10 and pt[10] is not None else (row["avg_rssi_dbm"] if "avg_rssi_dbm" in row.keys() else None)
             writer.writerow([
                 idx,
                 sanitize_csv_cell(pt[5] if len(pt) > 5 else None),
@@ -410,6 +411,7 @@ def cmd_export_csv(args):
                 sanitize_csv_cell(pt[7]) if len(pt) > 7 else None,
                 pt[8] if len(pt) > 8 else None,
                 pt[9] if len(pt) > 9 else None,
+                pt_rssi,
             ])
 
     print(f"{C_GREEN}[+] Successfully exported CSV trajectory ({len(traj)} points) to {out_path}{C_RESET}")

@@ -130,7 +130,8 @@ export class TimelineScrubberController {
     const elapsedSec = Math.round(currT - t0);
 
     this.currTimeEl.textContent = this.formatDuration(elapsedSec);
-    this.pointIndexEl.textContent = `${this.currentIndex + 1}/${this.trajectory.length}`;
+    const seqStr = (pt.length > 11 && pt[11] != null) ? ` (Seq #${pt[11]})` : '';
+    this.pointIndexEl.textContent = `${this.currentIndex + 1}/${this.trajectory.length}${seqStr}`;
     
     const altMsl = pt[2] != null ? Math.round(pt[2]) : '--';
     const repHeight = (pt.length > 6 && pt[6] != null) ? Math.round(pt[6]) : null;

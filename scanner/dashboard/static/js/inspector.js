@@ -402,7 +402,8 @@ export class TelemetryInspectorController {
       document.getElementById('insp-speed').textContent = speed;
       document.getElementById('insp-heading').textContent = '--';
       document.getElementById('insp-heading-compass').textContent = '--';
-      document.getElementById('insp-rssi').textContent = defaultRssi != null ? Math.round(defaultRssi) : '--';
+      const fallbackRssi = defaultRssi != null ? defaultRssi : (enc ? enc.avg_rssi_dbm : null);
+      document.getElementById('insp-rssi').textContent = fallbackRssi != null ? Math.round(fallbackRssi) : '--';
       
       const rxRangeEl = document.getElementById('insp-rx-range');
       const rxUnitEl = document.getElementById('insp-rx-unit');
@@ -413,11 +414,12 @@ export class TelemetryInspectorController {
       return;
     }
 
-    // pt: [lat, lon, alt, speed, heading, ts]
+    // pt: [lat, lon, alt, speed, heading, ts, height_m, height_type, pressure_alt_m, vert_spd, rssi]
     const alt = pt[2] != null ? Math.round(pt[2]) : '--';
     const speed = pt[3] != null ? pt[3].toFixed(1) : '--';
     const heading = pt[4] != null ? Math.round(pt[4]) : '--';
     const compass = pt[4] != null ? this.getCompassDirection(pt[4]) : '--';
+    const ptRssi = (pt.length > 10 && pt[10] != null) ? pt[10] : (defaultRssi != null ? defaultRssi : (this.currentEncounter ? this.currentEncounter.avg_rssi_dbm : null));
 
     // Calculate Height Above Takeoff / Pilot (ATO / AGL)
     let heightStr = '--';
@@ -440,7 +442,7 @@ export class TelemetryInspectorController {
     document.getElementById('insp-speed').textContent = speed;
     document.getElementById('insp-heading').textContent = heading;
     document.getElementById('insp-heading-compass').textContent = compass;
-    document.getElementById('insp-rssi').textContent = defaultRssi != null ? Math.round(defaultRssi) : '--';
+    document.getElementById('insp-rssi').textContent = ptRssi != null ? Math.round(ptRssi) : '--';
 
     // Calculate Slant Range and Bearing strictly to the Receiving Sensor Node
     let rxRangeStr = '--';

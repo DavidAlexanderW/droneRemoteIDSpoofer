@@ -575,6 +575,7 @@ class TestCombinedRIDListener(unittest.TestCase):
                 "channel": 6,
                 "mac": "11:22:33:44:55:66",
                 "rssi_dbm": -70,
+                "counter": 42,
                 "serial_number": "DRONE_ALT_TEST_01",
                 "messages": [
                     {
@@ -622,7 +623,7 @@ class TestCombinedRIDListener(unittest.TestCase):
 
                 traj = json.loads(row["trajectory_json"])
                 self.assertEqual(len(traj), 1)
-                self.assertEqual(len(traj[0]), 10)
+                self.assertEqual(len(traj[0]), 12)
                 self.assertEqual(traj[0][0], 47.3719)
                 self.assertEqual(traj[0][1], 8.5312)
                 self.assertEqual(traj[0][2], 540.0)
@@ -633,6 +634,8 @@ class TestCombinedRIDListener(unittest.TestCase):
                 self.assertEqual(traj[0][7], 0)    # height_type
                 self.assertEqual(traj[0][8], 415.0)# pressure_alt_m
                 self.assertEqual(traj[0][9], 1.5)  # vert_spd
+                self.assertEqual(traj[0][10], -70) # rssi_dbm
+                self.assertEqual(traj[0][11], 42)  # counter
 
     def test_extract_radiotap_phy_info_legacy_rates(self):
         # 1. 1.0 Mbps DSSS (Rate = 2 -> 1.0 Mbps, Channel 2437 MHz, RSSI -50 dBm)

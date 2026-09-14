@@ -730,6 +730,15 @@ export class TacticalMapController {
         const speed = pt[3] != null ? `${pt[3].toFixed(1)} m/s` : 'N/A';
         const heading = pt[4] != null ? `${pt[4]}°` : 'N/A';
         const timeStr = pt[5] ? new Date(pt[5] * 1000).toISOString().substr(11, 8) : '';
+        const ptRssi = (pt.length > 10 && pt[10] != null) ? pt[10] : null;
+        const rssiStr = ptRssi != null ? `${Math.round(ptRssi)} dBm` : '';
+        const rssiPopupHtml = rssiStr ? `<b>RSSI:</b> <span style="color: #0284c7; font-weight: 700;">${rssiStr}</span><br/>` : '';
+        const rssiTooltip = rssiStr ? ` • ${rssiStr}` : '';
+
+        const ptCounter = (pt.length > 11 && pt[11] != null) ? pt[11] : null;
+        const counterStr = ptCounter != null ? `Seq #${ptCounter}` : '';
+        const counterPopupHtml = counterStr ? `<b>Msg Counter:</b> <span style="color: #0284c7; font-weight: 700;">${counterStr}</span><br/>` : '';
+        const counterTooltip = counterStr ? ` • ${counterStr}` : '';
 
         const dotIcon = L.divIcon({
           html: `<div class="waypoint-dot-marker" id="waypoint-dot-${idx}" title="Packet Fix #${idx + 1}"></div>`,
@@ -747,6 +756,8 @@ export class TacticalMapController {
             </div>
             <b>Altitude (MSL):</b> ${alt}${pressAltStr}${heightStr}${vertSpdStr}<br/>
             ${rxPopupHtml}
+            ${rssiPopupHtml}
+            ${counterPopupHtml}
             <b>Speed:</b> ${speed}<br/>
             <b>Track:</b> ${heading}<br/>
             <b>Coords:</b> ${pt[0].toFixed(5)}, ${pt[1].toFixed(5)}
@@ -756,7 +767,7 @@ export class TacticalMapController {
         });
 
         const hTooltip = repHeight != null ? ` • H: ${repHeight >= 0 ? '+' : ''}${Math.round(repHeight)}m (${heightType === 1 ? 'AGL' : 'ATO'})` : '';
-        dotMarker.bindTooltip(`Fix #${idx + 1} • Alt: ${alt}${hTooltip} • Spd: ${speed}${rxTooltipText}`, {
+        dotMarker.bindTooltip(`Fix #${idx + 1} • Alt: ${alt}${hTooltip} • Spd: ${speed}${rssiTooltip}${counterTooltip}${rxTooltipText}`, {
           className: 'waypoint-leaflet-tooltip',
           direction: 'top',
           offset: [0, -6],

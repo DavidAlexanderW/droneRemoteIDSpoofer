@@ -420,6 +420,8 @@ def get_encounters(
                 "height_type": latest_point[7] if len(latest_point) > 7 else None,
                 "pressure_alt_m": latest_point[8] if len(latest_point) > 8 else None,
                 "vertical_speed_mps": latest_point[9] if len(latest_point) > 9 else None,
+                "rssi_dbm": latest_point[10] if len(latest_point) > 10 else None,
+                "counter": latest_point[11] if len(latest_point) > 11 else None,
             } if latest_point else None,
             "trajectory": traj,
             "trajectory_point_count": len(traj),
@@ -428,21 +430,56 @@ def get_encounters(
     return {"encounters": encounters, "count": len(encounters)}
 
 
+def get_all_jsonl_log_candidates() -> List[str]:
+    """Returns a deduplicated list of all potential JSONL log files (local, central, replay, daily logs)."""
+    candidates = []
+    seen = set()
+
+    jsonl_log_path = get_jsonl_path()
+    db_path = get_db_path()
+
+    primary_list = [
+        jsonl_log_path,
+        os.path.join(os.path.dirname(db_path), "rid_packets.jsonl") if db_path else None,
+        "rid_packets.jsonl",
+        os.path.join(repo_root, "rid_packets.jsonl"),
+    ]
+    for p in primary_list:
+        if p:
+            abs_p = os.path.abspath(p)
+            if abs_p not in seen and os.path.isfile(abs_p):
+                seen.add(abs_p)
+                candidates.append(abs_p)
+
+    search_dirs = [
+        os.path.dirname(os.path.abspath(jsonl_log_path)) if jsonl_log_path else ".",
+        os.path.dirname(os.path.abspath(db_path)) if db_path else ".",
+        ".",
+        "central_logs",
+        "replay",
+        os.path.join(repo_root, "central_logs"),
+        os.path.join(repo_root, "replay"),
+        repo_root,
+    ]
+    for sdir in search_dirs:
+        if os.path.isdir(sdir):
+            try:
+                for fname in sorted(os.listdir(sdir), reverse=True):
+                    if fname.endswith(".jsonl") and not fname.endswith(".bak") and ".bak." not in fname:
+                        fpath = os.path.abspath(os.path.join(sdir, fname))
+                        if fpath not in seen and os.path.isfile(fpath):
+                            seen.add(fpath)
+                            candidates.append(fpath)
+            except Exception:
+                pass
+
+    return candidates
+
+
 def get_encounter_sample_packets(encounter_id: str, max_packets: int = 15) -> List[Dict[str, Any]]:
     """Quickly extracts up to max_packets decoded packets for the encounter to determine exact block transmission status."""
     packets = []
-    jsonl_log_path = get_jsonl_path()
-    db_path = get_db_path()
-    log_candidates = [
-        jsonl_log_path,
-        os.path.join(os.path.dirname(db_path), "rid_packets.jsonl"),
-        "rid_packets.jsonl",
-    ]
-    log_dir = os.path.dirname(os.path.abspath(jsonl_log_path)) if jsonl_log_path else "."
-    if os.path.exists(log_dir):
-        for fname in sorted(os.listdir(log_dir), reverse=True):
-            if fname.endswith(".jsonl") and ("rid" in fname or "capture" in fname or "replay" in fname):
-                log_candidates.append(os.path.join(log_dir, fname))
+    log_candidates = get_all_jsonl_log_candidates()
 
     for path in log_candidates:
         if path and os.path.exists(path):
@@ -591,6 +628,7 @@ def get_encounter(encounter_id: str):
         "area_ceil_m": row["area_ceil_m"] if "area_ceil_m" in row.keys() else None,
         "area_floor_m": row["area_floor_m"] if "area_floor_m" in row.keys() else None,
         "is_active": is_active,
+        "counter": row["counter"] if "counter" in row.keys() else (traj[-1][11] if (traj and len(traj[-1]) > 11) else None),
         "trajectory": traj,
         "conformance_blocks": conf_blocks,
     }
@@ -609,19 +647,7 @@ def get_encounter_packets(encounter_id: str):
     packets = []
 
     # 1. Attempt to extract from JSONL log files
-    jsonl_log_path = get_jsonl_path()
-    db_path = get_db_path()
-    log_candidates = [
-        jsonl_log_path,
-        os.path.join(os.path.dirname(db_path), "rid_packets.jsonl"),
-        "rid_packets.jsonl",
-    ]
-    # Also check daily rotated logs in directory
-    log_dir = os.path.dirname(os.path.abspath(jsonl_log_path)) if jsonl_log_path else "."
-    if os.path.exists(log_dir):
-        for fname in sorted(os.listdir(log_dir), reverse=True):
-            if fname.endswith(".jsonl") and ("rid" in fname or "capture" in fname or "replay" in fname):
-                log_candidates.append(os.path.join(log_dir, fname))
+    log_candidates = get_all_jsonl_log_candidates()
 
     found_in_jsonl = False
     for path in log_candidates:
@@ -651,13 +677,19 @@ def get_encounter_packets(encounter_id: str):
                                 if not decoded_blocks and rec.get("decoded_messages"):
                                     decoded_blocks = rec.get("decoded_messages")
 
+                                pkt_rssi = rec.get("rssi_dbm")
+                                if pkt_rssi is None and "rssi" in rec:
+                                    pkt_rssi = rec.get("rssi")
+                                if rec.get("rssi_dbm_invalid"):
+                                    pkt_rssi = None
+
                                 packets.append({
                                     "index": len(packets) + 1,
                                     "time_offset_ms": rec.get("time_offset_ms", 0),
                                     "timestamp_iso": rec.get("timestamp_iso"),
                                     "transport": rec.get("transport"),
                                     "channel": rec.get("channel"),
-                                    "rssi_dbm": rec.get("rssi_dbm"),
+                                    "rssi_dbm": pkt_rssi,
                                     "rate_mbps": rec.get("rate_mbps"),
                                     "modulation": rec.get("modulation"),
                                     "rate_desc": rec.get("rate_desc"),
@@ -678,6 +710,26 @@ def get_encounter_packets(encounter_id: str):
             except Exception:
                 pass
 
+    if found_in_jsonl and packets:
+        # Normalize relative time_offset_ms so the flight encounter starts strictly at 0 ms
+        first_raw_offset = packets[0].get("time_offset_ms")
+        first_iso = packets[0].get("timestamp_iso")
+
+        if first_raw_offset is not None and first_raw_offset > 0:
+            for p in packets:
+                raw_ms = p.get("time_offset_ms")
+                if raw_ms is not None:
+                    p["time_offset_ms"] = max(0, raw_ms - first_raw_offset)
+        elif first_iso:
+            try:
+                t0_dt = datetime.fromisoformat(first_iso)
+                for p in packets:
+                    if p.get("timestamp_iso"):
+                        p_dt = datetime.fromisoformat(p["timestamp_iso"])
+                        p["time_offset_ms"] = max(0, int(round((p_dt - t0_dt).total_seconds() * 1000)))
+            except Exception:
+                pass
+
     # 2. If no JSONL log found, synthesize packet records from SQLite encounter metadata and trajectory
     if not packets:
         conn = get_db_connection()
@@ -686,7 +738,7 @@ def get_encounter_packets(encounter_id: str):
             raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
         
         traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
-        t0 = row["first_seen"] or time.time()
+        t0 = traj[0][5] if (traj and len(traj[0]) > 5 and traj[0][5] is not None) else (row["first_seen"] or time.time())
         r_rates = row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else []
         r_desc = r_rates[0] if r_rates else None
 
@@ -743,29 +795,32 @@ def get_encounter_packets(encounter_id: str):
 
         if traj:
             for idx, pt in enumerate(traj):
-                # pt: [lat, lon, alt, speed, heading, ts, h_m, h_t, p_alt, v_spd]
-                ts = pt[5] if len(pt) > 5 else t0
-                delta_ms = int((ts - t0) * 1000)
+                # pt: [lat, lon, alt, speed, heading, ts, h_m, h_t, p_alt, v_spd, rssi, counter]
+                ts = pt[5] if (len(pt) > 5 and pt[5] is not None) else t0
+                delta_ms = max(0, int(round((ts - t0) * 1000)))
                 h_m = pt[6] if len(pt) > 6 else None
                 h_t = pt[7] if len(pt) > 7 else None
                 p_alt = pt[8] if len(pt) > 8 else None
                 v_spd = pt[9] if len(pt) > 9 else None
+                pt_rssi = pt[10] if (len(pt) > 10 and pt[10] is not None) else row["avg_rssi_dbm"]
+                pt_counter = pt[11] if (len(pt) > 11 and pt[11] is not None) else (row["counter"] if ("counter" in row.keys() and row["counter"] is not None) else idx)
                 packets.append({
                     "index": idx + 1,
                     "time_offset_ms": delta_ms,
                     "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                     "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
                     "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
-                    "rssi_dbm": row["avg_rssi_dbm"],
+                    "rssi_dbm": pt_rssi,
                     "rate_desc": r_desc,
                     "mac": row["mac"],
                     "serial": row["serial_number"],
-                    "counter": idx,
+                    "counter": pt_counter,
                     "messages_b64": [],
                     "decoded_messages": build_synth_blocks(pt[0], pt[1], pt[2], pt[3], pt[4], h_m, h_t, p_alt, v_spd),
                 })
         else:
             # Single synthesized summary packet when trajectory points are not stored
+            pt_counter = row["counter"] if ("counter" in row.keys() and row["counter"] is not None) else 0
             packets.append({
                 "index": 1,
                 "time_offset_ms": 0,
@@ -776,7 +831,7 @@ def get_encounter_packets(encounter_id: str):
                 "rate_desc": r_desc,
                 "mac": row["mac"],
                 "serial": row["serial_number"],
-                "counter": 0,
+                "counter": pt_counter,
                 "messages_b64": [],
                 "decoded_messages": build_synth_blocks(
                     lat=None, lon=None,
@@ -842,6 +897,8 @@ def export_geojson(encounter_id: str):
                 "altitude_m": pt[2],
                 "speed_mps": pt[3],
                 "heading_deg": pt[4],
+                "rssi_dbm": pt[10] if len(pt) > 10 else None,
+                "msg_counter": pt[11] if len(pt) > 11 else None,
             },
             "geometry": {
                 "type": "Point",
@@ -896,7 +953,7 @@ def export_csv(encounter_id: str):
     writer.writerow([
         "index", "timestamp_epoch", "latitude", "longitude",
         "geodetic_altitude_m", "pressure_altitude_m", "height_m", "height_type",
-        "vertical_speed_mps", "speed_mps", "heading_deg"
+        "vertical_speed_mps", "speed_mps", "heading_deg", "rssi_dbm", "msg_counter"
     ])
 
     for idx, pt in enumerate(traj):
@@ -905,7 +962,9 @@ def export_csv(encounter_id: str):
         h_type = pt[7] if len(pt) > 7 and pt[7] is not None else ""
         p_alt = pt[8] if len(pt) > 8 and pt[8] is not None else ""
         v_spd = pt[9] if len(pt) > 9 and pt[9] is not None else ""
-        writer.writerow([idx + 1, ts, pt[0], pt[1], pt[2], p_alt, h_m, h_type, v_spd, pt[3], pt[4]])
+        rssi = pt[10] if len(pt) > 10 and pt[10] is not None else (row["avg_rssi_dbm"] if "avg_rssi_dbm" in row.keys() else "")
+        counter = pt[11] if len(pt) > 11 and pt[11] is not None else ""
+        writer.writerow([idx + 1, ts, pt[0], pt[1], pt[2], p_alt, h_m, h_type, v_spd, pt[3], pt[4], rssi, counter])
 
     return Response(
         content=output.getvalue(),
@@ -968,6 +1027,12 @@ async def websocket_live_stream(websocket: WebSocket):
                         "speed_mps": latest[3],
                         "heading_deg": latest[4],
                         "timestamp": latest[5],
+                        "height_m": latest[6] if len(latest) > 6 else None,
+                        "height_type": latest[7] if len(latest) > 7 else None,
+                        "pressure_alt_m": latest[8] if len(latest) > 8 else None,
+                        "vertical_speed_mps": latest[9] if len(latest) > 9 else None,
+                        "rssi_dbm": latest[10] if len(latest) > 10 else None,
+                        "counter": latest[11] if len(latest) > 11 else None,
                     } if latest else None,
                     "max_alt_m": r["max_alt_m"],
                     "avg_rssi_dbm": r["avg_rssi_dbm"],

@@ -633,13 +633,19 @@ class TacticalApp {
               this.mapCtrl.updateLiveDrone(drone);
               // If currently inspected drone received new fix in live mode, update gauges
               if (this.selectedEncounterId === drone.encounter_id && drone.latest_position) {
+                const lp = drone.latest_position;
                 this.inspectorCtrl.updateLiveGauges([
-                  drone.latest_position.lat,
-                  drone.latest_position.lon,
-                  drone.latest_position.alt_m,
-                  drone.latest_position.speed_mps,
-                  drone.latest_position.heading_deg,
-                  drone.latest_position.timestamp,
+                  lp.lat,
+                  lp.lon,
+                  lp.alt_m,
+                  lp.speed_mps,
+                  lp.heading_deg,
+                  lp.timestamp,
+                  lp.height_m,
+                  lp.height_type,
+                  lp.pressure_alt_m,
+                  lp.vert_speed_mps,
+                  lp.rssi_dbm,
                 ], drone.avg_rssi_dbm);
               }
             });

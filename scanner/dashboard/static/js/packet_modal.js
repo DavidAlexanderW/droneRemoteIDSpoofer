@@ -112,7 +112,11 @@ export class DeepPacketInspectorController {
     let html = '';
     filtered.forEach(pkt => {
       const isSelected = this.selectedPacket && this.selectedPacket.index === pkt.index;
-      const offsetMs = pkt.time_offset_ms != null ? `+${pkt.time_offset_ms}ms` : '--';
+      const offsetSec = pkt.time_offset_ms != null ? `+${(pkt.time_offset_ms / 1000).toFixed(2)}s` : '--';
+      const counterVal = pkt.counter != null ? pkt.counter : '--';
+      const counterDisplay = pkt.counter != null
+        ? `<span class="pill-chip counter-chip" title="ASTM Message Sequence Counter (0..255)">Seq #${counterVal}</span>`
+        : '<span style="color: var(--text-muted);">--</span>';
       const transport = pkt.transport ? pkt.transport.toUpperCase() : 'BLE';
       const channel = pkt.channel || 'N/A';
       const rssi = pkt.rssi_dbm != null ? `${pkt.rssi_dbm} dBm` : 'N/A';
@@ -216,7 +220,8 @@ export class DeepPacketInspectorController {
       html += `
         <tr class="${isSelected ? 'selected' : ''}" data-index="${pkt.index}">
           <td><b>${pkt.index}</b></td>
-          <td>${offsetMs}</td>
+          <td title="${pkt.time_offset_ms != null ? '+' + pkt.time_offset_ms + ' ms' : ''}"><b>${offsetSec}</b></td>
+          <td>${counterDisplay}</td>
           <td><span class="pill-chip ${transport.toLowerCase()}">${transport}</span></td>
           <td>ch${channel}</td>
           <td><span class="pill-chip font-mono" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 11px; padding: 1px 6px;">${rateDesc}</span></td>
@@ -246,23 +251,28 @@ export class DeepPacketInspectorController {
 
     if (!this.drawer) return;
     this.drawer.style.display = 'flex';
-    this.drawerPktIdx.textContent = pkt.index;
+    this.drawerPktIdx.textContent = `${pkt.index} (Seq #${pkt.counter != null ? pkt.counter : '--'})`;
 
     // Decoded JSON
     this.drawerDecoded.textContent = JSON.stringify(pkt.decoded_messages || [], null, 2);
 
-    // PHY Layer details
-    const phyInfo = [];
-    if (pkt.rate_desc) phyInfo.push(`PHY Rate / Modulation : ${pkt.rate_desc}`);
-    if (pkt.rate_mbps != null) phyInfo.push(`Data Rate (Mbps)     : ${pkt.rate_mbps}`);
-    if (pkt.modulation) phyInfo.push(`Modulation Scheme     : ${pkt.modulation}`);
-    if (pkt.bandwidth_mhz != null) phyInfo.push(`Channel Bandwidth     : ${pkt.bandwidth_mhz} MHz`);
-    if (pkt.mcs_index != null) phyInfo.push(`MCS Index             : ${pkt.mcs_index}`);
-    if (pkt.guard_interval) phyInfo.push(`Guard Interval        : ${pkt.guard_interval}`);
-    if (pkt.rssi_dbm != null) phyInfo.push(`Antenna Signal (RSSI) : ${pkt.rssi_dbm} dBm`);
-    if (pkt.channel != null) phyInfo.push(`Broadcast Channel     : ${pkt.channel}`);
+    // Frame & PHY Layer details
+    const frameInfo = [];
+    if (pkt.counter != null) frameInfo.push(`ASTM Msg Sequence Counter : Seq #${pkt.counter} (0x${pkt.counter.toString(16).padStart(2, '0').toUpperCase()}) [0..255]`);
+    if (pkt.time_offset_ms != null) frameInfo.push(`Flight Time Offset (s)    : +${(pkt.time_offset_ms / 1000).toFixed(3)}s (+${pkt.time_offset_ms} ms)`);
+    if (pkt.timestamp_iso) frameInfo.push(`Packet Capture Timestamp  : ${pkt.timestamp_iso}`);
+    if (pkt.mac) frameInfo.push(`Transmitter MAC Address   : ${pkt.mac}`);
+    if (pkt.transport) frameInfo.push(`Transport Protocol        : ${pkt.transport.toUpperCase()}`);
+    if (pkt.channel != null) frameInfo.push(`Broadcast Channel         : ${pkt.channel}`);
+    if (pkt.rssi_dbm != null) frameInfo.push(`Antenna Signal (RSSI)     : ${pkt.rssi_dbm} dBm`);
+    if (pkt.rate_desc) frameInfo.push(`PHY Rate / Modulation     : ${pkt.rate_desc}`);
+    if (pkt.rate_mbps != null) frameInfo.push(`Data Rate (Mbps)          : ${pkt.rate_mbps}`);
+    if (pkt.modulation) frameInfo.push(`Modulation Scheme         : ${pkt.modulation}`);
+    if (pkt.bandwidth_mhz != null) frameInfo.push(`Channel Bandwidth         : ${pkt.bandwidth_mhz} MHz`);
+    if (pkt.mcs_index != null) frameInfo.push(`MCS Index                 : ${pkt.mcs_index}`);
+    if (pkt.guard_interval) frameInfo.push(`Guard Interval            : ${pkt.guard_interval}`);
 
-    const phyHeader = phyInfo.length > 0 ? `[PHY RF LAYER METRICS]\n${phyInfo.join('\n')}\n\n` : '';
+    const phyHeader = frameInfo.length > 0 ? `[FRAME & RF LAYER METRICS]\n${frameInfo.join('\n')}\n\n` : '';
 
     // Base64 payloads + Hex Dissection if available
     const b64List = pkt.messages_b64 || [];

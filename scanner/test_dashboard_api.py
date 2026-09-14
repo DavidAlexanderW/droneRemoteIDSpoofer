@@ -95,8 +95,8 @@ class TestDashboardAPI(unittest.TestCase):
 
         # Insert Mock Encounter 2: Closed Wi-Fi Flight
         traj_2 = [
-            [47.3800, 8.5500, 500.0, 12.0, 180, 1725780000.0],
-            [47.3780, 8.5500, 510.0, 12.5, 180, 1725780020.0],
+            [47.3800, 8.5500, 500.0, 12.0, 180, 1725780000.0, 80.0, 0, 480.0, 0.5, -82.0, 10],
+            [47.3780, 8.5500, 510.0, 12.5, 180, 1725780020.0, 90.0, 0, 490.0, 0.5, -74.0, 11],
         ]
         conn.execute("""
             INSERT INTO encounters (
@@ -144,11 +144,11 @@ class TestDashboardAPI(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        # Populate Mock JSONL Log with raw base64 ASTM F3411 blocks
+        # Populate Mock JSONL Log with raw base64 ASTM F3411 blocks (with realistic sniffer-start absolute offsets)
         with open(self.jsonl_path, "w") as f:
             f.write(json.dumps({
                 "encounter_id": "enc_test_001",
-                "time_offset_ms": 0,
+                "time_offset_ms": 242560000,
                 "timestamp_iso": "2026-09-08T10:06:40+00:00",
                 "transport": "bt5",
                 "channel": "37",
@@ -158,11 +158,28 @@ class TestDashboardAPI(unittest.TestCase):
                 "rate_desc": "1.0 Mbps (LE 1M GFSK)",
                 "mac": "AA:BB:CC:11:22:33",
                 "serial": "1581F5FHC255A00E90R6",
-                "counter": 1,
+                "counter": 4,
                 # Real base64 chunks for Basic ID and System messages
                 "messages_b64": [
                     "ARIxNTgxRjVGSEMyNTVBMDBFOTBSNgAAAA==",  # Basic ID
                     "QQV8qjwccaEYBQEAAAAAAAADAAAAAAAAAA==",  # System (Pilot)
+                ],
+            }) + "\n")
+            f.write(json.dumps({
+                "encounter_id": "enc_test_001",
+                "time_offset_ms": 242561500,
+                "timestamp_iso": "2026-09-08T10:06:41.500+00:00",
+                "transport": "bt5",
+                "channel": "38",
+                "rssi_dbm": -65,
+                "rate_mbps": 1.0,
+                "modulation": "GFSK",
+                "rate_desc": "1.0 Mbps (LE 1M GFSK)",
+                "mac": "AA:BB:CC:11:22:33",
+                "serial": "1581F5FHC255A00E90R6",
+                "counter": 5,
+                "messages_b64": [
+                    "ARIxNTgxRjVGSEMyNTVBMDBFOTBSNgAAAA==",
                 ],
             }) + "\n")
 
@@ -260,14 +277,21 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["encounter_id"], "enc_test_001")
-        self.assertGreaterEqual(data["packet_count"], 1)
+        self.assertEqual(data["packet_count"], 2)
         pkt0 = data["packets"][0]
         self.assertEqual(pkt0["transport"], "bt5")
         self.assertEqual(pkt0["rate_desc"], "1.0 Mbps (LE 1M GFSK)")
         self.assertEqual(pkt0["modulation"], "GFSK")
         self.assertEqual(pkt0["rate_mbps"], 1.0)
+        self.assertEqual(pkt0["time_offset_ms"], 0) # Normalized relative offset
+        self.assertEqual(pkt0["counter"], 4)        # Exact ASTM Sequence Counter
         self.assertIn("decoded_messages", pkt0)
         self.assertEqual(len(pkt0["decoded_messages"]), 2)
+        
+        # Verify second packet normalized offset and counter
+        pkt1 = data["packets"][1]
+        self.assertEqual(pkt1["time_offset_ms"], 1500)
+        self.assertEqual(pkt1["counter"], 5)
         
         # Verify decoded Basic ID block
         basic_id_msg = pkt0["decoded_messages"][0]
@@ -286,10 +310,17 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(resp2.status_code, 200)
         d2 = resp2.json()
         self.assertEqual(d2["packet_count"], 2)
-        pkt_synth = d2["packets"][0]
-        self.assertIn("decoded_messages", pkt_synth)
-        self.assertTrue(any(m["type"] == "Location" for m in pkt_synth["decoded_messages"]))
-        loc_msg = [m for m in pkt_synth["decoded_messages"] if m["type"] == "Location"][0]
+        pkt_synth0 = d2["packets"][0]
+        self.assertEqual(pkt_synth0["rssi_dbm"], -82.0)
+        self.assertEqual(pkt_synth0["time_offset_ms"], 0)
+        self.assertEqual(pkt_synth0["counter"], 10)
+        pkt_synth1 = d2["packets"][1]
+        self.assertEqual(pkt_synth1["rssi_dbm"], -74.0)
+        self.assertEqual(pkt_synth1["time_offset_ms"], 20000)
+        self.assertEqual(pkt_synth1["counter"], 11)
+        self.assertIn("decoded_messages", pkt_synth0)
+        self.assertTrue(any(m["type"] == "Location" for m in pkt_synth0["decoded_messages"]))
+        loc_msg = [m for m in pkt_synth0["decoded_messages"] if m["type"] == "Location"][0]
         self.assertEqual(loc_msg["lat"], 47.3800)
         self.assertEqual(loc_msg["lon"], 8.5500)
         self.assertEqual(loc_msg["alt"], 500.0)
@@ -313,7 +344,16 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertIn("text/csv", resp.headers["content-type"])
         lines = resp.text.strip().split("\n")
         self.assertTrue(lines[0].startswith("index,timestamp_epoch,latitude,longitude"))
+        self.assertTrue(lines[0].endswith("msg_counter"))
         self.assertEqual(len(lines), 4) # header + 3 fixes
+
+        # Verify Encounter 2 CSV has point-level RSSI and msg_counter values
+        resp2 = self.client.get("/api/export/enc_test_002/csv")
+        self.assertEqual(resp2.status_code, 200)
+        lines2 = resp2.text.strip().split("\n")
+        self.assertEqual(len(lines2), 3) # header + 2 fixes
+        self.assertTrue(lines2[1].endswith("-82.0,10"))
+        self.assertTrue(lines2[2].endswith("-74.0,11"))
 
     def test_static_ui_serving(self):
         """Verify static HTML and CSS asset serving."""
