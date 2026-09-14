@@ -1853,7 +1853,10 @@ def main():
     parser.add_argument("--ble-mode", choices=["all", "legacy", "extended"], default="extended", help="BLE advertisement filter mode (default: extended)")
 
     # Distributed Hub & Forwarding Options
-    cfg = load_scanner_config() if load_scanner_config else {}
+    try:
+        cfg = load_scanner_config() if load_scanner_config else {}
+    except Exception:
+        cfg = {}
     default_node_id = cfg.get("node_id", "sensor-node-01")
     default_hub_url = cfg.get("hub_ws_url")
     default_spool_dir = cfg.get("spool_dir", "spool")
@@ -1878,7 +1881,12 @@ def main():
     args = parser.parse_args()
 
     if args.scanner_config:
-        cfg = load_scanner_config(args.scanner_config)
+        try:
+            cfg = load_scanner_config(args.scanner_config)
+        except Exception as e:
+            logger.warning(f"[!] Warning: Failed to parse scanner config '{args.scanner_config}': {e}")
+            logger.warning("[!] Scanner is continuing in Standalone Local Mode with default parameters.")
+            cfg = {}
         if args.hub_url == default_hub_url:
             args.hub_url = cfg.get("hub_ws_url")
         if args.node_id == default_node_id:

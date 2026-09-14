@@ -63,6 +63,7 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Loads scanner configuration from JSON file on disk.
     If the file does not exist, writes the default configuration to disk.
+    If the file exists but contains invalid JSON, raises ValueError and NEVER overwrites it.
     """
     path = os.path.abspath(config_path) if config_path else get_default_config_path()
     
@@ -70,31 +71,31 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                config = dict(DEFAULT_SCANNER_CONFIG)
-                config.update(data)
-                
-                # Normalize types
-                config["node_id"] = str(config.get("node_id") or DEFAULT_SCANNER_CONFIG["node_id"]).strip()
-                config["latitude"] = float(config.get("latitude", DEFAULT_SCANNER_CONFIG["latitude"]))
-                config["longitude"] = float(config.get("longitude", DEFAULT_SCANNER_CONFIG["longitude"]))
-                config["altitude_m"] = float(config.get("altitude_m", DEFAULT_SCANNER_CONFIG["altitude_m"]))
-                config["name"] = str(config.get("name", DEFAULT_SCANNER_CONFIG["name"]))
-                config["show_range_rings"] = bool(config.get("show_range_rings", True))
-                config["enabled"] = bool(config.get("enabled", True))
-                config["locked"] = bool(config.get("locked", False))
-                hub_url = config.get("hub_ws_url")
-                config["hub_ws_url"] = str(hub_url).strip() if hub_url else None
-                config["spool_dir"] = str(config.get("spool_dir", DEFAULT_SCANNER_CONFIG["spool_dir"]))
-                config["max_ram_queue"] = int(config.get("max_ram_queue", DEFAULT_SCANNER_CONFIG["max_ram_queue"]))
-                if not isinstance(config.get("range_rings_m"), list):
-                    config["range_rings_m"] = DEFAULT_SCANNER_CONFIG["range_rings_m"]
-                
-                return config
-        except Exception:
-            # If reading failed, fall back to default
-            pass
+        except Exception as e:
+            raise ValueError(f"Failed to parse scanner configuration file '{path}': {e}") from e
 
-    # Create default config on disk
+        config = dict(DEFAULT_SCANNER_CONFIG)
+        config.update(data)
+        
+        # Normalize types
+        config["node_id"] = str(config.get("node_id") or DEFAULT_SCANNER_CONFIG["node_id"]).strip()
+        config["latitude"] = float(config.get("latitude", DEFAULT_SCANNER_CONFIG["latitude"]))
+        config["longitude"] = float(config.get("longitude", DEFAULT_SCANNER_CONFIG["longitude"]))
+        config["altitude_m"] = float(config.get("altitude_m", DEFAULT_SCANNER_CONFIG["altitude_m"]))
+        config["name"] = str(config.get("name", DEFAULT_SCANNER_CONFIG["name"]))
+        config["show_range_rings"] = bool(config.get("show_range_rings", True))
+        config["enabled"] = bool(config.get("enabled", True))
+        config["locked"] = bool(config.get("locked", False))
+        hub_url = config.get("hub_ws_url")
+        config["hub_ws_url"] = str(hub_url).strip() if hub_url else None
+        config["spool_dir"] = str(config.get("spool_dir", DEFAULT_SCANNER_CONFIG["spool_dir"]))
+        config["max_ram_queue"] = int(config.get("max_ram_queue", DEFAULT_SCANNER_CONFIG["max_ram_queue"]))
+        if not isinstance(config.get("range_rings_m"), list):
+            config["range_rings_m"] = DEFAULT_SCANNER_CONFIG["range_rings_m"]
+        
+        return config
+
+    # Create default config on disk only if file does not exist
     config = dict(DEFAULT_SCANNER_CONFIG)
     config["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
     save_scanner_config(config, path)
