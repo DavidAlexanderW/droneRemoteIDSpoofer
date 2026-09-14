@@ -199,17 +199,38 @@ export class TacticalMapController {
           if (node.range_rings_json) rings = JSON.parse(node.range_rings_json);
         } catch (e) {}
 
-        rings.forEach(r => {
-          L.circle([lat, lon], {
-            radius: r,
-            color: '#0284c7',
-            weight: 1.2,
-            dashArray: '4, 4',
-            opacity: 0.45,
-            fillColor: '#0284c7',
-            fillOpacity: 0.02,
+        rings.forEach((radiusM, idx) => {
+          const radiusKm = radiusM >= 1000 ? `${(radiusM / 1000).toFixed(1)} km` : `${radiusM} m`;
+
+          // 1. Circle Polygon (tactical amber radar overlay)
+          const ring = L.circle([lat, lon], {
+            radius: radiusM,
+            color: '#f59e0b',
+            weight: 1.3,
+            opacity: 0.55,
+            fill: true,
+            fillColor: '#f59e0b',
+            fillOpacity: 0.018 * (4 - Math.min(3, idx)),
+            dashArray: '5, 6',
             interactive: false,
-          }).addTo(ringGroup);
+          });
+          ringGroup.addLayer(ring);
+
+          // 2. Clear Cardinal Distance Label on North Perimeter of Circle
+          const dLat = (radiusM / 6371000.0) * (180.0 / Math.PI);
+          const labelLatLng = [lat + dLat, lon];
+
+          const labelMarker = L.marker(labelLatLng, {
+            icon: L.divIcon({
+              html: `<div class="range-ring-pill">${radiusKm}</div>`,
+              className: 'custom-range-ring-label',
+              iconSize: [60, 16],
+              iconAnchor: [30, 8],
+            }),
+            interactive: false,
+            zIndexOffset: 100,
+          });
+          ringGroup.addLayer(labelMarker);
         });
       }
     });
@@ -320,7 +341,7 @@ export class TacticalMapController {
     const compass = getBearingCompass(bearing);
 
     this.receiverVectorLine = L.polyline([[rxLat, rxLon], target], {
-      color: '#0284c7',
+      color: '#f59e0b',
       weight: 1.5,
       dashArray: '3, 5',
       opacity: 0.75,
@@ -542,9 +563,6 @@ export class TacticalMapController {
   renderAirspace() {
     this.clearAllLayers();
 
-    // Re-render receiver station
-    this.renderReceiverStation();
-
     if (!this.allEncounters || this.allEncounters.length === 0) return;
 
     // If NO encounter is selected:
@@ -697,12 +715,12 @@ export class TacticalMapController {
           const groundStr = groundDistM >= 1000 ? `${(groundDistM / 1000).toFixed(2)} km` : `${Math.round(groundDistM)} m`;
 
           rxPopupHtml = `
-            <div style="background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(2, 132, 199, 0.35); border-radius: 4px; padding: 4px 6px; margin: 4px 0;">
-              <div style="font-weight: 700; color: #0284c7; display: flex; justify-content: space-between;">
+            <div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 4px; padding: 4px 6px; margin: 4px 0;">
+              <div style="font-weight: 700; color: #d97706; display: flex; justify-content: space-between;">
                 <span>📡 Sensor (${rxNode.name || rxNode.node_id}):</span>
-                <span style="color: #0369a1; font-size: 10px;">${Math.round(brg)}° ${compass}</span>
+                <span style="color: #b45309; font-size: 10px;">${Math.round(brg)}° ${compass}</span>
               </div>
-              <b>Slant Range:</b> <span style="color: #0284c7; font-weight: 700;">${slantStr}</span>${deltaAltStr}<br/>
+              <b>Slant Range:</b> <span style="color: #d97706; font-weight: 700;">${slantStr}</span>${deltaAltStr}<br/>
               <b>Ground Dist:</b> ${groundStr}
             </div>
           `;
