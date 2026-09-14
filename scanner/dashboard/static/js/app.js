@@ -1,6 +1,6 @@
 /**
  * Tactical Drone Remote ID Airspace Monitor - Main Application Orchestrator
- * Integrates Map, Feed, Telemetry Inspector, Timeline Scrubber, and WebSocket Live Feed.
+ * Integrates Map, Feed, Telemetry Inspector, Timeline Scrubber, Multi-Node Sensors, and WebSocket Live Feed.
  */
 
 import { TacticalMapController } from './map.js';
@@ -17,7 +17,9 @@ class TacticalApp {
     this.ws = null;
     this.statsInterval = null;
     this.feedInterval = null;
-    this.receiverConfig = null;
+    this.nodesInterval = null;
+    this.dashboardConfig = null;
+    this.nodesList = [];
 
     this.mapCtrl = null;
     this.feedCtrl = null;
@@ -33,7 +35,9 @@ class TacticalApp {
     this.modalCtrl = new DeepPacketInspectorController();
     
     this.inspectorCtrl = new TelemetryInspectorController((encId) => {
-      this.modalCtrl.open(encId);
+      const enc = this.currentEncounter;
+      const nodeId = enc && enc.encounter_id === encId ? enc.node_id : null;
+      this.modalCtrl.open(encId, nodeId);
     });
 
     this.scrubberCtrl = new TimelineScrubberController((ptIndex, pt) => {
@@ -53,11 +57,8 @@ class TacticalApp {
       (ptIndex, pt) => {
         this.scrubberCtrl.seekTo(ptIndex);
       },
-      (updatedConfig) => {
-        this.saveReceiverConfig(updatedConfig);
-      },
-      () => {
-        this.openReceiverModal();
+      (nodeId, lat, lon) => {
+        this.updateNodePosition(nodeId, lat, lon);
       }
     );
 
@@ -67,16 +68,16 @@ class TacticalApp {
     // 3. Setup Quick Map Controls
     this.initMapControls();
 
-    // 4. Setup Receiver Configuration Modal
+    // 4. Setup Settings Modal (Sensors & Viewport)
     this.initReceiverModal();
 
-    // 5. Load Receiver Configuration from Disk
-    await this.fetchReceiverConfig();
+    // 5. Load Viewport Configuration from Disk
+    await this.fetchDashboardConfig();
 
     // 6. Start Live Services
     this.fetchStats();
     this.fetchEncounters();
-    this.fetchNodes();
+    await this.fetchNodes();
     this.connectWebSocket();
 
     this.statsInterval = setInterval(() => this.fetchStats(), 4000);
@@ -89,12 +90,38 @@ class TacticalApp {
       const res = await fetch('/api/nodes');
       if (res.ok) {
         const data = await res.json();
-        if (data && data.nodes && this.mapCtrl) {
-          this.mapCtrl.setNodesList(data.nodes);
-        }
+        const nodes = (data && data.nodes) || [];
+        this.nodesList = nodes;
+        if (this.mapCtrl) this.mapCtrl.setNodesList(nodes);
+        if (this.inspectorCtrl) this.inspectorCtrl.setNodesList(nodes);
+        if (this.feedCtrl) this.feedCtrl.setNodesList(nodes);
+        if (this.scrubberCtrl) this.scrubberCtrl.setNodesList(nodes);
+        if (this.modalCtrl) this.modalCtrl.setNodesList(nodes);
+        this.renderModalNodes();
       }
     } catch (e) {
       // Standalone mode or transient error
+    }
+  }
+
+  async updateNodePosition(nodeId, lat, lon) {
+    try {
+      const resp = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/position`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude: lat, longitude: lon }),
+      });
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => ({}));
+        throw new Error(errJson.detail || `Server returned HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      console.log(`[+] Sensor ${nodeId} position calibrated to:`, lat, lon, data);
+      await this.fetchNodes();
+    } catch (err) {
+      console.error(`Failed to update position for sensor ${nodeId}:`, err);
+      alert(`Could not save position for node ${nodeId}: ${err.message}`);
+      await this.fetchNodes(); // Revert marker on map
     }
   }
 
@@ -152,7 +179,7 @@ class TacticalApp {
     const btnCenterReceiver = document.getElementById('btn-center-receiver');
     if (btnCenterReceiver) {
       btnCenterReceiver.addEventListener('click', () => {
-        this.mapCtrl.centerOnReceiver();
+        this.mapCtrl.centerOnNodes();
       });
     }
 
@@ -189,7 +216,7 @@ class TacticalApp {
   }
 
   /**
-   * Initializes Receiver Configuration Modal & Disk Persistence Handlers
+   * Initializes Sensors & Viewport Configuration Modal
    */
   initReceiverModal() {
     const modal = document.getElementById('receiver-config-modal');
@@ -197,7 +224,7 @@ class TacticalApp {
     const btnClose = document.getElementById('btn-close-receiver-modal');
     const btnCancel = document.getElementById('btn-rx-cancel');
     const btnGps = document.getElementById('btn-rx-gps-detect');
-    const btnMapPick = document.getElementById('btn-rx-map-pick');
+    const btnFitSensors = document.getElementById('btn-rx-fit-sensors');
 
     if (btnClose) {
       btnClose.addEventListener('click', () => this.closeReceiverModal());
@@ -213,18 +240,17 @@ class TacticalApp {
       });
     }
 
-    // Browser GPS Auto-Detect
+    // Browser GPS Auto-Detect for center position
     if (btnGps) {
       btnGps.addEventListener('click', () => {
         if ('geolocation' in navigator) {
           btnGps.textContent = '⏳ Acquiring GPS...';
           navigator.geolocation.getCurrentPosition(
             (pos) => {
-              document.getElementById('cfg-rx-lat').value = pos.coords.latitude.toFixed(6);
-              document.getElementById('cfg-rx-lon').value = pos.coords.longitude.toFixed(6);
-              if (pos.coords.altitude != null) {
-                document.getElementById('cfg-rx-alt').value = pos.coords.altitude.toFixed(1);
-              }
+              const latEl = document.getElementById('cfg-rx-lat');
+              const lonEl = document.getElementById('cfg-rx-lon');
+              if (latEl) latEl.value = pos.coords.latitude.toFixed(6);
+              if (lonEl) lonEl.value = pos.coords.longitude.toFixed(6);
               btnGps.innerHTML = `
                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="12 2 15 9 22 12 15 15 12 22 9 15 2 12 9 9"/></svg> Use Browser GPS
               `;
@@ -243,122 +269,153 @@ class TacticalApp {
       });
     }
 
-    // Interactive Map Pick Mode
-    if (btnMapPick) {
-      btnMapPick.addEventListener('click', () => {
-        this.closeReceiverModal();
-        this.mapCtrl.enableMapPickMode();
+    // Fit on connected sensors for center position
+    if (btnFitSensors) {
+      btnFitSensors.addEventListener('click', () => {
+        if (!this.nodesList || this.nodesList.length === 0) {
+          alert('No sensor nodes are currently registered.');
+          return;
+        }
+        let totalLat = 0;
+        let totalLon = 0;
+        let validCount = 0;
+        this.nodesList.forEach(n => {
+          const lat = parseFloat(n.latitude);
+          const lon = parseFloat(n.longitude);
+          if (!isNaN(lat) && !isNaN(lon)) {
+            totalLat += lat;
+            totalLon += lon;
+            validCount++;
+          }
+        });
+        if (validCount > 0) {
+          const avgLat = (totalLat / validCount).toFixed(6);
+          const avgLon = (totalLon / validCount).toFixed(6);
+          const latEl = document.getElementById('cfg-rx-lat');
+          const lonEl = document.getElementById('cfg-rx-lon');
+          if (latEl) latEl.value = avgLat;
+          if (lonEl) lonEl.value = avgLon;
+        }
       });
     }
 
-    // Form Submission -> Save directly to disk via POST /api/config/receiver
+    // Form Submission -> Save directly to disk via POST /api/config/dashboard
     if (form) {
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        const name = document.getElementById('cfg-rx-name').value.trim() || 'Tactical Sensor Station';
+        const title = document.getElementById('cfg-rx-name').value.trim() || 'Tactical Drone Remote ID Radar';
         const lat = parseFloat(document.getElementById('cfg-rx-lat').value);
         const lon = parseFloat(document.getElementById('cfg-rx-lon').value);
-        const alt = parseFloat(document.getElementById('cfg-rx-alt').value) || 0.0;
-        
-        const ringsRaw = document.getElementById('cfg-rx-rings').value;
-        const rings = ringsRaw
-          .split(',')
-          .map(r => parseFloat(r.trim()))
-          .filter(r => !isNaN(r) && r > 0);
-
+        const zoom = parseInt(document.getElementById('cfg-rx-zoom').value, 10) || 13;
         const showRings = document.getElementById('cfg-rx-show-rings').checked;
-        const enabled = document.getElementById('cfg-rx-enabled').checked;
+        const showTrails = document.getElementById('cfg-rx-show-trails').checked;
+        const showWaypoints = document.getElementById('cfg-rx-show-waypoints').checked;
 
         const updatedConfig = {
-          name,
-          latitude: lat,
-          longitude: lon,
-          altitude_m: alt,
-          range_rings_m: rings.length > 0 ? rings : [500, 1000, 2500, 5000],
+          title,
+          center_latitude: lat,
+          center_longitude: lon,
+          default_zoom: zoom,
           show_range_rings: showRings,
-          enabled,
+          show_trails: showTrails,
+          show_waypoints: showWaypoints,
         };
 
         const saveBtn = document.getElementById('btn-rx-save');
         if (saveBtn) saveBtn.textContent = '💾 Saving...';
 
-        await this.saveReceiverConfig(updatedConfig);
+        await this.saveDashboardConfig(updatedConfig);
 
-        if (saveBtn) saveBtn.textContent = '💾 Save to Disk';
+        if (saveBtn) saveBtn.textContent = '💾 Save Viewport Settings';
         this.closeReceiverModal();
       });
     }
+  }
+
+  renderModalNodes() {
+    const container = document.getElementById('modal-nodes-list');
+    const countEl = document.getElementById('modal-nodes-count');
+    if (!container) return;
+
+    if (countEl) countEl.textContent = this.nodesList.length;
+
+    if (this.nodesList.length === 0) {
+      container.innerHTML = `
+        <div style="font-size: 11px; color: var(--text-muted); padding: 12px; text-align: center;">
+          No sensor nodes connected. Start <code>drone-scanner</code> service to stream telemetry.
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = this.nodesList.map(node => {
+      const isLocked = Boolean(node.locked);
+      const status = node.status || 'ONLINE';
+      const statusColor = status === 'ONLINE' ? '#10b981' : (status === 'DEGRADED' ? '#f59e0b' : '#ef4444');
+      const lat = parseFloat(node.latitude);
+      const lon = parseFloat(node.longitude);
+      const coordsStr = (!isNaN(lat) && !isNaN(lon)) ? `${lat.toFixed(5)}°, ${lon.toFixed(5)}°` : 'No Fix';
+      const altStr = node.altitude_m != null ? `${parseFloat(node.altitude_m).toFixed(1)}m` : '--';
+      const pkts = (node.packets_received_total || 0).toLocaleString();
+
+      return `
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 6px 10px; font-size: 11px;">
+          <div style="display: flex; flex-direction: column; gap: 2px;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span style="font-weight: 700; color: #38bdf8;">📡 ${node.name || node.node_id}</span>
+              <span style="font-size: 9px; font-weight: 800; color: #fff; background: ${statusColor}; padding: 1px 4px; border-radius: 3px;">${status}</span>
+            </div>
+            <div style="color: var(--text-muted); font-size: 10px;">
+              ID: <code>${node.node_id}</code> · Pos: ${coordsStr} · Alt: ${altStr} · Pkts: ${pkts}
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            ${isLocked ? `
+              <span style="font-size: 10px; font-weight: 700; color: #ef4444; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef444455; padding: 2px 6px; border-radius: 4px;" title="Position write-protected on scanner disk in scanner_config.json">
+                🔒 LOCKED
+              </span>
+            ` : `
+              <span style="font-size: 10px; font-weight: 700; color: #10b981; background: rgba(16, 185, 129, 0.15); border: 1px solid #10b98155; padding: 2px 6px; border-radius: 4px;" title="Unlocked: drag station icon on map to calibrate">
+                🔓 DRAGGABLE
+              </span>
+            `}
+          </div>
+        </div>
+      `;
+    }).join('');
   }
 
   openReceiverModal() {
     const modal = document.getElementById('receiver-config-modal');
     if (!modal) return;
 
-    const cfg = this.receiverConfig || {
-      name: 'Tactical Receiver Station',
-      latitude: 47.3769,
-      longitude: 8.5417,
-      altitude_m: 450.0,
-      range_rings_m: [500, 1000, 2500, 5000],
-      show_range_rings: true,
-      enabled: true,
-      locked: false,
-    };
+    this.renderModalNodes();
 
-    const isLocked = Boolean(cfg.locked);
+    const cfg = this.dashboardConfig || {
+      title: 'Tactical Drone Remote ID Radar & Airspace Monitor',
+      center_latitude: 47.3769,
+      center_longitude: 8.5417,
+      default_zoom: 13,
+      show_range_rings: true,
+      show_trails: true,
+      show_waypoints: true,
+    };
 
     const nameEl = document.getElementById('cfg-rx-name');
     const latEl = document.getElementById('cfg-rx-lat');
     const lonEl = document.getElementById('cfg-rx-lon');
-    const altEl = document.getElementById('cfg-rx-alt');
-    const ringsEl = document.getElementById('cfg-rx-rings');
+    const zoomEl = document.getElementById('cfg-rx-zoom');
     const showRingsEl = document.getElementById('cfg-rx-show-rings');
-    const enabledEl = document.getElementById('cfg-rx-enabled');
-    const lockBadgeEl = document.getElementById('modal-rx-lock-badge');
-    const lockBannerEl = document.getElementById('modal-rx-locked-banner');
-    const btnGps = document.getElementById('btn-rx-gps-detect');
-    const btnMapPick = document.getElementById('btn-rx-map-pick');
-    const btnSave = document.getElementById('btn-rx-save');
+    const showTrailsEl = document.getElementById('cfg-rx-show-trails');
+    const showWaypointsEl = document.getElementById('cfg-rx-show-waypoints');
 
-    if (nameEl) nameEl.value = cfg.name || '';
-    if (latEl) latEl.value = cfg.latitude != null ? cfg.latitude : '';
-    if (lonEl) lonEl.value = cfg.longitude != null ? cfg.longitude : '';
-    if (altEl) altEl.value = cfg.altitude_m != null ? cfg.altitude_m : '';
-    if (ringsEl) ringsEl.value = (cfg.range_rings_m || [500, 1000, 2500, 5000]).join(', ');
+    if (nameEl) nameEl.value = cfg.title || '';
+    if (latEl) latEl.value = cfg.center_latitude != null ? cfg.center_latitude : 47.3769;
+    if (lonEl) lonEl.value = cfg.center_longitude != null ? cfg.center_longitude : 8.5417;
+    if (zoomEl) zoomEl.value = cfg.default_zoom != null ? cfg.default_zoom : 13;
     if (showRingsEl) showRingsEl.checked = cfg.show_range_rings !== false;
-    if (enabledEl) enabledEl.checked = cfg.enabled !== false;
-
-    // Lock Status Display & Input Write-Protection
-    if (lockBadgeEl) {
-      if (isLocked) {
-        lockBadgeEl.textContent = 'LOCKED ON DISK';
-        lockBadgeEl.style.background = 'rgba(239, 68, 68, 0.2)';
-        lockBadgeEl.style.color = '#f87171';
-        lockBadgeEl.style.borderColor = '#ef4444';
-      } else {
-        lockBadgeEl.textContent = 'UNLOCKED';
-        lockBadgeEl.style.background = 'rgba(16, 185, 129, 0.2)';
-        lockBadgeEl.style.color = '#34d399';
-        lockBadgeEl.style.borderColor = '#10b981';
-      }
-    }
-
-    if (lockBannerEl) {
-      lockBannerEl.style.display = isLocked ? 'flex' : 'none';
-    }
-
-    // Disable editing controls if locked via configuration file on disk
-    [nameEl, latEl, lonEl, altEl, ringsEl, showRingsEl, enabledEl].forEach(el => {
-      if (el) el.disabled = isLocked;
-    });
-
-    if (btnGps) btnGps.disabled = isLocked;
-    if (btnMapPick) btnMapPick.disabled = isLocked;
-    if (btnSave) {
-      btnSave.disabled = isLocked;
-      btnSave.textContent = isLocked ? '🔒 Locked on Disk' : '💾 Save to Disk';
-      btnSave.title = isLocked ? 'Sensor parameters are locked via scanner_config.json on disk' : 'Save parameters to scanner_config.json on disk';
-    }
+    if (showTrailsEl) showTrailsEl.checked = cfg.show_trails !== false;
+    if (showWaypointsEl) showWaypointsEl.checked = cfg.show_waypoints !== false;
 
     modal.style.display = 'flex';
   }
@@ -369,52 +426,58 @@ class TacticalApp {
   }
 
   /**
-   * Fetches scanner station configuration from disk via /api/config/scanner
+   * Fetches dashboard & viewport configuration from disk via /api/config/dashboard
    */
-  async fetchReceiverConfig() {
+  async fetchDashboardConfig() {
     try {
-      const resp = await fetch('/api/config/scanner');
+      const resp = await fetch('/api/config/dashboard');
       if (!resp.ok) return;
       const data = await resp.json();
-      const cfg = data.scanner || data.receiver || data;
-      this.receiverConfig = cfg;
-      this.feedCtrl.setReceiverConfig(cfg);
-      this.mapCtrl.setReceiverConfig(cfg);
-      this.inspectorCtrl.setReceiverConfig(cfg);
-      this.scrubberCtrl.setReceiverConfig(cfg);
-      this.modalCtrl.setReceiverConfig(cfg);
+      const cfg = data.dashboard || data;
+      this.dashboardConfig = cfg;
+      if (this.mapCtrl) this.mapCtrl.setDashboardConfig(cfg);
+
+      const btnToggleRings = document.getElementById('btn-toggle-rings');
+      if (btnToggleRings && cfg.show_range_rings !== undefined) {
+        btnToggleRings.classList.toggle('active', Boolean(cfg.show_range_rings));
+      }
+      const btnTrails = document.getElementById('btn-toggle-paths');
+      if (btnTrails && cfg.show_trails !== undefined) {
+        btnTrails.classList.toggle('active', Boolean(cfg.show_trails));
+      }
+      const btnWaypoints = document.getElementById('btn-toggle-waypoints');
+      if (btnWaypoints && cfg.show_waypoints !== undefined) {
+        btnWaypoints.classList.toggle('active', Boolean(cfg.show_waypoints));
+      }
     } catch (e) {
-      console.warn('Failed to load scanner configuration:', e);
+      console.warn('Failed to load dashboard configuration:', e);
     }
   }
 
   /**
-   * Saves scanner station configuration to disk via POST /api/config/scanner
+   * Saves dashboard & viewport configuration to disk via POST /api/config/dashboard
    */
-  async saveReceiverConfig(configData) {
+  async saveDashboardConfig(configData) {
     try {
-      const resp = await fetch('/api/config/scanner', {
+      const resp = await fetch('/api/config/dashboard', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(configData),
       });
 
       if (!resp.ok) {
-        throw new Error(`Server returned HTTP ${resp.status}`);
+        const errJson = await resp.json().catch(() => ({}));
+        throw new Error(errJson.detail || `Server returned HTTP ${resp.status}`);
       }
 
       const resJson = await resp.json();
-      const savedConfig = resJson.scanner || resJson.receiver || resJson;
-      this.receiverConfig = savedConfig;
-      this.feedCtrl.setReceiverConfig(savedConfig);
-      this.mapCtrl.setReceiverConfig(savedConfig);
-      this.inspectorCtrl.setReceiverConfig(savedConfig);
-      this.scrubberCtrl.setReceiverConfig(savedConfig);
-      this.modalCtrl.setReceiverConfig(savedConfig);
+      const savedConfig = resJson.dashboard || resJson;
+      this.dashboardConfig = savedConfig;
+      if (this.mapCtrl) this.mapCtrl.setDashboardConfig(savedConfig);
       return savedConfig;
     } catch (err) {
-      console.error('Failed to save scanner config to disk:', err);
-      alert(`Error saving scanner config: ${err.message}`);
+      console.error('Failed to save dashboard config to disk:', err);
+      alert(`Error saving dashboard config: ${err.message}`);
     }
   }
 
@@ -512,11 +575,12 @@ class TacticalApp {
       this.mapCtrl.setSelectedEncounter(encounterId, encounter);
 
       // 1. Populate Telemetry Inspector
-      this.inspectorCtrl.setReceiverConfig(this.receiverConfig);
+      this.inspectorCtrl.setNodesList(this.nodesList);
       this.inspectorCtrl.setEncounter(encounter);
 
       // 2. Load Trajectory into Timeline Scrubber
-      this.scrubberCtrl.setReceiverConfig(this.receiverConfig);
+      this.scrubberCtrl.setNodesList(this.nodesList);
+      this.scrubberCtrl.setEncounterNodeId(encounter.node_id || null);
       this.scrubberCtrl.setTrajectory(encounter.trajectory || []);
 
     } catch (err) {

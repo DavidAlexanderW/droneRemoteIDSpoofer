@@ -57,4 +57,6 @@ rid_detections.db-shm
 rid_detections.db-wal
 rid_packets*.jsonl
 scanner/scanner_config.json
+scanner/dashboard/dashboard_config.json
+
 

@@ -233,6 +233,7 @@ class CentralIngestionHub:
         alt = float(node_meta.get("altitude_m", 0.0))
         rings = json.dumps(node_meta.get("range_rings_m", [500, 1000, 2500, 5000]))
         desc = node_meta.get("description", "")
+        locked = bool(node_meta.get("locked", False))
 
         upsert_receiver_node(
             self.db_conn,
@@ -243,6 +244,7 @@ class CentralIngestionHub:
             altitude_m=alt,
             range_rings_json=rings,
             description=desc,
+            locked=locked,
             status="ONLINE",
         )
 
@@ -255,6 +257,7 @@ class CentralIngestionHub:
 
         # Attach multi-node spatial attribution
         envelope["primary_node_id"] = primary_node
+        envelope["node_id"] = primary_node
         envelope["node_rssi_map"] = node_rssi_map
 
         # Update encounter tracker

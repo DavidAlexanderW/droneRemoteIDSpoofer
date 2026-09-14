@@ -440,10 +440,12 @@ class EncounterTracker:
         db_path: Optional[str] = "rid_detections.db",
         timeout_s: float = 300.0,
         persist_interval_s: float = 0.0,
+        default_node_id: Optional[str] = None,
     ):
         self.db_path = db_path
         self.timeout_s = timeout_s
         self.persist_interval_s = persist_interval_s
+        self.default_node_id = default_node_id
         self.active_encounters: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
         self.last_wal_checkpoint = time.time()
@@ -459,6 +461,7 @@ class EncounterTracker:
         """Update or create an active encounter from an incoming packet. Returns encounter_id."""
         mac = packet.get("mac", "UNKNOWN")
         serial = packet.get("serial_number")
+        node_id = packet.get("node_id") or packet.get("primary_node_id") or self.default_node_id
         ts = packet.get("timestamp", time.time())
         transport = packet.get("transport", "unknown")
         ch_raw = packet.get("channel", "N/A")
@@ -497,6 +500,7 @@ class EncounterTracker:
                     "serial_number": serial,
                     "drone_make": drone_info.get("make"),
                     "drone_model": drone_info.get("model"),
+                    "node_id": node_id,
                     "first_seen": ts,
                     "first_seen_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                     "last_seen": ts,
@@ -526,6 +530,8 @@ class EncounterTracker:
                 }
 
             enc = self.active_encounters[key]
+            if node_id and not enc.get("node_id"):
+                enc["node_id"] = node_id
             enc["last_seen"] = ts
             enc["last_seen_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
             enc["duration_s"] = round(enc["last_seen"] - enc["first_seen"], 2)
@@ -753,8 +759,8 @@ class EncounterTracker:
                         max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm, min_alt_m,
                         max_alt_m, min_height_m, max_height_m, min_pressure_alt_m, max_pressure_alt_m,
                         max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m, area_ceil_m, area_floor_m,
-                        operator_id, self_id_desc, drone_make, drone_model, trajectory_json, is_active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        operator_id, self_id_desc, drone_make, drone_model, node_id, trajectory_json, is_active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     enc["encounter_id"],
                     enc["mac"],
@@ -792,6 +798,7 @@ class EncounterTracker:
                     enc["self_id_desc"],
                     enc.get("drone_make"),
                     enc.get("drone_model"),
+                    enc.get("node_id"),
                     trajectory_str,
                     enc["is_active"]
                 ))
@@ -899,6 +906,7 @@ def rehydrate_db_from_jsonl(db_path: str = "rid_detections.db", log_dir: Optiona
                 "transport": p.get("transport", "wifi"),
                 "channel": p.get("channel", "N/A"),
                 "mac": p.get("mac", data["mac"]),
+                "node_id": p.get("node_id"),
                 "rssi_dbm": p.get("rssi_dbm"),
                 "rate_desc": p.get("rate_desc"),
                 "rate_mbps": p.get("rate_mbps"),
@@ -1456,8 +1464,10 @@ class UnifiedTelemetryLogger:
         rotate_daily: bool = False,
         persist_interval_s: float = 2.0,
         forwarder: Optional[Any] = None,
+        node_id: Optional[str] = None,
     ):
         self.forwarder = forwarder
+        self.node_id = node_id
         self.base_log_path = log_jsonl_path
         self.rotate_daily = rotate_daily
         self.quiet = quiet
@@ -1467,7 +1477,8 @@ class UnifiedTelemetryLogger:
         self.encounter_tracker = EncounterTracker(
             db_path=db_path,
             timeout_s=encounter_timeout_s,
-            persist_interval_s=persist_interval_s
+            persist_interval_s=persist_interval_s,
+            default_node_id=self.node_id,
         ) if db_path else None
 
         self.stats = {
@@ -1967,6 +1978,7 @@ def main():
         rotate_daily=args.rotate_daily,
         persist_interval_s=args.persist_interval,
         forwarder=forwarder,
+        node_id=args.node_id,
     )
 
     threads: List[threading.Thread] = []

@@ -88,13 +88,14 @@ print_usage() {
     echo "  --with-hub-service       Configure and install systemd 24/7 Central Ingestion Hub service"
     echo "  --wifi-iface <iface>     Wi-Fi interface to set in drone-scanner.service (e.g. wlan0, wlan1)"
     echo "  --nrf-port <port>        nRF UART serial port to set in drone-scanner.service (e.g. /dev/ttyACM0)"
-    echo "  --scanner-config <path>  Path to scanner_config.json (default: <repo>/scanner/scanner_config.json)"
-    echo "  --hub-url <url>          Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
-    echo "  --node-id <id>           Unique sensor node identifier (e.g. sensor-node-01)"
-    echo "  --no-nrf                 Skip downloading Nordic nrfutil and ble-sniffer plugin"
-    echo "  --no-sys-pkgs            Skip apt package installation (iw, iproute2, rfkill, etc.)"
-    echo "  --no-caps                Skip Linux network capabilities (setcap)"
-    echo "  -h, --help               Show this help message and exit"
+    echo "  --scanner-config <path>   Path to scanner_config.json (default: <repo>/scanner/scanner_config.json)"
+    echo "  --dashboard-config <path> Path to dashboard_config.json (default: <repo>/scanner/dashboard/dashboard_config.json)"
+    echo "  --hub-url <url>           Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
+    echo "  --node-id <id>            Unique sensor node identifier (e.g. sensor-node-01)"
+    echo "  --no-nrf                  Skip downloading Nordic nrfutil and ble-sniffer plugin"
+    echo "  --no-sys-pkgs             Skip apt package installation (iw, iproute2, rfkill, etc.)"
+    echo "  --no-caps                 Skip Linux network capabilities (setcap)"
+    echo "  -h, --help                Show this help message and exit"
     echo ""
 }
 
@@ -103,6 +104,7 @@ INSTALL_SERVICES=false
 INSTALL_DASHBOARD_SERVICE=false
 INSTALL_HUB_SERVICE=false
 SCANNER_CONFIG="${REPO_DIR}/scanner/scanner_config.json"
+DASHBOARD_CONFIG="${REPO_DIR}/scanner/dashboard/dashboard_config.json"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -128,6 +130,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --scanner-config)
             SCANNER_CONFIG="$2"
+            shift 2
+            ;;
+        --dashboard-config)
+            DASHBOARD_CONFIG="$2"
             shift 2
             ;;
         --hub-url)
@@ -519,16 +525,28 @@ EOF
 fi
 
 if [ "$INSTALL_DASHBOARD_SERVICE" = true ]; then
-    echo -e "${C_CYAN}[*] Generating customized drone-dashboard.service for this node...${C_RESET}"
+    # Ensure dashboard_config.json exists
+    if [ ! -f "${DASHBOARD_CONFIG}" ]; then
+        if [ -f "${REPO_DIR}/scanner/dashboard/dashboard_config.example.json" ]; then
+            echo -e "${C_CYAN}[*] Initializing ${DASHBOARD_CONFIG} from example template...${C_RESET}"
+            mkdir -p "$(dirname "${DASHBOARD_CONFIG}")"
+            cp "${REPO_DIR}/scanner/dashboard/dashboard_config.example.json" "${DASHBOARD_CONFIG}"
+        else
+            echo -e "${C_CYAN}[*] Initializing default ${DASHBOARD_CONFIG}...${C_RESET}"
+            "${VENV_PYTHON}" -c "from scanner.dashboard.dashboard_config import load_dashboard_config; load_dashboard_config('${DASHBOARD_CONFIG}')" 2>/dev/null || true
+        fi
+    fi
+
+    echo -e "${C_CYAN}[*] Generating customized drone-dashboard.service for this server/node...${C_RESET}"
     echo -e "    - WorkingDirectory: ${REPO_DIR}"
-    echo -e "    - Scanner Config  : ${SCANNER_CONFIG}"
+    echo -e "    - Dashboard Config: ${DASHBOARD_CONFIG}"
 
     TMP_DASH_SRV="/tmp/drone-dashboard-$$.service"
     cat << EOF > "${TMP_DASH_SRV}"
 [Unit]
 Description=Tactical ASTM F3411 Drone Remote ID Web Dashboard & Airspace Radar
 Documentation=https://github.com/cyber-defence-campus/droneRemoteIDSpoofer
-After=network.target time-sync.target drone-scanner.service
+After=network.target time-sync.target
 Wants=time-sync.target
 
 [Service]
@@ -538,7 +556,7 @@ WorkingDirectory=${REPO_DIR}
 ExecStart=${VENV_DIR}/bin/drone-dashboard \\
     --host 0.0.0.0 \\
     --port 8080 \\
-    --scanner-config ${SCANNER_CONFIG}
+    --dashboard-config ${DASHBOARD_CONFIG}
 
 Restart=always
 RestartSec=5s

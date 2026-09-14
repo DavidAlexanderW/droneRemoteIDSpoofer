@@ -34,6 +34,8 @@ class TestDashboardAPI(unittest.TestCase):
         os.environ["RID_DB_PATH"] = self.db_path
         os.environ["RID_JSONL_PATH"] = self.jsonl_path
         os.environ["RID_TIMEOUT_S"] = "300.0"
+        os.environ.pop("RID_DASHBOARD_CONFIG_PATH", None)
+        os.environ.pop("RID_SCANNER_CONFIG_PATH", None)
 
         # Initialize SQLite test database with realistic mock flight encounters
         conn = sqlite3.connect(self.db_path)
@@ -49,7 +51,7 @@ class TestDashboardAPI(unittest.TestCase):
         ]
         conn.execute("""
             INSERT INTO encounters (
-                encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                encounter_id, mac, serial_number, node_id, first_seen, first_seen_iso,
                 last_seen, last_seen_iso, duration_s, packet_count, transports,
                 channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
                 max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm,
@@ -59,6 +61,7 @@ class TestDashboardAPI(unittest.TestCase):
                 'enc_test_001',
                 'AA:BB:CC:11:22:33',
                 '1596E123456789012345',
+                'sensor-node-01',
                 1725790000.0,
                 '2026-09-08T10:06:40+00:00',
                 1725790004.0,
@@ -96,7 +99,7 @@ class TestDashboardAPI(unittest.TestCase):
         ]
         conn.execute("""
             INSERT INTO encounters (
-                encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                encounter_id, mac, serial_number, node_id, first_seen, first_seen_iso,
                 last_seen, last_seen_iso, duration_s, packet_count, transports,
                 channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
                 max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm,
@@ -106,6 +109,7 @@ class TestDashboardAPI(unittest.TestCase):
                 'enc_test_002',
                 'DD:EE:FF:44:55:66',
                 '1596E999999999999999',
+                'sensor-node-02',
                 1725780000.0,
                 '2026-09-08T07:20:00+00:00',
                 1725780020.0,
@@ -165,6 +169,11 @@ class TestDashboardAPI(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+        os.environ.pop("RID_DASHBOARD_CONFIG_PATH", None)
+        os.environ.pop("RID_SCANNER_CONFIG_PATH", None)
+        os.environ.pop("RID_DB_PATH", None)
+        os.environ.pop("RID_JSONL_PATH", None)
+        os.environ.pop("RID_TIMEOUT_S", None)
 
     def test_get_stats(self):
         """Verify global airspace statistics calculation."""
@@ -201,6 +210,15 @@ class TestDashboardAPI(unittest.TestCase):
         d_op = resp_op.json()
         self.assertEqual(d_op["count"], 1)
         self.assertEqual(d_op["encounters"][0]["operator_id"], "CHE87astd57qkgc4")
+        self.assertEqual(d_op["encounters"][0]["node_id"], "sensor-node-01")
+
+        # 4. Filter by Node ID
+        resp_node = self.client.get("/api/encounters?node_id=sensor-node-02")
+        self.assertEqual(resp_node.status_code, 200)
+        d_node = resp_node.json()
+        self.assertEqual(d_node["count"], 1)
+        self.assertEqual(d_node["encounters"][0]["encounter_id"], "enc_test_002")
+        self.assertEqual(d_node["encounters"][0]["node_id"], "sensor-node-02")
 
     def test_get_encounter_details(self):
         """Verify individual encounter details and trajectory array."""
@@ -208,6 +226,7 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["encounter_id"], "enc_test_001")
+        self.assertEqual(data["node_id"], "sensor-node-01")
         self.assertEqual(data["serial_number"], "1596E123456789012345")
         self.assertEqual(data["operator_id"], "CHE87astd57qkgc4")
         self.assertEqual(data["dominant_rate_mbps"], 1.0)
@@ -313,96 +332,99 @@ class TestDashboardAPI(unittest.TestCase):
             self.assertIn("active_drones", data)
             self.assertIn("active_count", data)
 
-    def test_scanner_config_disk_persistence(self):
-        """Verify scanner station config load and persistent save to disk."""
-        cfg_path = os.path.join(self.temp_dir.name, "scanner_config.json")
-        os.environ["RID_SCANNER_CONFIG_PATH"] = cfg_path
+    def test_node_position_update_unlocked(self):
+        """Verify position update for an unlocked receiver node via POST /api/nodes/{node_id}/position."""
+        from db import upsert_receiver_node
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        upsert_receiver_node(
+            conn,
+            node_id="node-test-unlocked",
+            name="Alpha Mobile Scanner",
+            latitude=47.3769,
+            longitude=8.5417,
+            altitude_m=450.0,
+            locked=False,
+        )
+        conn.close()
 
-        # 1. GET initial config (creates default on disk)
-        resp = self.client.get("/api/config/scanner")
+        # Update position via API
+        resp = self.client.post("/api/nodes/node-test-unlocked/position", json={
+            "latitude": 47.3900,
+            "longitude": 8.5600,
+            "altitude_m": 475.0,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["node"]["latitude"], 47.3900)
+        self.assertEqual(data["node"]["longitude"], 8.5600)
+        self.assertEqual(data["node"]["altitude_m"], 475.0)
+
+    def test_node_position_update_locked(self):
+        """Verify that position update for a locked receiver node returns 403 Forbidden."""
+        from db import upsert_receiver_node
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        upsert_receiver_node(
+            conn,
+            node_id="node-test-locked",
+            name="Fixed Mast Radar",
+            latitude=47.3769,
+            longitude=8.5417,
+            altitude_m=450.0,
+            locked=True,
+        )
+        conn.close()
+
+        # Attempt to update position via API
+        resp = self.client.post("/api/nodes/node-test-locked/position", json={
+            "latitude": 40.0,
+            "longitude": 10.0,
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("locked on disk", resp.json()["detail"])
+
+    def test_dashboard_config_disk_persistence(self):
+        """Verify dashboard viewport config load and persistent save to disk via /api/config/dashboard."""
+        cfg_path = os.path.join(self.temp_dir.name, "dashboard_config.json")
+        os.environ["RID_DASHBOARD_CONFIG_PATH"] = cfg_path
+
+        # 1. GET initial dashboard config (creates default on disk)
+        resp = self.client.get("/api/config/dashboard")
         self.assertEqual(resp.status_code, 200)
         initial_cfg = resp.json()
-        self.assertIn("latitude", initial_cfg)
-        self.assertIn("longitude", initial_cfg)
+        self.assertIn("center_latitude", initial_cfg)
+        self.assertIn("center_longitude", initial_cfg)
+        self.assertIn("title", initial_cfg)
         self.assertTrue(os.path.exists(cfg_path))
 
-        # 2. POST updated config to disk
+        # 2. POST updated dashboard config to disk
         new_payload = {
-            "name": "Custom Mobile Drone Defense Post",
-            "latitude": 47.3850,
-            "longitude": 8.5550,
-            "altitude_m": 480.0,
-            "range_rings_m": [300, 600, 1200, 3000],
+            "title": "Central Command Airspace Radar",
+            "center_latitude": 46.9480,
+            "center_longitude": 7.4474,
+            "default_zoom": 14,
             "show_range_rings": True,
-            "enabled": True,
+            "show_trails": True,
+            "show_waypoints": True,
         }
-        post_resp = self.client.post("/api/config/scanner", json=new_payload)
+        post_resp = self.client.post("/api/config/dashboard", json=new_payload)
         self.assertEqual(post_resp.status_code, 200)
         post_data = post_resp.json()
         self.assertEqual(post_data["status"], "ok")
-        self.assertEqual(post_data["scanner"]["name"], "Custom Mobile Drone Defense Post")
-        self.assertEqual(post_data["scanner"]["latitude"], 47.3850)
+        self.assertEqual(post_data["dashboard"]["center_latitude"], 46.9480)
+        self.assertEqual(post_data["dashboard"]["center_longitude"], 7.4474)
+        self.assertEqual(post_data["dashboard"]["title"], "Central Command Airspace Radar")
+        self.assertEqual(post_data["dashboard"]["default_zoom"], 14)
 
         # 3. Verify disk file content directly
         with open(cfg_path, "r", encoding="utf-8") as f:
             disk_json = json.load(f)
-        self.assertEqual(disk_json["name"], "Custom Mobile Drone Defense Post")
-        self.assertEqual(disk_json["latitude"], 47.3850)
-        self.assertEqual(disk_json["range_rings_m"], [300, 600, 1200, 3000])
-
-        # 4. Verify encounter details API response
-        enc_resp = self.client.get("/api/encounters/enc_test_001")
-        self.assertEqual(enc_resp.status_code, 200)
-        enc_data = enc_resp.json()
-        self.assertIn("trajectory", enc_data)
-        self.assertEqual(len(enc_data["trajectory"]), 3)
-
-    def test_scanner_config_locked_on_disk(self):
-        """Verify that locked: true on disk prevents modification via web REST API."""
-        cfg_path = os.path.join(self.temp_dir.name, "scanner_config_locked.json")
-        os.environ["RID_SCANNER_CONFIG_PATH"] = cfg_path
-
-        # 1. Write locked config to disk directly
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "name": "Fixed Tactical Station",
-                "latitude": 47.3769,
-                "longitude": 8.5417,
-                "altitude_m": 450.0,
-                "locked": True,
-                "enabled": True,
-            }, f)
-
-        # 2. Verify GET returns locked: True
-        resp = self.client.get("/api/config/scanner")
-        self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.json()["locked"])
-
-        # 3. Attempt POST update while locked -> must return 403 Forbidden
-        attempt_update = {
-            "name": "Hacked Station Name",
-            "latitude": 40.0,
-            "longitude": 10.0,
-        }
-        post_resp = self.client.post("/api/config/scanner", json=attempt_update)
-        self.assertEqual(post_resp.status_code, 403)
-        self.assertIn("locked in configuration file on disk", post_resp.json()["detail"])
-
-        # 4. Unlock directly in disk file
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "name": "Fixed Tactical Station",
-                "latitude": 47.3769,
-                "longitude": 8.5417,
-                "altitude_m": 450.0,
-                "locked": False,
-                "enabled": True,
-            }, f)
-
-        # 5. Subsequent POST update should now succeed
-        post_resp_unlocked = self.client.post("/api/config/scanner", json={"name": "Unlocked Station Name"})
-        self.assertEqual(post_resp_unlocked.status_code, 200)
-        self.assertEqual(post_resp_unlocked.json()["scanner"]["name"], "Unlocked Station Name")
+        self.assertEqual(disk_json["title"], "Central Command Airspace Radar")
+        self.assertEqual(disk_json["center_latitude"], 46.9480)
+        self.assertEqual(disk_json["center_longitude"], 7.4474)
+        self.assertEqual(disk_json["default_zoom"], 14)
 
     def test_faa_lookup_endpoint(self):
         """Verify FAA DOC registry lookup proxy endpoint."""

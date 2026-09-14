@@ -21,7 +21,7 @@
 [Unit]
 Description=Tactical ASTM F3411 Drone Remote ID Web Dashboard & Airspace Radar
 Documentation=https://github.com/cyber-defence-campus/droneRemoteIDSpoofer
-After=network.target time-sync.target drone-scanner.service
+After=network.target time-sync.target
 Wants=time-sync.target
 
 [Service]
@@ -33,7 +33,7 @@ ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-dashboard \
     --port 8080 \
     --db /home/user/droneRemoteIDSpoofer/rid_detections.db \
     --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
-    --scanner-config /home/user/droneRemoteIDSpoofer/scanner/scanner_config.json
+    --dashboard-config /home/user/droneRemoteIDSpoofer/scanner/dashboard/dashboard_config.json
 
 # Auto-restart on unexpected termination
 Restart=always

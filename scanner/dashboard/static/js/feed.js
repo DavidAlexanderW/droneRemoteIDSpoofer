@@ -17,13 +17,13 @@ export class EncountersFeedController {
     this.sortBy = 'time_desc'; // 'time_desc', 'time_asc', 'duration_desc', 'dist_asc', 'dist_desc', 'packets_desc'
     this.searchQuery = '';
     this.selectedEncounterId = null;
-    this.receiverConfig = null;
+    this.nodesList = [];
 
     this.initSearchAndFilters();
   }
 
-  setReceiverConfig(config) {
-    this.receiverConfig = config;
+  setNodesList(nodes) {
+    this.nodesList = Array.isArray(nodes) ? nodes : [];
     if (this.sortBy.startsWith('dist_')) {
       this.render();
     }
@@ -80,41 +80,47 @@ export class EncountersFeedController {
   }
 
   getEncounterDistanceM(enc) {
-    if (!this.receiverConfig || !this.receiverConfig.enabled || this.receiverConfig.latitude == null || this.receiverConfig.longitude == null) {
+    if (!enc || !enc.node_id || !this.nodesList || this.nodesList.length === 0) {
       return null;
     }
-    const rxLat = this.receiverConfig.latitude;
-    const rxLon = this.receiverConfig.longitude;
+
+    const rxNode = this.nodesList.find(n => n.node_id === enc.node_id);
+    if (!rxNode || rxNode.latitude == null || rxNode.longitude == null) {
+      return null;
+    }
+
+    let targetLat = null;
+    let targetLon = null;
+    let isPilot = false;
 
     // 1. Check latest position of drone
     if (enc.latest_position && enc.latest_position.lat != null && enc.latest_position.lon != null && !isNaN(enc.latest_position.lat) && !isNaN(enc.latest_position.lon)) {
-      return {
-        distM: calculateHaversineDistanceM(rxLat, rxLon, enc.latest_position.lat, enc.latest_position.lon),
-        isPilot: false,
-      };
-    }
-
-    // 2. Check latest trajectory point
-    if (enc.trajectory && enc.trajectory.length > 0) {
+      targetLat = enc.latest_position.lat;
+      targetLon = enc.latest_position.lon;
+    } else if (enc.trajectory && enc.trajectory.length > 0) {
+      // 2. Check latest trajectory point
       const valid = enc.trajectory.filter(pt => Array.isArray(pt) && pt.length >= 2 && !isNaN(pt[0]) && !isNaN(pt[1]));
       if (valid.length > 0) {
         const last = valid[valid.length - 1];
-        return {
-          distM: calculateHaversineDistanceM(rxLat, rxLon, last[0], last[1]),
-          isPilot: false,
-        };
+        targetLat = last[0];
+        targetLon = last[1];
       }
+    } else if (enc.pilot_lat != null && enc.pilot_lon != null && !isNaN(enc.pilot_lat) && !isNaN(enc.pilot_lon)) {
+      // 3. Fallback to pilot / GCS coordinates
+      targetLat = enc.pilot_lat;
+      targetLon = enc.pilot_lon;
+      isPilot = true;
     }
 
-    // 3. Fallback to pilot / GCS coordinates if drone coordinates unacquired
-    if (enc.pilot_lat != null && enc.pilot_lon != null && !isNaN(enc.pilot_lat) && !isNaN(enc.pilot_lon)) {
-      return {
-        distM: calculateHaversineDistanceM(rxLat, rxLon, enc.pilot_lat, enc.pilot_lon),
-        isPilot: true,
-      };
-    }
+    if (targetLat == null || targetLon == null) return null;
 
-    return null;
+    const rxLat = parseFloat(rxNode.latitude);
+    const rxLon = parseFloat(rxNode.longitude);
+    return {
+      distM: calculateHaversineDistanceM(rxLat, rxLon, targetLat, targetLon),
+      isPilot,
+      nodeName: rxNode.name || rxNode.node_id,
+    };
   }
 
   filterAndSortEncounters() {
@@ -232,12 +238,13 @@ export class EncountersFeedController {
     const maxAltStr = enc.max_alt_m != null ? `${Math.round(enc.max_alt_m)}m` : 'N/A';
     const maxSpeedStr = enc.max_speed_mps != null ? `${Math.round(enc.max_speed_mps)}m/s` : 'N/A';
 
-    // Receiver Distance Badge
+    // Sensor Distance Badge
     let distBadge = '';
     if (enc._distM != null) {
       const distStr = enc._distM >= 1000 ? `${(enc._distM / 1000).toFixed(2)} km` : `${Math.round(enc._distM)} m`;
       const isPilot = Boolean(enc._distIsPilot);
-      distBadge = `<span class="pill-chip rx-dist-pill ${isDistanceMode ? 'highlight-sort' : ''}" title="${isPilot ? 'Pilot / GCS Distance to Ground Station' : 'Aircraft Distance to Ground Station'}">📡 ${isPilot ? 'GCS: ' : ''}${distStr}</span>`;
+      const nodeName = enc._distInfo && enc._distInfo.nodeName ? enc._distInfo.nodeName : 'Sensor';
+      distBadge = `<span class="pill-chip rx-dist-pill ${isDistanceMode ? 'highlight-sort' : ''}" title="${isPilot ? 'Pilot / GCS Distance' : 'Aircraft Distance'} to 📡 ${nodeName}">📡 ${isPilot ? 'GCS: ' : ''}${distStr}</span>`;
     } else if (isDistanceMode) {
       distBadge = `<span class="pill-chip rx-dist-pill no-fix" title="No GNSS position coordinates recorded">📡 No Range</span>`;
     }

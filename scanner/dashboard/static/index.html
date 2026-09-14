@@ -143,14 +143,14 @@
           <button id="btn-recenter" class="btn-tactical-sm" title="Fit Airspace / All Targets">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20M12 2a10 10 0 1 0 10 10"></path></svg> Recenter
           </button>
-          <button id="btn-center-receiver" class="btn-tactical-sm" title="Center Map on Configured Receiver Station">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 10 10M2 12a10 10 0 0 1 10-10M12 6a6 6 0 0 1 6 6M6 12a6 6 0 0 1 6-6"/></svg> Receiver
+          <button id="btn-center-receiver" class="btn-tactical-sm" title="Center Map on Active Sensor Stations">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#0284c7" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 10 10M2 12a10 10 0 0 1 10-10M12 6a6 6 0 0 1 6 6M6 12a6 6 0 0 1 6-6"/></svg> Sensors
           </button>
           <button id="btn-center-operator" class="btn-tactical-sm" title="Center Map on Pilot / Operator GCS Location">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0H5.5z"/></svg> Pilot GCS
           </button>
           <button id="btn-toggle-rings" class="btn-tactical-sm active" title="Toggle Distance Range Rings">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg> Rings
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#0284c7" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg> Rings
           </button>
           <button id="btn-toggle-paths" class="btn-tactical-sm active" title="Toggle Flight Path Trails">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"></path></svg> Trails
@@ -158,8 +158,8 @@
           <button id="btn-toggle-waypoints" class="btn-tactical-sm active" title="Toggle Discrete Packet Waypoint Dots">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><circle cx="6" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle></svg> Fixes
           </button>
-          <button id="btn-open-receiver-config" class="btn-tactical-sm" title="Configure Receiver Location (Saved to Disk)">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> ⚙ Config
+          <button id="btn-open-receiver-config" class="btn-tactical-sm" title="View Sensor Nodes & Configure Dashboard Viewport">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> ⚙ Viewport
           </button>
         </div>
       </div>
@@ -527,81 +527,85 @@
   </div>
 
   <!-- ===================================================================== -->
-  <!-- RECEIVER CONFIGURATION MODAL DIALOG -->
+  <!-- ===================================================================== -->
+  <!-- AIRSPACE SENSORS & VIEWPORT CONFIGURATION MODAL -->
   <!-- ===================================================================== -->
   <div id="receiver-config-modal" class="modal-backdrop" style="display: none;">
-    <div class="modal-dialog modal-dialog-sm">
+    <div class="modal-dialog modal-dialog-sm" style="max-width: 580px;">
       <div class="modal-header">
         <div class="modal-header-titles">
           <div class="modal-badge-row" style="display: flex; align-items: center; gap: 8px;">
-            <div class="modal-badge" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border-color: #f59e0b;">SENSOR STATION CONFIG</div>
-            <span id="modal-rx-lock-badge" class="badge-tag" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; font-size: 9px; padding: 1px 6px;">UNLOCKED</span>
+            <div class="modal-badge" style="background: rgba(2, 132, 199, 0.2); color: #38bdf8; border-color: #0284c7;">AIRSPACE SENSORS & VIEWPORT</div>
           </div>
-          <h3 class="modal-title font-mono">RECEIVER LOCATION (SAVED ON DISK)</h3>
+          <h3 class="modal-title font-mono">SENSOR STATIONS & VIEWPORT SETTINGS</h3>
         </div>
         <button id="btn-close-receiver-modal" class="btn-close-modal">&times;</button>
       </div>
 
       <div class="modal-body">
-        <!-- Lock Notice Banner (Visible when locked via scanner_config.json) -->
-        <div id="modal-rx-locked-banner" class="tactical-lock-banner" style="display: none;">
-          <div class="lock-banner-icon">🔒</div>
-          <div class="lock-banner-text">
-            <b>POSITION WRITE-PROTECTED:</b> Sensor station parameters are locked in <code>scanner/scanner_config.json</code> on disk. To modify or reposition, set <code>"locked": false</code> directly in the file on disk.
+        <!-- Section 1: Connected Sensor Stations -->
+        <div class="settings-section" style="margin-bottom: 18px;">
+          <div class="drawer-section-title" style="margin-bottom: 8px;">REGISTERED SENSOR STATIONS (<span id="modal-nodes-count">0</span>)</div>
+          <div id="modal-nodes-list" class="nodes-status-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; border: 1px solid var(--border-subtle);">
+            <!-- Populated dynamically via app.js -->
+          </div>
+          <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px; line-height: 1.4;">
+            💡 <b>Station Locking:</b> Set <code>"locked": true / false</code> in <code>scanner_config.json</code> on each sensor disk. Unlocked sensors can be dragged directly on the map to calibrate their physical position.
           </div>
         </div>
 
-        <form id="form-receiver-config" class="tactical-form font-mono">
-          <div class="form-group">
-            <label for="cfg-rx-name">STATION IDENTIFIER / NAME</label>
-            <input type="text" id="cfg-rx-name" placeholder="e.g. Zurich Tactical Sensor Node 1" required>
-          </div>
-
-          <div class="form-row-2">
+        <!-- Section 2: Global Viewport Settings -->
+        <div class="settings-section">
+          <div class="drawer-section-title" style="margin-bottom: 8px;">RADAR VIEWPORT PARAMETERS</div>
+          <form id="form-receiver-config" class="tactical-form font-mono">
             <div class="form-group">
-              <label for="cfg-rx-lat">LATITUDE (° N)</label>
-              <input type="number" step="0.000001" id="cfg-rx-lat" placeholder="47.3769" required>
+              <label for="cfg-rx-name">VIEWPORT TITLE</label>
+              <input type="text" id="cfg-rx-name" placeholder="Tactical Drone Remote ID Radar" required>
             </div>
+
+            <div class="form-row-2">
+              <div class="form-group">
+                <label for="cfg-rx-lat">DEFAULT CENTER LATITUDE (° N)</label>
+                <input type="number" step="0.000001" id="cfg-rx-lat" placeholder="47.3769" required>
+              </div>
+              <div class="form-group">
+                <label for="cfg-rx-lon">DEFAULT CENTER LONGITUDE (° E)</label>
+                <input type="number" step="0.000001" id="cfg-rx-lon" placeholder="8.5417" required>
+              </div>
+            </div>
+
             <div class="form-group">
-              <label for="cfg-rx-lon">LONGITUDE (° E)</label>
-              <input type="number" step="0.000001" id="cfg-rx-lon" placeholder="8.5417" required>
+              <label for="cfg-rx-zoom">DEFAULT ZOOM LEVEL (1-19)</label>
+              <input type="number" step="1" min="1" max="19" id="cfg-rx-zoom" placeholder="13" required>
             </div>
-          </div>
 
-          <div class="form-row-2">
-            <div class="form-group">
-              <label for="cfg-rx-alt">ALTITUDE MSL (METERS)</label>
-              <input type="number" step="0.1" id="cfg-rx-alt" placeholder="450.0" required>
+            <div class="form-checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfg-rx-show-rings" checked> Display Distance Range Rings around Sensors
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfg-rx-show-trails" checked> Display Aircraft Flight Path Trails
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfg-rx-show-waypoints" checked> Display Discrete Packet Fix Waypoint Dots
+              </label>
             </div>
-            <div class="form-group">
-              <label for="cfg-rx-rings">RANGE RINGS (METERS)</label>
-              <input type="text" id="cfg-rx-rings" placeholder="500, 1000, 2500, 5000">
+
+            <div class="config-quick-actions">
+              <button type="button" id="btn-rx-gps-detect" class="btn-tactical-sm">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="12 2 15 9 22 12 15 15 12 22 9 15 2 12 9 9"/></svg> Use Browser GPS
+              </button>
+              <button type="button" id="btn-rx-fit-sensors" class="btn-tactical-sm">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 10 10M2 12a10 10 0 0 1 10-10M12 6a6 6 0 0 1 6 6M6 12a6 6 0 0 1 6-6"/></svg> Center on Sensors
+              </button>
             </div>
-          </div>
 
-          <div class="form-checkbox-group">
-            <label class="checkbox-label">
-              <input type="checkbox" id="cfg-rx-show-rings" checked> Display Distance Range Rings on Radar Map
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="cfg-rx-enabled" checked> Enable Sensor Station in Airspace Calculations
-            </label>
-          </div>
-
-          <div class="config-quick-actions">
-            <button type="button" id="btn-rx-gps-detect" class="btn-tactical-sm">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="12 2 15 9 22 12 15 15 12 22 9 15 2 12 9 9"/></svg> Use Browser GPS
-            </button>
-            <button type="button" id="btn-rx-map-pick" class="btn-tactical-sm">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg> Pick on Map
-            </button>
-          </div>
-
-          <div class="modal-form-actions">
-            <button type="button" id="btn-rx-cancel" class="btn-secondary-action">Cancel</button>
-            <button type="submit" id="btn-rx-save" class="btn-primary-action" style="background: #f59e0b; color: #080c16; border-color: #f59e0b;">💾 Save to Disk</button>
-          </div>
-        </form>
+            <div class="modal-form-actions">
+              <button type="button" id="btn-rx-cancel" class="btn-secondary-action">Cancel</button>
+              <button type="submit" id="btn-rx-save" class="btn-primary-action" style="background: #0284c7; color: #ffffff; border-color: #0284c7;">💾 Save Viewport Settings</button>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
   </div>

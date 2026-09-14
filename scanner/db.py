@@ -67,6 +67,7 @@ ENCOUNTERS_SCHEMA = [
     ("self_id_desc", "TEXT"),
     ("drone_make", "TEXT"),
     ("drone_model", "TEXT"),
+    ("node_id", "TEXT"),
     ("trajectory_json", "TEXT"),
     ("is_active", "INTEGER NOT NULL DEFAULT 1"),
 ]
@@ -81,6 +82,7 @@ MIGRATION_COLUMNS = [
     ("area_floor_m", "REAL"),
     ("drone_make", "TEXT"),
     ("drone_model", "TEXT"),
+    ("node_id", "TEXT"),
     ("wifi_rates", "TEXT"),
     ("dominant_rate_mbps", "REAL"),
     ("dominant_modulation", "TEXT"),
@@ -122,6 +124,7 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
             altitude_m REAL NOT NULL,
             range_rings_json TEXT DEFAULT '[500, 1000, 2500, 5000]',
             description TEXT,
+            locked INTEGER NOT NULL DEFAULT 0,
             first_connected_iso TEXT NOT NULL,
             last_heartbeat_epoch REAL NOT NULL,
             last_heartbeat_iso TEXT NOT NULL,
@@ -153,6 +156,15 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
             except Exception:
                 pass
 
+    # Check receiver_nodes migrations
+    try:
+        cursor.execute("PRAGMA table_info(receiver_nodes);")
+        node_cols = {col[1] for col in cursor.fetchall()}
+        if "locked" not in node_cols:
+            conn.execute("ALTER TABLE receiver_nodes ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;")
+    except Exception:
+        pass
+
     # 3. Backfill drone_make and drone_model for any existing records with a serial number
     try:
         unfilled = conn.execute("SELECT encounter_id, serial_number FROM encounters WHERE drone_make IS NULL AND serial_number IS NOT NULL;").fetchall()
@@ -171,6 +183,7 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_serial ON encounters(serial_number);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_time ON encounters(first_seen, last_seen);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_active ON encounters(is_active);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_node ON encounters(node_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_status ON receiver_nodes(status);")
 
     # 5. Auto-reconcile lingering active encounters from prior runs
@@ -213,6 +226,7 @@ def upsert_receiver_node(
     altitude_m: float,
     range_rings_json: Optional[str] = None,
     description: Optional[str] = None,
+    locked: bool = False,
     packets_increment: int = 0,
     status: str = "ONLINE",
 ) -> None:
@@ -220,13 +234,14 @@ def upsert_receiver_node(
     now = time.time()
     iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     rings = range_rings_json or "[500, 1000, 2500, 5000]"
+    locked_int = 1 if locked else 0
 
     conn.execute("""
         INSERT INTO receiver_nodes (
             node_id, name, latitude, longitude, altitude_m,
-            range_rings_json, description, first_connected_iso,
+            range_rings_json, description, locked, first_connected_iso,
             last_heartbeat_epoch, last_heartbeat_iso, packets_received_total, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_id) DO UPDATE SET
             name = excluded.name,
             latitude = excluded.latitude,
@@ -234,15 +249,51 @@ def upsert_receiver_node(
             altitude_m = excluded.altitude_m,
             range_rings_json = excluded.range_rings_json,
             description = COALESCE(excluded.description, receiver_nodes.description),
+            locked = excluded.locked,
             last_heartbeat_epoch = excluded.last_heartbeat_epoch,
             last_heartbeat_iso = excluded.last_heartbeat_iso,
             packets_received_total = receiver_nodes.packets_received_total + excluded.packets_received_total,
             status = excluded.status;
     """, (
         node_id, name, latitude, longitude, altitude_m,
-        rings, description, iso_now, now, iso_now, packets_increment, status
+        rings, description, locked_int, iso_now, now, iso_now, packets_increment, status
     ))
     conn.commit()
+
+
+def update_receiver_node_position(
+    conn: sqlite3.Connection,
+    node_id: str,
+    latitude: float,
+    longitude: float,
+    altitude_m: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Updates the physical coordinates of an unlocked receiver node in the database.
+    Raises PermissionError if the node is locked on disk (locked == 1).
+    """
+    row = conn.execute("SELECT * FROM receiver_nodes WHERE node_id = ?;", (node_id,)).fetchone()
+    if not row:
+        raise KeyError(f"Receiver node '{node_id}' not found in database.")
+    
+    node = dict(row)
+    if bool(node.get("locked")):
+        raise PermissionError(f"Receiver node '{node_id}' is locked on disk via scanner_config.json.")
+
+    if altitude_m is not None:
+        conn.execute(
+            "UPDATE receiver_nodes SET latitude = ?, longitude = ?, altitude_m = ? WHERE node_id = ?;",
+            (latitude, longitude, altitude_m, node_id)
+        )
+    else:
+        conn.execute(
+            "UPDATE receiver_nodes SET latitude = ?, longitude = ? WHERE node_id = ?;",
+            (latitude, longitude, node_id)
+        )
+    conn.commit()
+
+    updated = conn.execute("SELECT * FROM receiver_nodes WHERE node_id = ?;", (node_id,)).fetchone()
+    return dict(updated)
 
 
 def get_receiver_nodes(conn: sqlite3.Connection, offline_timeout_s: float = 60.0) -> List[Dict[str, Any]]:
@@ -252,6 +303,7 @@ def get_receiver_nodes(conn: sqlite3.Connection, offline_timeout_s: float = 60.0
     results = []
     for r in rows:
         d = dict(r)
+        d["locked"] = bool(d.get("locked", 0))
         last_hb = float(d.get("last_heartbeat_epoch", 0.0))
         if now - last_hb > (offline_timeout_s * 3):
             d["status"] = "OFFLINE"

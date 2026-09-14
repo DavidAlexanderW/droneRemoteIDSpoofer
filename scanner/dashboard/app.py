@@ -35,24 +35,41 @@ if scanner_dir not in sys.path:
     sys.path.insert(0, scanner_dir)
 
 try:
-    from scanner.db import get_db_connection as db_get_connection, reconcile_stale_encounters, get_receiver_nodes
+    from scanner.db import (
+        get_db_connection as db_get_connection,
+        reconcile_stale_encounters,
+        get_receiver_nodes,
+        update_receiver_node_position,
+    )
     from scanner.drone_models import infer_drone_model
 except ImportError:
-    from db import get_db_connection as db_get_connection, reconcile_stale_encounters, get_receiver_nodes
+    from db import (
+        get_db_connection as db_get_connection,
+        reconcile_stale_encounters,
+        get_receiver_nodes,
+        update_receiver_node_position,
+    )
     from drone_models import infer_drone_model
 
 try:
-    from scanner.scanner_config import (
-        load_scanner_config,
-        save_scanner_config,
-        get_default_config_path,
+    from scanner.dashboard.dashboard_config import (
+        load_dashboard_config,
+        save_dashboard_config,
+        get_default_dashboard_config_path,
     )
 except ImportError:
-    from scanner_config import (
-        load_scanner_config,
-        save_scanner_config,
-        get_default_config_path,
-    )
+    try:
+        from dashboard.dashboard_config import (
+            load_dashboard_config,
+            save_dashboard_config,
+            get_default_dashboard_config_path,
+        )
+    except ImportError:
+        from dashboard_config import (
+            load_dashboard_config,
+            save_dashboard_config,
+            get_default_dashboard_config_path,
+        )
 
 try:
     from drone_rid_spoofer.parser import decode_astm_message
@@ -87,7 +104,7 @@ async def add_no_cache_headers(request: Request, call_next):
         response.headers["Expires"] = "0"
     return response
 
-# Database and Log Paths (Configurable dynamically via environment or run_dashboard.py)
+# Database, Log, and Config Paths (Configurable dynamically via environment or run_dashboard.py)
 def get_db_path() -> str:
     return os.environ.get("RID_DB_PATH", "rid_detections.db")
 
@@ -100,15 +117,15 @@ def get_timeout_s() -> float:
     return float(os.environ.get("RID_TIMEOUT_S", "300.0"))
 
 
-def get_scanner_config_path() -> str:
-    env_path = os.environ.get("RID_SCANNER_CONFIG_PATH")
+def get_dashboard_config_path() -> str:
+    env_path = os.environ.get("RID_DASHBOARD_CONFIG_PATH") or os.environ.get("RID_SCANNER_CONFIG_PATH")
     if env_path:
         return os.path.abspath(env_path)
-    return get_default_config_path()
+    return get_default_dashboard_config_path()
 
 
-def get_current_scanner_config() -> Dict[str, Any]:
-    return load_scanner_config(get_scanner_config_path())
+def get_current_dashboard_config() -> Dict[str, Any]:
+    return load_dashboard_config(get_dashboard_config_path())
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -122,10 +139,10 @@ def get_db_connection() -> sqlite3.Connection:
 # REST Endpoints: Statistics, Config & Encounters Feed
 # ============================================================================
 
-@app.get("/api/config/scanner")
-def get_scanner_config_endpoint():
-    """Returns the scanner station parameters, coordinates, and range rings from disk."""
-    return get_current_scanner_config()
+@app.get("/api/config/dashboard")
+def get_dashboard_config_endpoint():
+    """Returns the central dashboard viewport presentation parameters from disk."""
+    return get_current_dashboard_config()
 
 
 @app.get("/api/nodes")
@@ -139,56 +156,83 @@ def get_nodes_endpoint():
         conn.close()
 
 
-@app.post("/api/config/scanner")
-def update_scanner_config_endpoint(payload: Dict[str, Any]):
-    """Updates and persists scanner station parameters directly to the JSON file on disk."""
-    config_path = get_scanner_config_path()
-    current = load_scanner_config(config_path)
+@app.post("/api/nodes/{node_id}/position")
+@app.post("/api/nodes/{node_id}/location")
+def update_node_position_endpoint(node_id: str, payload: Dict[str, Any]):
+    """
+    Updates the physical coordinates of an unlocked sensor node in the database.
+    If the node is locked on disk via scanner_config.json ('locked': true), returns 403 Forbidden.
+    """
+    lat = payload.get("latitude", payload.get("lat"))
+    lon = payload.get("longitude", payload.get("lon"))
+    alt = payload.get("altitude_m", payload.get("alt_m"))
 
-    # Check if scanner configuration is locked in file on disk
-    if current.get("locked", False):
-        raise HTTPException(
-            status_code=403,
-            detail="Scanner node location is locked in configuration file on disk ('locked': true). Edit scanner_config.json directly on disk to change or unlock position."
+    if lat is None or lon is None:
+        raise HTTPException(status_code=400, detail="Missing required 'latitude' or 'longitude' in payload.")
+
+    conn = get_db_connection()
+    try:
+        updated = update_receiver_node_position(
+            conn,
+            node_id=node_id,
+            latitude=float(lat),
+            longitude=float(lon),
+            altitude_m=float(alt) if alt is not None else None,
         )
+        return {"status": "ok", "node": updated}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    finally:
+        conn.close()
 
-    if "latitude" in payload and payload["latitude"] is not None:
-        current["latitude"] = float(payload["latitude"])
+
+@app.post("/api/config/dashboard")
+def update_dashboard_config_endpoint(payload: Dict[str, Any]):
+    """Updates and persists central dashboard viewport parameters directly to dashboard_config.json on disk."""
+    config_path = get_dashboard_config_path()
+    current = load_dashboard_config(config_path)
+
+    update_dict: Dict[str, Any] = {}
+
+    if "center_latitude" in payload and payload["center_latitude"] is not None:
+        update_dict["center_latitude"] = float(payload["center_latitude"])
+    elif "latitude" in payload and payload["latitude"] is not None:
+        update_dict["center_latitude"] = float(payload["latitude"])
     elif "lat" in payload and payload["lat"] is not None:
-        current["latitude"] = float(payload["lat"])
+        update_dict["center_latitude"] = float(payload["lat"])
 
-    if "longitude" in payload and payload["longitude"] is not None:
-        current["longitude"] = float(payload["longitude"])
+    if "center_longitude" in payload and payload["center_longitude"] is not None:
+        update_dict["center_longitude"] = float(payload["center_longitude"])
+    elif "longitude" in payload and payload["longitude"] is not None:
+        update_dict["center_longitude"] = float(payload["longitude"])
     elif "lon" in payload and payload["lon"] is not None:
-        current["longitude"] = float(payload["lon"])
+        update_dict["center_longitude"] = float(payload["lon"])
 
-    if "altitude_m" in payload and payload["altitude_m"] is not None:
-        current["altitude_m"] = float(payload["altitude_m"])
-    elif "alt_m" in payload and payload["alt_m"] is not None:
-        current["altitude_m"] = float(payload["alt_m"])
+    if "default_zoom" in payload and payload["default_zoom"] is not None:
+        update_dict["default_zoom"] = int(payload["default_zoom"])
 
-    if "name" in payload and payload["name"]:
-        current["name"] = str(payload["name"])
-
-    if "range_rings_m" in payload and isinstance(payload["range_rings_m"], list):
-        current["range_rings_m"] = [float(r) for r in payload["range_rings_m"]]
+    if "title" in payload and payload["title"]:
+        update_dict["title"] = str(payload["title"])
 
     if "show_range_rings" in payload:
-        current["show_range_rings"] = bool(payload["show_range_rings"])
+        update_dict["show_range_rings"] = bool(payload["show_range_rings"])
 
-    if "enabled" in payload:
-        current["enabled"] = bool(payload["enabled"])
+    if "show_trails" in payload:
+        update_dict["show_trails"] = bool(payload["show_trails"])
 
-    if "locked" in payload:
-        current["locked"] = bool(payload["locked"])
+    if "show_waypoints" in payload:
+        update_dict["show_waypoints"] = bool(payload["show_waypoints"])
 
-    saved = save_scanner_config(current, config_path)
-    return {"status": "ok", "scanner": saved}
+    current.update(update_dict)
+    saved = save_dashboard_config(current, config_path)
+    return {"status": "ok", "dashboard": saved}
 
 
 @app.get("/api/stats")
 def get_stats():
-    """Returns global airspace metrics, scanner station parameters, and transport breakdowns."""
+    """Returns global airspace metrics, dashboard viewport parameters, and transport breakdowns."""
     timeout_s = get_timeout_s()
     conn = get_db_connection()
     reconcile_stale_encounters(conn, timeout_s)
@@ -214,7 +258,7 @@ def get_stats():
             if t in transports_map:
                 transports_map[t] += pkts
 
-    scanner_config = get_current_scanner_config()
+    dash_config = get_current_dashboard_config()
 
     return {
         "total_encounters": total_enc,
@@ -227,7 +271,8 @@ def get_stats():
         "first_seen_iso": min_time_iso,
         "last_seen_iso": max_time_iso,
         "transports_breakdown": transports_map,
-        "scanner": scanner_config,
+        "dashboard": dash_config,
+        "scanner": dash_config,
         "server_time_iso": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -239,6 +284,7 @@ def get_encounters(
     mac: Optional[str] = None,
     serial: Optional[str] = None,
     operator: Optional[str] = None,
+    node_id: Optional[str] = None,
     since: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
 ):
@@ -265,6 +311,9 @@ def get_encounters(
     if operator:
         query += " AND operator_id LIKE ?"
         params.append(f"%{operator}%")
+    if node_id:
+        query += " AND node_id LIKE ?"
+        params.append(f"%{node_id}%")
     if since:
         try:
             dt = datetime.fromisoformat(since).timestamp()
@@ -304,6 +353,7 @@ def get_encounters(
             "encounter_id": r["encounter_id"],
             "mac": r["mac"],
             "serial_number": r["serial_number"],
+            "node_id": r["node_id"] if "node_id" in r.keys() else None,
             "drone_make": d_make,
             "drone_model": d_model,
             "drone_info": drone_info,
@@ -455,7 +505,7 @@ def get_encounter(encounter_id: str):
         raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
 
     timeout_s = 300.0
-    cfg = load_scanner_config()
+    cfg = get_current_dashboard_config()
     if cfg and "encounter_timeout_s" in cfg:
         timeout_s = float(cfg["encounter_timeout_s"])
 
@@ -485,6 +535,7 @@ def get_encounter(encounter_id: str):
         "encounter_id": row["encounter_id"],
         "mac": row["mac"],
         "serial_number": row["serial_number"],
+        "node_id": row["node_id"] if "node_id" in row.keys() else None,
         "drone_make": d_make,
         "drone_model": d_model,
         "drone_info": drone_info,

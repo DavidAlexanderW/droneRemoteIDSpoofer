@@ -46,46 +46,35 @@ def parse_args():
         help="Inactivity timeout in seconds to consider an encounter closed",
     )
     parser.add_argument(
-        "--scanner-config",
+        "--dashboard-config",
+        "--config",
         type=str,
         default=None,
-        help="Path to JSON configuration file on disk for scanner station location and parameters (default: scanner/scanner_config.json)",
+        help="Path to JSON configuration file on disk for dashboard viewport parameters (default: scanner/dashboard/dashboard_config.json)",
     )
     parser.add_argument(
-        "--receiver-lat",
-        type=float,
-        default=None,
-        help="Override receiver station latitude (e.g. 47.3769)",
-    )
-    parser.add_argument(
-        "--receiver-lon",
-        type=float,
-        default=None,
-        help="Override receiver station longitude (e.g. 8.5417)",
-    )
-    parser.add_argument(
-        "--receiver-alt",
-        type=float,
-        default=None,
-        help="Override receiver station altitude MSL in meters (e.g. 450.0)",
-    )
-    parser.add_argument(
-        "--receiver-name",
+        "--title",
         type=str,
         default=None,
-        help="Override receiver sensor station name",
+        help="Override dashboard radar title",
     )
     parser.add_argument(
-        "--receiver-lock",
-        action="store_true",
+        "--center-lat",
+        type=float,
         default=None,
-        help="Lock receiver position on disk against modifications",
+        help="Override default map center latitude (e.g. 47.3769)",
     )
     parser.add_argument(
-        "--receiver-unlock",
-        action="store_true",
+        "--center-lon",
+        type=float,
         default=None,
-        help="Unlock receiver position on disk",
+        help="Override default map center longitude (e.g. 8.5417)",
+    )
+    parser.add_argument(
+        "--zoom",
+        type=int,
+        default=None,
+        help="Override default map zoom level (e.g. 13)",
     )
     parser.add_argument(
         "--reload",
@@ -104,50 +93,67 @@ def main():
         sys.path.insert(0, scanner_dir)
 
     try:
-        from scanner.scanner_config import load_scanner_config, save_scanner_config, get_default_config_path
+        from scanner.dashboard.dashboard_config import (
+            load_dashboard_config,
+            save_dashboard_config,
+            get_default_dashboard_config_path,
+        )
     except ImportError:
-        from scanner_config import load_scanner_config, save_scanner_config, get_default_config_path
+        try:
+            from dashboard.dashboard_config import (
+                load_dashboard_config,
+                save_dashboard_config,
+                get_default_dashboard_config_path,
+            )
+        except ImportError:
+            from dashboard_config import (
+                load_dashboard_config,
+                save_dashboard_config,
+                get_default_dashboard_config_path,
+            )
 
-    # Load and optionally override scanner configuration from disk
-    config_path = os.path.abspath(args.scanner_config) if args.scanner_config else get_default_config_path()
-    rx_config = load_scanner_config(config_path)
+    # Load and optionally override dashboard configuration from disk
+    chosen_cfg_path = args.dashboard_config
+    config_path = os.path.abspath(chosen_cfg_path) if chosen_cfg_path else get_default_dashboard_config_path()
+    dash_config = load_dashboard_config(config_path)
 
-    rx_updates = {}
-    if args.receiver_lat is not None:
-        rx_updates["latitude"] = args.receiver_lat
-    if args.receiver_lon is not None:
-        rx_updates["longitude"] = args.receiver_lon
-    if args.receiver_alt is not None:
-        rx_updates["altitude_m"] = args.receiver_alt
-    if args.receiver_name is not None:
-        rx_updates["name"] = args.receiver_name
-    if args.receiver_lock:
-        rx_updates["locked"] = True
-    elif args.receiver_unlock:
-        rx_updates["locked"] = False
+    updates = {}
+    if args.title is not None:
+        updates["title"] = args.title
+    if args.center_lat is not None:
+        updates["center_latitude"] = args.center_lat
+    if args.center_lon is not None:
+        updates["center_longitude"] = args.center_lon
+    if args.zoom is not None:
+        updates["default_zoom"] = args.zoom
 
-    if rx_updates:
-        rx_config.update(rx_updates)
-        save_scanner_config(rx_config, config_path)
+    if updates:
+        dash_config.update(updates)
+        save_dashboard_config(dash_config, config_path)
 
     # Pass configuration to FastAPI app via environment variables
     os.environ["RID_DB_PATH"] = os.path.abspath(args.db)
     os.environ["RID_JSONL_PATH"] = os.path.abspath(args.log_jsonl)
     os.environ["RID_TIMEOUT_S"] = str(args.timeout)
-    os.environ["RID_SCANNER_CONFIG_PATH"] = config_path
+    os.environ["RID_DASHBOARD_CONFIG_PATH"] = config_path
+
+    title = dash_config.get("title", "Tactical Drone Remote ID Radar")
+    c_lat = dash_config.get("center_latitude", 47.3769)
+    c_lon = dash_config.get("center_longitude", 8.5417)
+    zoom = dash_config.get("default_zoom", 13)
 
     print("=" * 72)
-    print("  TACTICAL DRONE REMOTE ID AIRSPACE MONITOR - WEB DASHBOARD")
+    print(f"  {title.upper()}")
     print("  ASTM F3411 / ASD-STAN Direct Broadcast Real-Time Radar")
     print("=" * 72)
-    print(f"  Database       : {os.path.abspath(args.db)}")
-    print(f"  JSONL Log      : {os.path.abspath(args.log_jsonl)}")
-    print(f"  Scanner Config : {config_path}")
-    print(f"  Scanner Node   : {rx_config['name']} ({rx_config['latitude']:.5f}°N, {rx_config['longitude']:.5f}°E, {rx_config['altitude_m']:.1f}m MSL)")
-    print(f"  Listening      : http://{args.host}:{args.port}")
+    print(f"  Database         : {os.path.abspath(args.db)}")
+    print(f"  JSONL Log        : {os.path.abspath(args.log_jsonl)}")
+    print(f"  Dashboard Config : {config_path}")
+    print(f"  Default Viewport : {c_lat:.5f}°N, {c_lon:.5f}°E (Zoom: {zoom})")
+    print(f"  Listening        : http://{args.host}:{args.port}")
     if args.host in ("0.0.0.0", "::"):
-        print(f"  Local URL      : http://localhost:{args.port}")
-        print(f"                   http://127.0.0.1:{args.port}")
+        print(f"  Local URL        : http://localhost:{args.port}")
+        print(f"                     http://127.0.0.1:{args.port}")
     print("=" * 72)
     print("Press Ctrl+C to terminate the dashboard server.")
     print()

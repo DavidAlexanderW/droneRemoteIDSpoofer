@@ -1,0 +1,10 @@
+{
+  "title": "Tactical Drone Remote ID Radar & Airspace Monitor",
+  "center_latitude": 47.3769,
+  "center_longitude": 8.5417,
+  "default_zoom": 13,
+  "show_range_rings": true,
+  "show_trails": true,
+  "show_waypoints": true,
+  "description": "Central Tactical Airspace Radar & Drone Remote ID Operations Viewport"
+}

@@ -10,7 +10,7 @@ export class TelemetryInspectorController {
   constructor(onOpenPacketModal) {
     this.onOpenPacketModal = onOpenPacketModal;
     this.currentEncounter = null;
-    this.receiverConfig = null;
+    this.nodesList = [];
     this.emptyView = document.querySelector('.inspector-empty-state');
     this.detailsView = document.getElementById('target-telemetry-view');
     this.statusBadge = document.getElementById('inspector-status-badge');
@@ -20,8 +20,8 @@ export class TelemetryInspectorController {
     this.initCopyHandlers();
   }
 
-  setReceiverConfig(config) {
-    this.receiverConfig = config;
+  setNodesList(nodes) {
+    this.nodesList = Array.isArray(nodes) ? nodes : [];
     if (this.currentEncounter) {
       const traj = this.currentEncounter.trajectory || [];
       const latestPt = traj.length > 0 ? traj[traj.length - 1] : null;
@@ -442,31 +442,36 @@ export class TelemetryInspectorController {
     document.getElementById('insp-heading-compass').textContent = compass;
     document.getElementById('insp-rssi').textContent = defaultRssi != null ? Math.round(defaultRssi) : '--';
 
-    // Calculate Slant Range and Bearing to Receiver
+    // Calculate Slant Range and Bearing strictly to the Receiving Sensor Node
     let rxRangeStr = '--';
     let rxUnitStr = 'm';
     let rxBearingStr = 'Bearing: --';
 
-    if (this.receiverConfig && this.receiverConfig.enabled && this.receiverConfig.latitude != null && pt && pt[0] != null && pt[1] != null) {
-      const rxLat = this.receiverConfig.latitude;
-      const rxLon = this.receiverConfig.longitude;
-      const rxAlt = this.receiverConfig.altitude_m || 0;
-      const droneAlt = pt[2] || 0;
+    if (pt && pt[0] != null && pt[1] != null && this.currentEncounter && this.currentEncounter.node_id && this.nodesList) {
+      const targetNode = this.nodesList.find(n => n.node_id === this.currentEncounter.node_id);
 
-      const groundDist = calculateHaversineDistanceM(rxLat, rxLon, pt[0], pt[1]);
-      const deltaAlt = droneAlt - rxAlt;
-      const slantRange = Math.sqrt(groundDist * groundDist + deltaAlt * deltaAlt);
-      const bearing = calculateBearingDeg(rxLat, rxLon, pt[0], pt[1]);
-      const compassDir = getBearingCompass(bearing);
+      if (targetNode && targetNode.latitude != null && targetNode.longitude != null) {
+        const rxLat = parseFloat(targetNode.latitude);
+        const rxLon = parseFloat(targetNode.longitude);
+        const rxAlt = parseFloat(targetNode.altitude_m || 0);
+        const droneAlt = pt[2] || 0;
 
-      if (slantRange >= 1000) {
-        rxRangeStr = (slantRange / 1000).toFixed(2);
-        rxUnitStr = 'km';
-      } else {
-        rxRangeStr = Math.round(slantRange);
-        rxUnitStr = 'm';
+        const groundDist = calculateHaversineDistanceM(rxLat, rxLon, pt[0], pt[1]);
+        const deltaAlt = droneAlt - rxAlt;
+        const slantRange = Math.sqrt(groundDist * groundDist + deltaAlt * deltaAlt);
+        const bearing = calculateBearingDeg(rxLat, rxLon, pt[0], pt[1]);
+        const compassDir = getBearingCompass(bearing);
+        const nodeLabel = targetNode.name || targetNode.node_id;
+
+        if (slantRange >= 1000) {
+          rxRangeStr = (slantRange / 1000).toFixed(2);
+          rxUnitStr = 'km';
+        } else {
+          rxRangeStr = Math.round(slantRange);
+          rxUnitStr = 'm';
+        }
+        rxBearingStr = `Bearing: ${Math.round(bearing)}° (${compassDir}) · ${nodeLabel}`;
       }
-      rxBearingStr = `Bearing: ${Math.round(bearing)}° (${compassDir})`;
     }
 
     const rxRangeEl = document.getElementById('insp-rx-range');

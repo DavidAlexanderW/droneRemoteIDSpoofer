@@ -23,16 +23,17 @@ export class DeepPacketInspectorController {
     this.drawerCloseBtn = document.getElementById('btn-close-drawer');
 
     this.currentEncounterId = null;
+    this.currentEncounterNodeId = null;
     this.packets = [];
     this.filterText = '';
     this.selectedPacket = null;
-    this.receiverConfig = null;
+    this.nodesList = [];
 
     this.initListeners();
   }
 
-  setReceiverConfig(config) {
-    this.receiverConfig = config;
+  setNodesList(nodes) {
+    this.nodesList = Array.isArray(nodes) ? nodes : [];
   }
 
   initListeners() {
@@ -67,8 +68,9 @@ export class DeepPacketInspectorController {
     }
   }
 
-  async open(encounterId) {
+  async open(encounterId, nodeId = null) {
     this.currentEncounterId = encounterId;
+    this.currentEncounterNodeId = nodeId;
     this.titleEl.textContent = `ENCOUNTER: ${encounterId}`;
     this.modal.style.display = 'flex';
     this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">Loading captured Remote ID packets...</td></tr>`;
@@ -148,10 +150,14 @@ export class DeepPacketInspectorController {
         } else if (type.includes('Location') || msg.msg_type === 1) {
           if (msg.lat != null && msg.lon != null) {
             let rxTag = '';
-            if (this.receiverConfig && this.receiverConfig.enabled && this.receiverConfig.latitude != null) {
-              const dM = calculateHaversineDistanceM(this.receiverConfig.latitude, this.receiverConfig.longitude, msg.lat, msg.lon);
-              const dStr = dM >= 1000 ? `${(dM / 1000).toFixed(2)}km` : `${Math.round(dM)}m`;
-              rxTag = ` • Rx:${dStr}`;
+            const receivingNodeId = pkt.node_id || this.currentEncounterNodeId;
+            if (receivingNodeId && this.nodesList) {
+              const rxNode = this.nodesList.find(n => n.node_id === receivingNodeId);
+              if (rxNode && rxNode.latitude != null && rxNode.longitude != null) {
+                const dM = calculateHaversineDistanceM(parseFloat(rxNode.latitude), parseFloat(rxNode.longitude), msg.lat, msg.lon);
+                const dStr = dM >= 1000 ? `${(dM / 1000).toFixed(2)}km` : `${Math.round(dM)}m`;
+                rxTag = ` • Rx:${dStr}`;
+              }
             }
             let altTag = '';
             if (msg.geodetic_altitude_m != null) {

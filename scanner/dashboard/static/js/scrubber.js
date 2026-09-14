@@ -28,16 +28,21 @@ export class TimelineScrubberController {
     this.playbackInterval = null;
     this.speedMultipliers = [1, 2, 5, 10];
     this.speedIndex = 0;
-    this.receiverConfig = null;
+    this.nodesList = [];
+    this.encounterNodeId = null;
 
     this.initControls();
   }
 
-  setReceiverConfig(config) {
-    this.receiverConfig = config;
+  setNodesList(nodes) {
+    this.nodesList = Array.isArray(nodes) ? nodes : [];
     if (this.trajectory && this.trajectory.length > 0) {
       this.updateRxDist(this.trajectory[this.currentIndex]);
     }
+  }
+
+  setEncounterNodeId(nodeId) {
+    this.encounterNodeId = nodeId;
   }
 
   initControls() {
@@ -142,17 +147,27 @@ export class TimelineScrubberController {
 
   updateRxDist(pt) {
     if (!this.pointRxEl) return;
-    if (!pt || !this.receiverConfig || !this.receiverConfig.enabled || this.receiverConfig.latitude == null) {
+    if (!pt || !this.encounterNodeId || !this.nodesList || this.nodesList.length === 0) {
       this.pointRxEl.textContent = '--';
       return;
     }
 
-    const groundM = calculateHaversineDistanceM(this.receiverConfig.latitude, this.receiverConfig.longitude, pt[0], pt[1]);
-    const brg = calculateBearingDeg(this.receiverConfig.latitude, this.receiverConfig.longitude, pt[0], pt[1]);
+    const rxNode = this.nodesList.find(n => n.node_id === this.encounterNodeId);
+    if (!rxNode || rxNode.latitude == null || rxNode.longitude == null) {
+      this.pointRxEl.textContent = '--';
+      return;
+    }
+
+    const rxLat = parseFloat(rxNode.latitude);
+    const rxLon = parseFloat(rxNode.longitude);
+    const rxAlt = parseFloat(rxNode.altitude_m || 0);
+
+    const groundM = calculateHaversineDistanceM(rxLat, rxLon, pt[0], pt[1]);
+    const brg = calculateBearingDeg(rxLat, rxLon, pt[0], pt[1]);
     
     let slantM = groundM;
-    if (pt[2] != null && this.receiverConfig.altitude_m != null) {
-      const dAlt = pt[2] - this.receiverConfig.altitude_m;
+    if (pt[2] != null) {
+      const dAlt = pt[2] - rxAlt;
       slantM = Math.sqrt(groundM ** 2 + dAlt ** 2);
     }
 

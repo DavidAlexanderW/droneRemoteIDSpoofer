@@ -34,17 +34,17 @@ export function getBearingCompass(deg) {
 }
 
 export class TacticalMapController {
-  constructor(containerId, onSelectEncounter, onSelectWaypoint, onUpdateReceiverLocation, onOpenReceiverConfig) {
+  constructor(containerId, onSelectEncounter, onSelectWaypoint, onUpdateNodePosition) {
     this.containerId = containerId;
     this.onSelectEncounter = onSelectEncounter;
     this.onSelectWaypoint = onSelectWaypoint;
-    this.onUpdateReceiverLocation = onUpdateReceiverLocation;
-    this.onOpenReceiverConfig = onOpenReceiverConfig;
+    this.onUpdateNodePosition = onUpdateNodePosition;
     
     this.map = null;
     this.allEncounters = [];
     this.selectedEncounterId = null;
-    this.receiverConfig = null;
+    this.dashboardConfig = null;
+    this.nodesList = [];
 
     // Layer storage
     this.trackLayers = new Map();     // encounter_id -> Leaflet Polyline
@@ -59,34 +59,34 @@ export class TacticalMapController {
     this.activeFixPoint = null;
     this.isFixPopupOpen = false;
 
-    // Receiver layers
-    this.receiverMarker = null;
-    this.rangeRingLayers = L.layerGroup();
-    this.receiverVectorLine = null;
+    // Multi-node receiver layers
     this.multiNodeMarkers = new Map();      // node_id -> Leaflet Marker
     this.multiNodeRingLayers = new Map();   // node_id -> Leaflet LayerGroup
 
     this.showTrails = true;
     this.showWaypoints = true;
     this.showRangeRings = true;
-    this.pickLocationMode = false;
 
     this.initMap();
   }
 
+  setDashboardConfig(config) {
+    if (!config) return;
+    this.dashboardConfig = config;
+    this.showRangeRings = config.show_range_rings !== false;
+    this.showTrails = config.show_trails !== false;
+    this.showWaypoints = config.show_waypoints !== false;
+  }
+
   setNodesList(nodes) {
     if (!Array.isArray(nodes) || !this.map) return;
+    this.nodesList = nodes;
     const activeNodeIds = new Set();
 
     nodes.forEach(node => {
       const nodeId = node.node_id;
       if (!nodeId) return;
       activeNodeIds.add(nodeId);
-
-      // If this node matches the local single-receiver config, skip to avoid double rendering
-      if (this.receiverConfig && this.receiverConfig.node_id === nodeId) {
-        return;
-      }
 
       const lat = parseFloat(node.latitude);
       const lon = parseFloat(node.longitude);
@@ -96,22 +96,32 @@ export class TacticalMapController {
       const status = node.status || 'ONLINE';
       const statusColor = status === 'ONLINE' ? '#10b981' : (status === 'DEGRADED' ? '#f59e0b' : '#ef4444');
       const isOnline = status === 'ONLINE';
+      const isLocked = Boolean(node.locked);
 
-      // 1. Create or update Node Marker
-      if (!this.multiNodeMarkers.has(nodeId)) {
-        const icon = L.divIcon({
+      const createNodeIcon = () => {
+        const lockBadge = isLocked ? `
+          <div style="position: absolute; top: -3px; right: -3px; background: #ef4444; border: 1.5px solid #ffffff; border-radius: 50%; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; font-size: 8px; box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);">
+            🔒
+          </div>
+        ` : `
+          <div style="position: absolute; top: -3px; right: -3px; background: #10b981; border: 1.5px solid #ffffff; border-radius: 50%; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; font-size: 8px; box-shadow: 0 0 6px rgba(16, 185, 129, 0.8);">
+            🔓
+          </div>
+        `;
+
+        return L.divIcon({
           html: `
             <div class="receiver-marker-container" style="position: relative; display: flex; flex-direction: column; align-items: center;">
-              <div class="receiver-marker-icon" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; position: relative;">
-                <svg viewBox="0 0 36 36" width="32" height="32" fill="none">
-                  <circle cx="18" cy="18" r="16" stroke="${statusColor}" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.8" />
+              <div class="receiver-marker-icon" style="width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; position: relative;">
+                <svg viewBox="0 0 36 36" width="34" height="34" fill="none">
+                  <circle cx="18" cy="18" r="16" stroke="${statusColor}" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.8" class="rx-pulse-ring" />
                   <circle cx="18" cy="18" r="7" fill="${statusColor}" stroke="#ffffff" stroke-width="1.5" />
                   <line x1="18" y1="4" x2="18" y2="18" stroke="#ffffff" stroke-width="2" stroke-linecap="round" />
                   <polygon points="18,3 15,9 21,9" fill="#ffffff" />
                 </svg>
-                <div style="position: absolute; bottom: 0; right: 0; width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}; border: 1px solid #ffffff;"></div>
+                ${lockBadge}
               </div>
-              <div class="receiver-marker-label" style="font-size: 10px; font-weight: 700; color: #cbd5e1; background: rgba(8, 12, 22, 0.85); padding: 1px 4px; border-radius: 3px; margin-top: 1px; border: 1px solid ${statusColor}44;">
+              <div class="receiver-marker-label" style="font-size: 10px; font-weight: 700; color: #cbd5e1; background: rgba(8, 12, 22, 0.85); padding: 1px 5px; border-radius: 3px; margin-top: 1px; border: 1px solid ${statusColor}44;">
                 ${name}
               </div>
             </div>
@@ -121,28 +131,60 @@ export class TacticalMapController {
           iconAnchor: [18, 16],
           popupAnchor: [0, -16],
         });
+      };
 
-        const marker = L.marker([lat, lon], { icon, zIndexOffset: 2500 }).addTo(this.map);
-        marker.bindPopup(`
-          <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px; color: #080c16; line-height: 1.5; min-width: 210px;">
-            <div style="font-weight: 800; color: #0284c7; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
-              <span>📡 ${name}</span>
-              <span style="font-size: 9px; font-weight: 800; color: #fff; background: ${statusColor}; padding: 1px 4px; border-radius: 3px;">${status}</span>
-            </div>
-            <b>Node ID:</b> ${nodeId}<br/>
-            <b>Position:</b> (${lat.toFixed(5)}°, ${lon.toFixed(5)}°)<br/>
-            <b>Altitude:</b> ${parseFloat(node.altitude_m || 0).toFixed(1)}m MSL<br/>
-            <b>Total Packets:</b> ${node.packets_received_total || 0}<br/>
-            <b>Last Heartbeat:</b> ${node.last_heartbeat_iso ? node.last_heartbeat_iso.replace('T', ' ').replace('Z', '') : 'N/A'}
+      const popupHtml = `
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px; color: #080c16; line-height: 1.5; min-width: 220px;">
+          <div style="font-weight: 800; color: #0284c7; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+            <span>📡 ${name}</span>
+            <span style="font-size: 9px; font-weight: 800; color: #fff; background: ${statusColor}; padding: 1px 5px; border-radius: 3px;">${status}</span>
           </div>
-        `);
+          <b>Node ID:</b> ${nodeId}<br/>
+          <b>Coordinates:</b> ${lat.toFixed(6)}° N, ${lon.toFixed(6)}° E<br/>
+          <b>Altitude:</b> ${parseFloat(node.altitude_m || 0).toFixed(1)}m MSL<br/>
+          <b>Packets Received:</b> ${(node.packets_received_total || 0).toLocaleString()}<br/>
+          <b>Disk Lock:</b> ${isLocked ? '<span style="color: #ef4444; font-weight: 700;">🔒 Locked (scanner_config.json)</span>' : '<span style="color: #10b981; font-weight: 700;">🔓 Unlocked (Draggable)</span>'}<br/>
+          <div style="margin-top: 6px; padding-top: 4px; border-top: 1px solid #e2e8f0; font-size: 9.5px; color: ${isLocked ? '#ef4444' : '#059669'};">
+            ${isLocked ? 'Position write-protected on scanner disk. Set "locked": false in scanner_config.json to reposition.' : '👉 Drag icon on map to calibrate position.'}
+          </div>
+        </div>
+      `;
+
+      // 1. Create or update Node Marker
+      if (!this.multiNodeMarkers.has(nodeId)) {
+        const marker = L.marker([lat, lon], {
+          icon: createNodeIcon(),
+          draggable: !isLocked,
+          zIndexOffset: 2500,
+        }).addTo(this.map);
+
+        marker.bindPopup(popupHtml);
+
+        marker.on('dragend', (e) => {
+          if (node.locked) return;
+          const newPos = e.target.getLatLng();
+          const newLat = parseFloat(newPos.lat.toFixed(6));
+          const newLon = parseFloat(newPos.lng.toFixed(6));
+          node.latitude = newLat;
+          node.longitude = newLon;
+          if (this.onUpdateNodePosition) {
+            this.onUpdateNodePosition(nodeId, newLat, newLon);
+          }
+        });
+
         this.multiNodeMarkers.set(nodeId, marker);
       } else {
         const marker = this.multiNodeMarkers.get(nodeId);
         marker.setLatLng([lat, lon]);
+        marker.setIcon(createNodeIcon());
+        marker.bindPopup(popupHtml);
+        if (marker.dragging) {
+          if (isLocked) marker.dragging.disable();
+          else marker.dragging.enable();
+        }
       }
 
-      // 2. Render Range Rings for this node if enabled
+      // 2. Render Range Rings for this node
       let ringGroup = this.multiNodeRingLayers.get(nodeId);
       if (!ringGroup) {
         ringGroup = L.layerGroup();
@@ -161,9 +203,9 @@ export class TacticalMapController {
           L.circle([lat, lon], {
             radius: r,
             color: '#0284c7',
-            weight: 1,
+            weight: 1.2,
             dashArray: '4, 4',
-            opacity: 0.35,
+            opacity: 0.45,
             fillColor: '#0284c7',
             fillOpacity: 0.02,
             interactive: false,
@@ -203,7 +245,7 @@ export class TacticalMapController {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(this.map);
 
-    // Track mouse coordinates for HUD overlay & handle Map Pick mode
+    // Track mouse coordinates for HUD overlay
     const coordEl = document.getElementById('map-cursor-coords');
     this.map.on('mousemove', (e) => {
       if (coordEl) {
@@ -212,246 +254,36 @@ export class TacticalMapController {
         coordEl.textContent = `${lat}° N, ${lon}° E`;
       }
     });
-
-    this.map.on('click', (e) => {
-      if (this.pickLocationMode) {
-        this.pickLocationMode = false;
-        document.body.classList.remove('map-picking-cursor');
-        if (this.onUpdateReceiverLocation) {
-          const updated = Object.assign({}, this.receiverConfig || {}, {
-            latitude: parseFloat(e.latlng.lat.toFixed(6)),
-            longitude: parseFloat(e.latlng.lng.toFixed(6)),
-          });
-          this.setReceiverConfig(updated);
-          this.onUpdateReceiverLocation(updated);
-        }
-      }
-    });
-  }
-
-  enableMapPickMode() {
-    if (this.receiverConfig && this.receiverConfig.locked) {
-      alert("Scanner node location is locked in scanner_config.json on disk. Edit the config file on disk ('locked': false) to enable repositioning.");
-      return;
-    }
-    this.pickLocationMode = true;
-    document.body.classList.add('map-picking-cursor');
-    const coordEl = document.getElementById('map-cursor-coords');
-    if (coordEl) {
-      coordEl.textContent = '👉 CLICK ANYWHERE ON MAP TO SET RECEIVER LOCATION';
-    }
-  }
-
-  /**
-   * Configures and renders the receiver sensor station
-   */
-  setReceiverConfig(config) {
-    if (!config) return;
-    this.receiverConfig = Object.assign({}, this.receiverConfig || {}, config);
-    this.showRangeRings = this.receiverConfig.show_range_rings !== false;
-    this.renderReceiverStation();
-  }
-
-  createReceiverIcon(name = 'Sensor Station', isLocked = false) {
-    const lockBadge = isLocked ? `
-      <div style="position: absolute; top: -3px; right: -3px; background: #ef4444; border: 1.5px solid #ffffff; border-radius: 50%; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; font-size: 8px; box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);">
-        🔒
-      </div>
-    ` : '';
-
-    const labelText = isLocked ? `🔒 ${name}` : name;
-
-    const svgIcon = `
-      <div class="receiver-marker-container" style="position: relative; display: flex; flex-direction: column; align-items: center;">
-        <div class="receiver-marker-icon" style="width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; position: relative;">
-          <svg viewBox="0 0 36 36" width="34" height="34" fill="none">
-            <!-- Outer beacon wave -->
-            <circle cx="18" cy="18" r="16" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.8" class="rx-pulse-ring" />
-            <!-- Inner radar base -->
-            <circle cx="18" cy="18" r="7" fill="#f59e0b" stroke="#ffffff" stroke-width="1.5" />
-            <!-- Antenna tower mast -->
-            <line x1="18" y1="4" x2="18" y2="18" stroke="#ffffff" stroke-width="2" stroke-linecap="round" />
-            <polygon points="18,3 15,9 21,9" fill="#ffffff" />
-            <!-- Dish curves -->
-            <path d="M12 11 A 8 8 0 0 1 24 11" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-          </svg>
-          ${lockBadge}
-        </div>
-        <div class="receiver-marker-label" style="margin-top: -2px;">${labelText}</div>
-      </div>
-    `;
-
-    return L.divIcon({
-      html: svgIcon,
-      className: 'custom-receiver-icon',
-      iconSize: [36, 46],
-      iconAnchor: [18, 18],
-      popupAnchor: [0, -18],
-    });
-  }
-
-  renderReceiverStation() {
-    if (!this.receiverConfig || !this.receiverConfig.enabled) {
-      if (this.receiverMarker) {
-        this.map.removeLayer(this.receiverMarker);
-        this.receiverMarker = null;
-      }
-      this.rangeRingLayers.clearLayers();
-      if (this.receiverVectorLine) {
-        this.map.removeLayer(this.receiverVectorLine);
-        this.receiverVectorLine = null;
-      }
-      return;
-    }
-
-    const isLocked = Boolean(this.receiverConfig && this.receiverConfig.locked);
-    const lat = this.receiverConfig.latitude;
-    const lon = this.receiverConfig.longitude;
-    if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) return;
-
-    const latlng = [lat, lon];
-    const name = this.receiverConfig.name || 'Tactical Sensor Station';
-    const alt = this.receiverConfig.altitude_m != null ? `${this.receiverConfig.altitude_m.toFixed(1)}m MSL` : 'N/A';
-
-    // 1. Update or create receiver marker
-    if (!this.receiverMarker) {
-      this.receiverMarker = L.marker(latlng, {
-        icon: this.createReceiverIcon(name, isLocked),
-        draggable: !isLocked,
-        zIndexOffset: 3000,
-      }).addTo(this.map);
-
-      this.receiverMarker.on('dragend', (e) => {
-        if (this.receiverConfig && this.receiverConfig.locked) return;
-        const newPos = e.target.getLatLng();
-        this.receiverConfig.latitude = parseFloat(newPos.lat.toFixed(6));
-        this.receiverConfig.longitude = parseFloat(newPos.lng.toFixed(6));
-        this.renderRangeRings();
-        this.renderReceiverVector();
-        if (this.onUpdateReceiverLocation) {
-          this.onUpdateReceiverLocation(this.receiverConfig);
-        }
-      });
-    } else {
-      this.receiverMarker.setLatLng(latlng);
-      this.receiverMarker.setIcon(this.createReceiverIcon(name, isLocked));
-      if (this.receiverMarker.dragging) {
-        if (isLocked) {
-          this.receiverMarker.dragging.disable();
-        } else {
-          this.receiverMarker.dragging.enable();
-        }
-      }
-    }
-
-    const lockStatusHtml = isLocked
-      ? `<span style="font-size: 10px; color: #f87171; font-weight: 700; background: rgba(239, 68, 68, 0.15); padding: 2px 6px; border-radius: 3px; border: 1px solid rgba(239, 68, 68, 0.3);">🔒 Locked via scanner_config.json</span>`
-      : `<span style="font-size: 10px; color: #64748b;">Drag to reposition</span>`;
-
-    this.receiverMarker.bindPopup(`
-      <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px; color: #080c16; line-height: 1.5; min-width: 210px;">
-        <div style="font-weight: 800; color: #d97706; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; gap: 4px;">
-          <span>📡 ${name}</span>
-          ${isLocked ? '<span style="font-size: 9px; background: #ef4444; color: #fff; padding: 1px 4px; border-radius: 3px;">LOCKED</span>' : ''}
-        </div>
-        <b>Role:</b> Drone Remote ID Receiver Station<br/>
-        <b>Latitude:</b> ${lat.toFixed(6)}° N<br/>
-        <b>Longitude:</b> ${lon.toFixed(6)}° E<br/>
-        <b>Altitude:</b> ${alt}<br/>
-        <b>Position Lock:</b> ${isLocked ? '<span style="color: #dc2626; font-weight: 700;">Locked (On Disk)</span>' : '<span style="color: #16a34a; font-weight: 700;">Unlocked</span>'}<br/>
-        <div style="margin-top: 8px; padding-top: 6px; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
-          ${lockStatusHtml}
-          <button id="popup-btn-edit-rx" style="background: #f59e0b; color: #ffffff; border: none; border-radius: 3px; font-size: 10px; font-weight: 700; padding: 2px 6px; cursor: pointer;">Config</button>
-        </div>
-      </div>
-    `);
-
-    this.receiverMarker.on('popupopen', () => {
-      const btn = document.getElementById('popup-btn-edit-rx');
-      if (btn && this.onOpenReceiverConfig) {
-        btn.onclick = () => this.onOpenReceiverConfig();
-      }
-    });
-
-    // 2. Render range rings
-    this.renderRangeRings();
-
-    // 3. Update receiver vector if target selected
-    this.renderReceiverVector();
-  }
-
-  renderRangeRings() {
-    this.rangeRingLayers.clearLayers();
-    if (!this.showRangeRings || !this.receiverConfig || !this.receiverConfig.enabled) return;
-
-    const lat = this.receiverConfig.latitude;
-    const lon = this.receiverConfig.longitude;
-    if (lat == null || lon == null) return;
-
-    const rxName = this.receiverConfig.name || 'Receiver Station';
-    const rings = this.receiverConfig.range_rings_m || [500, 1000, 2500, 5000];
-
-    rings.forEach((radiusM, idx) => {
-      const radiusKm = radiusM >= 1000 ? `${(radiusM / 1000).toFixed(1)} km` : `${radiusM} m`;
-      
-      // 1. Circle Polygon (non-interactive visual radar overlay)
-      const ring = L.circle([lat, lon], {
-        radius: radiusM,
-        color: '#f59e0b',
-        weight: 1.3,
-        opacity: 0.55,
-        fill: true,
-        fillColor: '#f59e0b',
-        fillOpacity: 0.018 * (4 - Math.min(3, idx)),
-        dashArray: '5, 6',
-        interactive: false,
-      });
-
-      this.rangeRingLayers.addLayer(ring);
-
-      // 2. Clear Cardinal Distance Label on North Perimeter of Circle
-      const labelLat = lat + (radiusM / 111320.0);
-      const labelMarker = L.marker([labelLat, lon], {
-        icon: L.divIcon({
-          html: `<div class="range-ring-pill font-mono">⭕ ${radiusKm}</div>`,
-          className: 'custom-ring-label-wrapper',
-          iconSize: [64, 20],
-          iconAnchor: [32, 10],
-        }),
-        interactive: false,
-        zIndexOffset: 600,
-      });
-
-      this.rangeRingLayers.addLayer(labelMarker);
-    });
-
-    if (!this.map.hasLayer(this.rangeRingLayers)) {
-      this.rangeRingLayers.addTo(this.map);
-    }
   }
 
   toggleRangeRings(show) {
     this.showRangeRings = show;
-    if (show) {
-      this.renderRangeRings();
-    } else {
-      this.rangeRingLayers.clearLayers();
-    }
+    this.multiNodeRingLayers.forEach(layer => {
+      if (show) layer.addTo(this.map);
+      else this.map.removeLayer(layer);
+    });
   }
 
-  centerOnReceiver() {
-    if (!this.receiverConfig || this.receiverConfig.latitude == null) return;
-    this.map.flyTo([this.receiverConfig.latitude, this.receiverConfig.longitude], 16, {
-      animate: true,
-      duration: 0.8,
-    });
-    if (this.receiverMarker) {
-      setTimeout(() => this.receiverMarker.openPopup(), 400);
+  centerOnNodes() {
+    if (this.nodesList && this.nodesList.length > 0) {
+      const bounds = L.latLngBounds([]);
+      this.nodesList.forEach(n => {
+        const lat = parseFloat(n.latitude);
+        const lon = parseFloat(n.longitude);
+        if (!isNaN(lat) && !isNaN(lon)) bounds.extend([lat, lon]);
+      });
+      if (bounds.isValid()) {
+        this.map.fitBounds(bounds, { padding: [60, 60], maxZoom: 14 });
+        return;
+      }
+    }
+    if (this.dashboardConfig && this.dashboardConfig.center_latitude != null) {
+      this.map.flyTo([this.dashboardConfig.center_latitude, this.dashboardConfig.center_longitude], this.dashboardConfig.default_zoom || 13);
     }
   }
 
   /**
-   * Draws a dashed vector line between receiver and currently selected target aircraft
+   * Draws a dashed vector line between the receiving sensor node and currently selected target aircraft
    */
   renderReceiverVector(targetLatLng = null) {
     if (this.receiverVectorLine) {
@@ -459,43 +291,46 @@ export class TacticalMapController {
       this.receiverVectorLine = null;
     }
 
-    if (!this.receiverConfig || !this.receiverConfig.enabled) return;
-    const rxLat = this.receiverConfig.latitude;
-    const rxLon = this.receiverConfig.longitude;
-    if (rxLat == null || rxLon == null) return;
+    if (!this.selectedEncounterId) return;
+    const enc = this.allEncounters.find(e => e.encounter_id === this.selectedEncounterId);
+    if (!enc || !enc.node_id || !this.nodesList) return;
+
+    const rxNode = this.nodesList.find(n => n.node_id === enc.node_id);
+    if (!rxNode || rxNode.latitude == null || rxNode.longitude == null) return;
 
     let target = targetLatLng;
-    if (!target && this.selectedEncounterId) {
-      const enc = this.allEncounters.find(e => e.encounter_id === this.selectedEncounterId);
-      if (enc) {
-        if (enc.trajectory && enc.trajectory.length > 0) {
-          const last = enc.trajectory[enc.trajectory.length - 1];
-          target = [last[0], last[1]];
-        } else if (enc.latest_position) {
-          target = [enc.latest_position.lat, enc.latest_position.lon];
-        }
+    if (!target) {
+      if (enc.trajectory && enc.trajectory.length > 0) {
+        const last = enc.trajectory[enc.trajectory.length - 1];
+        target = [last[0], last[1]];
+      } else if (enc.latest_position) {
+        target = [enc.latest_position.lat, enc.latest_position.lon];
       }
     }
 
-    if (target && target.length >= 2 && !isNaN(target[0]) && !isNaN(target[1])) {
-      const distM = calculateHaversineDistanceM(rxLat, rxLon, target[0], target[1]);
-      const bearing = calculateBearingDeg(rxLat, rxLon, target[0], target[1]);
-      const distStr = distM >= 1000 ? `${(distM / 1000).toFixed(2)} km` : `${Math.round(distM)} m`;
-      const compass = getBearingCompass(bearing);
+    if (!target || target.length < 2 || isNaN(target[0]) || isNaN(target[1])) return;
 
-      this.receiverVectorLine = L.polyline([[rxLat, rxLon], target], {
-        color: '#f59e0b',
-        weight: 1.5,
-        dashArray: '3, 5',
-        opacity: 0.65,
-        className: 'rx-vector-line',
-      }).bindTooltip(`Range: ${distStr} · ${Math.round(bearing)}° ${compass}`, {
-        sticky: true,
-        className: 'custom-range-tooltip',
-      });
+    const rxLat = parseFloat(rxNode.latitude);
+    const rxLon = parseFloat(rxNode.longitude);
+    const nodeName = rxNode.name || rxNode.node_id;
 
-      this.receiverVectorLine.addTo(this.map);
-    }
+    const distM = calculateHaversineDistanceM(rxLat, rxLon, target[0], target[1]);
+    const bearing = calculateBearingDeg(rxLat, rxLon, target[0], target[1]);
+    const distStr = distM >= 1000 ? `${(distM / 1000).toFixed(2)} km` : `${Math.round(distM)} m`;
+    const compass = getBearingCompass(bearing);
+
+    this.receiverVectorLine = L.polyline([[rxLat, rxLon], target], {
+      color: '#0284c7',
+      weight: 1.5,
+      dashArray: '3, 5',
+      opacity: 0.75,
+      className: 'rx-vector-line',
+    }).bindTooltip(`📡 ${nodeName} → Target: ${distStr} · ${Math.round(bearing)}° ${compass}`, {
+      sticky: true,
+      className: 'custom-range-tooltip',
+    });
+
+    this.receiverVectorLine.addTo(this.map);
   }
 
   /**
@@ -835,18 +670,25 @@ export class TacticalMapController {
         const pressAltStr = pressAlt ? `<br/><b>Pressure Alt:</b> ${pressAlt}` : '';
         const vertSpdStr = vertSpd ? `<br/><b>Vertical Speed:</b> ${vertSpd}` : '';
 
-        // Calculate distance from receiver if receiver configured
+        // Calculate distance from receiving sensor node if registered
         let rxPopupHtml = '';
         let rxTooltipText = '';
-        if (this.receiverConfig && this.receiverConfig.enabled && this.receiverConfig.latitude != null) {
-          const groundDistM = calculateHaversineDistanceM(this.receiverConfig.latitude, this.receiverConfig.longitude, pt[0], pt[1]);
-          const brg = calculateBearingDeg(this.receiverConfig.latitude, this.receiverConfig.longitude, pt[0], pt[1]);
+        let rxNode = null;
+        if (encounter.node_id && this.nodesList) {
+          rxNode = this.nodesList.find(n => n.node_id === encounter.node_id);
+        }
+        if (rxNode && rxNode.latitude != null && rxNode.longitude != null) {
+          const rxLat = parseFloat(rxNode.latitude);
+          const rxLon = parseFloat(rxNode.longitude);
+          const rxAlt = parseFloat(rxNode.altitude_m || 0);
+          const groundDistM = calculateHaversineDistanceM(rxLat, rxLon, pt[0], pt[1]);
+          const brg = calculateBearingDeg(rxLat, rxLon, pt[0], pt[1]);
           const compass = getBearingCompass(brg);
           
           let slantRangeM = groundDistM;
           let deltaAltStr = '';
-          if (pt[2] != null && this.receiverConfig.altitude_m != null) {
-            const dAlt = pt[2] - this.receiverConfig.altitude_m;
+          if (pt[2] != null) {
+            const dAlt = pt[2] - rxAlt;
             slantRangeM = Math.sqrt(groundDistM ** 2 + dAlt ** 2);
             deltaAltStr = ` (Δh: ${dAlt >= 0 ? '+' : ''}${Math.round(dAlt)}m)`;
           }
@@ -855,12 +697,12 @@ export class TacticalMapController {
           const groundStr = groundDistM >= 1000 ? `${(groundDistM / 1000).toFixed(2)} km` : `${Math.round(groundDistM)} m`;
 
           rxPopupHtml = `
-            <div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 4px; padding: 4px 6px; margin: 4px 0;">
-              <div style="font-weight: 700; color: #d97706; display: flex; justify-content: space-between;">
-                <span>📡 Receiver Distance:</span>
-                <span style="color: #b45309; font-size: 10px;">${Math.round(brg)}° ${compass}</span>
+            <div style="background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(2, 132, 199, 0.35); border-radius: 4px; padding: 4px 6px; margin: 4px 0;">
+              <div style="font-weight: 700; color: #0284c7; display: flex; justify-content: space-between;">
+                <span>📡 Sensor (${rxNode.name || rxNode.node_id}):</span>
+                <span style="color: #0369a1; font-size: 10px;">${Math.round(brg)}° ${compass}</span>
               </div>
-              <b>Slant Range:</b> <span style="color: #d97706; font-weight: 700;">${slantStr}</span>${deltaAltStr}<br/>
+              <b>Slant Range:</b> <span style="color: #0284c7; font-weight: 700;">${slantStr}</span>${deltaAltStr}<br/>
               <b>Ground Dist:</b> ${groundStr}
             </div>
           `;
@@ -1102,10 +944,16 @@ export class TacticalMapController {
     const bounds = L.latLngBounds([]);
     let count = 0;
 
-    // Include receiver location in bounds if present
-    if (this.receiverConfig && this.receiverConfig.enabled && this.receiverConfig.latitude != null) {
-      bounds.extend([this.receiverConfig.latitude, this.receiverConfig.longitude]);
-      count++;
+    // Include registered sensor nodes in bounds if present
+    if (this.nodesList && this.nodesList.length > 0) {
+      this.nodesList.forEach(node => {
+        const lat = parseFloat(node.latitude);
+        const lon = parseFloat(node.longitude);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          bounds.extend([lat, lon]);
+          count++;
+        }
+      });
     }
 
     if (this.selectedEncounterId) {
