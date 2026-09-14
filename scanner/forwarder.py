@@ -283,11 +283,8 @@ class CentralStreamForwarder:
                 if os.path.isfile(p) and p not in candidate_files:
                     candidate_files.append(p)
 
-        if not candidate_files:
-            return
-
-        if not self.quiet:
-            logger.info(f"[*] Catch-up sync found {len(candidate_files)} file(s) to inspect/synchronize.")
+        if candidate_files:
+            logger.info(f"[*] Catch-up sync found {len(candidate_files)} file(s) to inspect/synchronize: {[os.path.basename(p) for p in candidate_files]}")
 
         for file_path in candidate_files:
             if not self.running:
@@ -314,12 +311,36 @@ class CentralStreamForwarder:
                     continue
                 try:
                     pkt = json.loads(line_str)
-                    ts = pkt.get("timestamp", pkt.get("timestamp_epoch", 0.0))
-                    if ts > last_synced_epoch:
+                    ts = pkt.get("timestamp") or pkt.get("timestamp_epoch")
+                    if ts is None:
+                        iso_str = pkt.get("timestamp_iso")
+                        if iso_str:
+                            try:
+                                from datetime import datetime
+                                dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+                                ts = dt.timestamp()
+                            except Exception:
+                                ts = 0.0
+                        else:
+                            ts = 0.0
+
+                    if ts > last_synced_epoch or last_synced_epoch <= 0.0:
+                        # If messages list is missing but raw messages_b64 is present, decode it
+                        if not pkt.get("messages") and pkt.get("messages_b64"):
+                            try:
+                                import base64
+                                from drone_rid_spoofer.parser import parse_astm_payload
+                                raw_blocks = [base64.b64decode(b) for b in pkt["messages_b64"]]
+                                parsed_msgs, _ = parse_astm_payload(b"".join(raw_blocks))
+                                pkt["messages"] = parsed_msgs
+                            except Exception:
+                                pass
+
                         envelope = {
                             "version": "1.0",
                             "node_id": self.node_id,
                             "node_meta": self.node_meta,
+                            "timestamp": ts,
                             **pkt,
                         }
                         batch_items.append(envelope)
@@ -341,8 +362,7 @@ class CentralStreamForwarder:
             with self.lock:
                 self.stats["spool_files_purged"] += 1
                 self.stats["packets_synced_backlog"] += synced_count
-            if not self.quiet:
-                logger.info(f"[+] Catch-up sync complete: {file_basename} ({synced_count} pkts). Purged from disk.")
+            logger.info(f"[+] Catch-up sync complete: {file_basename} ({synced_count} pkts). Purged from disk.")
         except Exception as e:
             logger.warning(f"[!] Could not remove synchronized file {file_path}: {e}")
 

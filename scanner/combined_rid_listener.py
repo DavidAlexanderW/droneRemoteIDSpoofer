@@ -1590,6 +1590,8 @@ class UnifiedTelemetryLogger:
         handle = self._ensure_log_handle(ev_ts)
         if handle:
             replay_record = {
+                "timestamp": ev_ts,
+                "timestamp_iso": event.get("timestamp_iso"),
                 "time_offset_ms": time_offset_ms,
                 "transport": t_key,
                 "counter": event.get("counter", 0),
@@ -1604,7 +1606,6 @@ class UnifiedTelemetryLogger:
                 "bandwidth_mhz": event.get("bandwidth_mhz"),
                 "mcs_index": event.get("mcs_index"),
                 "guard_interval": event.get("guard_interval"),
-                "timestamp_iso": event.get("timestamp_iso"),
                 "encounter_id": encounter_id,
             }
             handle.write(json.dumps(replay_record) + "\n")
@@ -1921,11 +1922,22 @@ def main():
 
     if is_hub_mode:
         if CentralStreamForwarder is not None:
+            # Auto-detect historical backlog logs in working dir & repo dir (rid_packets_*.jsonl, rid_packets.jsonl)
+            backlog_patterns = [
+                os.path.join(os.getcwd(), "rid_packets*.jsonl"),
+                os.path.join(os.getcwd(), "capture*.jsonl"),
+            ]
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            if os.path.abspath(os.getcwd()) != repo_root:
+                backlog_patterns.append(os.path.join(repo_root, "rid_packets*.jsonl"))
+                backlog_patterns.append(os.path.join(repo_root, "capture*.jsonl"))
+
             forwarder = CentralStreamForwarder(
                 hub_ws_url=args.hub_url,
                 node_id=args.node_id,
                 node_meta=cfg,
                 spool_dir=args.spool_dir,
+                backlog_paths=backlog_patterns,
                 max_ram_queue=args.max_ram_queue,
                 quiet=args.quiet,
             )
