@@ -82,6 +82,8 @@ class CentralStreamForwarder:
         self.connected = False
         self.catchup_complete = threading.Event()
         self.last_connected_time: Optional[float] = None
+        self.last_hub_ack_time: Optional[float] = None
+        self.hub_ack_timeout_s = 45.0  # Reconnect if Hub stops ACKing heartbeats for this long
         self.stats = {
             "packets_enqueued": 0,
             "packets_streamed_live": 0,
@@ -256,34 +258,51 @@ class CentralStreamForwarder:
                     await self._sync_all_spool_and_backlog(ws, last_synced_epoch)
 
                     # 3. Live Streaming Phase
+                    # Spawn a concurrent reader task to drain incoming messages
+                    # (heartbeat_acks, future commands) and prevent buffer overflow.
+                    self.last_hub_ack_time = time.time()
+                    reader_task = asyncio.create_task(self._hub_receiver_loop(ws))
+
                     last_heartbeat_time = time.time()
-                    while self.running:
-                        try:
-                            now = time.time()
-                            if now - last_heartbeat_time >= 15.0:
-                                last_heartbeat_time = now
-                                heartbeat_payload = {
-                                    "type": "heartbeat",
-                                    "node_id": self.node_id,
-                                    "node_meta": self.node_meta,
-                                    "timestamp_epoch": now,
-                                }
-                                await ws.send(json.dumps(heartbeat_payload))
-
-                            # Non-blocking get with short sleep in asyncio
+                    try:
+                        while self.running:
                             try:
-                                pkt = self.live_queue.get_nowait()
-                            except queue.Empty:
-                                await asyncio.sleep(0.05)
-                                continue
+                                now = time.time()
+                                if now - last_heartbeat_time >= 15.0:
+                                    last_heartbeat_time = now
+                                    heartbeat_payload = {
+                                        "type": "heartbeat",
+                                        "node_id": self.node_id,
+                                        "node_meta": self.node_meta,
+                                        "timestamp_epoch": now,
+                                    }
+                                    await ws.send(json.dumps(heartbeat_payload))
 
-                            # Send live packet envelope
-                            await ws.send(json.dumps({"type": "packet", **pkt}))
-                            with self.lock:
-                                self.stats["packets_streamed_live"] += 1
+                                # Detect zombie Hub (application alive but not processing)
+                                if self.last_hub_ack_time and (now - self.last_hub_ack_time > self.hub_ack_timeout_s):
+                                    logger.warning(f"[!] Hub application not acknowledging heartbeats for {now - self.last_hub_ack_time:.0f}s (zombie server). Reconnecting...")
+                                    break
 
-                        except websockets.ConnectionClosed:
-                            break
+                                # Non-blocking get with short sleep in asyncio
+                                try:
+                                    pkt = self.live_queue.get_nowait()
+                                except queue.Empty:
+                                    await asyncio.sleep(0.05)
+                                    continue
+
+                                # Send live packet envelope
+                                await ws.send(json.dumps({"type": "packet", **pkt}))
+                                with self.lock:
+                                    self.stats["packets_streamed_live"] += 1
+
+                            except websockets.ConnectionClosed:
+                                break
+                    finally:
+                        reader_task.cancel()
+                        try:
+                            await reader_task
+                        except asyncio.CancelledError:
+                            pass
 
             except Exception as e:
                 self.connected = False
@@ -295,6 +314,22 @@ class CentralStreamForwarder:
                 # Wait with exponential backoff before reconnecting
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 1.5, max_retry_delay)
+
+    async def _hub_receiver_loop(self, ws):
+        """Concurrent reader task that drains incoming Hub messages (heartbeat_acks, future commands)
+        to prevent the receive buffer from filling up and stalling protocol-level ping/pong frames."""
+        try:
+            async for msg_str in ws:
+                try:
+                    msg = json.loads(msg_str)
+                    msg_type = msg.get("type", "")
+                    if msg_type == "heartbeat_ack":
+                        self.last_hub_ack_time = time.time()
+                    # Future: handle Hub-to-Node commands here (e.g., channel change, reboot)
+                except (json.JSONDecodeError, Exception):
+                    pass
+        except websockets.ConnectionClosed:
+            pass
 
     async def _sync_all_spool_and_backlog(self, ws, last_synced_epoch: float):
         """
