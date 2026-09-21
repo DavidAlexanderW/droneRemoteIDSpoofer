@@ -1,5 +1,6 @@
 import argparse
 import time
+from datetime import datetime, timezone
 import base64
 import json
 import struct
@@ -13,7 +14,13 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from drone_rid_spoofer.parser import ASTM_F3411_SpecParser, parse_astm_payload
+try:
+    from scanner.parser import ASTM_F3411_SpecParser, parse_astm_payload
+except ImportError:
+    try:
+        from drone_rid_spoofer.parser import ASTM_F3411_SpecParser, parse_astm_payload
+    except ImportError:
+        from parser import ASTM_F3411_SpecParser, parse_astm_payload
 
 REMOTE_ID_UUID = b"\xfa\xff" # 16-bit UUID in little-endian
 
@@ -75,8 +82,11 @@ def handle_payload(mac: str, rssi: int, service_data_payload: bytes):
             
         # Optionally write to replay JSONL
         if REPLAY_FILE is not None and msgs_b64:
+            now_ts = time.time()
             event = {
-                "time_offset_ms": int((time.time() - START_TIME) * 1000),
+                "timestamp": now_ts,
+                "timestamp_iso": datetime.fromtimestamp(now_ts, timezone.utc).isoformat(),
+                "time_offset_ms": int((now_ts - START_TIME) * 1000) if START_TIME else 0,
                 "transport": transport,
                 "counter": counter,
                 "messages_b64": msgs_b64,

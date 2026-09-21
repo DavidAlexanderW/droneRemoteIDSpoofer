@@ -17,13 +17,15 @@
 #   ./scanner/install_scanner.sh [OPTIONS]
 #
 # Options:
-#   --with-services       Automatically configure and enable systemd background services
-#   --wifi-iface <iface>  Default Wi-Fi monitor interface for systemd service (e.g. wlan1)
-#   --nrf-port <port>     Default nRF serial port for systemd service (e.g. /dev/ttyACM0)
-#   --no-nrf              Skip downloading nrfutil and ble-sniffer plugin
-#   --no-sys-pkgs         Skip apt-get system packages installation
-#   --no-caps             Skip granting Linux network capabilities (setcap)
-#   -h, --help            Show this help message
+#   --with-scanner-service   Configure and install systemd 24/7 background scanner service (drone-scanner.service)
+#   --with-dashboard-service Configure and install systemd 24/7 Tactical Radar Dashboard service (drone-dashboard.service)
+#   --with-hub-service       Configure and install systemd 24/7 Central Ingestion Hub service (drone-central-hub.service)
+#   --wifi-iface <iface>     Default Wi-Fi monitor interface for systemd service (e.g. wlan1)
+#   --nrf-port <port>        Default nRF serial port for systemd service (e.g. /dev/ttyACM0)
+#   --no-nrf                 Skip downloading nrfutil and ble-sniffer plugin
+#   --no-sys-pkgs            Skip apt-get system packages installation
+#   --no-caps                Skip granting Linux network capabilities (setcap)
+#   -h, --help               Show this help message
 # ==============================================================================
 
 set -eo pipefail
@@ -51,7 +53,9 @@ else
 fi
 
 # Default options
-INSTALL_SERVICES=false
+INSTALL_SCANNER_SERVICE=false
+INSTALL_DASHBOARD_SERVICE=false
+INSTALL_HUB_SERVICE=false
 WIFI_IFACE=""
 NRF_PORT=""
 HUB_URL=""
@@ -83,7 +87,7 @@ print_usage() {
     echo -e "${C_BOLD}Usage:${C_RESET} $0 [OPTIONS]"
     echo ""
     echo -e "${C_BOLD}Options:${C_RESET}"
-    echo "  --with-services          Configure and install systemd 24/7 background scanner service"
+    echo "  --with-scanner-service   Configure and install systemd 24/7 background scanner service"
     echo "  --with-dashboard-service Configure and install systemd 24/7 Tactical Radar Dashboard service"
     echo "  --with-hub-service       Configure and install systemd 24/7 Central Ingestion Hub service"
     echo "  --wifi-iface <iface>     Wi-Fi interface to set in drone-scanner.service (e.g. wlan0, wlan1)"
@@ -100,16 +104,13 @@ print_usage() {
 }
 
 # Parse Arguments
-INSTALL_SERVICES=false
-INSTALL_DASHBOARD_SERVICE=false
-INSTALL_HUB_SERVICE=false
 SCANNER_CONFIG="${REPO_DIR}/scanner/scanner_config.json"
 DASHBOARD_CONFIG="${REPO_DIR}/scanner/dashboard/dashboard_config.json"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --with-services)
-            INSTALL_SERVICES=true
+        --with-scanner-service|--with-services)
+            INSTALL_SCANNER_SERVICE=true
             shift
             ;;
         --with-dashboard-service)
@@ -431,7 +432,15 @@ fi
 # ------------------------------------------------------------------------------
 echo -e "${C_BOLD}${C_GREEN}[6/6] systemd Background Service Units Setup...${C_RESET}"
 
-if [ "$INSTALL_SERVICES" = true ]; then
+if [ "$INSTALL_SCANNER_SERVICE" = false ] && [ "$INSTALL_DASHBOARD_SERVICE" = false ] && [ "$INSTALL_HUB_SERVICE" = false ]; then
+    echo -e "${C_YELLOW}[*] No systemd services selected for installation.${C_RESET}"
+    echo -e "    To install background services, rerun with explicit service flags:"
+    echo -e "      --with-scanner-service    : Install drone-scanner.service (background sensor node)"
+    echo -e "      --with-dashboard-service  : Install drone-dashboard.service (Web UI radar)"
+    echo -e "      --with-hub-service        : Install drone-central-hub.service (central fusion hub)\n"
+fi
+
+if [ "$INSTALL_SCANNER_SERVICE" = true ]; then
     # Ensure scanner_config.json exists
     if [ ! -f "${SCANNER_CONFIG}" ]; then
         if [ -f "${REPO_DIR}/scanner/scanner_config.example.json" ]; then
@@ -496,8 +505,6 @@ WorkingDirectory=${REPO_DIR}
 ExecStart=${VENV_DIR}/bin/drone-scanner \\
     --wifi-iface ${WIFI_IFACE} \\
     --nrf-port ${NRF_PORT} \\
-    --ble-mode extended \\
-    --coded \\
     --scanner-config ${SCANNER_CONFIG} \\
     --quiet
 

@@ -72,7 +72,7 @@ except ImportError:
         )
 
 try:
-    from drone_rid_spoofer.parser import decode_astm_message
+    from scanner.parser import decode_astm_message
 except ImportError:
     try:
         from parser import decode_astm_message
@@ -109,12 +109,15 @@ def get_db_path() -> str:
     env_path = os.environ.get("RID_DB_PATH")
     if env_path:
         return env_path
-    for candidate in [
-        "rid_detections_central.db",
-        os.path.join(repo_root, "rid_detections_central.db"),
-        "rid_detections.db",
-        os.path.join(repo_root, "rid_detections.db"),
-    ]:
+    candidates = []
+    if repo_root and os.path.isdir(repo_root):
+        candidates.append(os.path.join(repo_root, "rid_detections_central.db"))
+    candidates.append("rid_detections_central.db")
+    if repo_root and os.path.isdir(repo_root):
+        candidates.append(os.path.join(repo_root, "rid_detections.db"))
+    candidates.append("rid_detections.db")
+
+    for candidate in candidates:
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
     return os.path.join(repo_root, "rid_detections.db") if os.path.isdir(repo_root) else "rid_detections.db"
@@ -685,10 +688,17 @@ def get_encounter_packets(encounter_id: str):
                                 if rec.get("rssi_dbm_invalid"):
                                     pkt_rssi = None
 
+                                rec_iso = rec.get("timestamp_iso")
+                                if not rec_iso and rec.get("timestamp"):
+                                    try:
+                                        rec_iso = datetime.fromtimestamp(float(rec["timestamp"]), timezone.utc).isoformat()
+                                    except Exception:
+                                        rec_iso = None
+
                                 packets.append({
                                     "index": len(packets) + 1,
                                     "time_offset_ms": rec.get("time_offset_ms", 0),
-                                    "timestamp_iso": rec.get("timestamp_iso"),
+                                    "timestamp_iso": rec_iso,
                                     "transport": rec.get("transport"),
                                     "channel": rec.get("channel"),
                                     "rssi_dbm": pkt_rssi,

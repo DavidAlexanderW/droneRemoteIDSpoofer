@@ -1,9 +1,9 @@
 {
   "node_id": "sensor-node-01",
-  "name": "Zurich Airspace Tactical Sensor Node",
-  "latitude": 47.3763399,
-  "longitude": 8.5312562,
-  "altitude_m": 450.0,
+  "name": "Zurich HB Sensor Node",
+  "latitude": 47.3769,
+  "longitude": 8.5417,
+  "altitude_m": 410.0,
   "range_rings_m": [
     500.0,
     1000.0,

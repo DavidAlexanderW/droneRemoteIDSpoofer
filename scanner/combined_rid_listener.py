@@ -48,38 +48,95 @@ logger = logging.getLogger("CombinedRIDListener")
 
 
 # ============================================================================
-# ASTM F3411 Protocol Constants & Spec Parser (Imported from drone_rid_spoofer.parser)
+# ASTM F3411 Protocol Constants & Spec Parser (Imported from scanner.parser)
 # ============================================================================
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+scanner_dir = os.path.abspath(os.path.dirname(__file__))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
+if scanner_dir not in sys.path:
+    sys.path.insert(0, scanner_dir)
 
-from drone_rid_spoofer.parser import (
-    ASTM_OUI,
-    APP_CODE_RID,
-    BLE_RID_UUID,
-    OPENDRONEID_EPOCH_2019,
-    MSG_TYPE_NAMES,
-    PROTO_VERSION_NAMES,
-    ID_TYPE_NAMES,
-    UA_TYPE_NAMES,
-    STATUS_NAMES,
-    HEIGHT_TYPE_NAMES,
-    HORIZ_ACCURACY_NAMES,
-    VERT_ACCURACY_NAMES,
-    SPEED_ACCURACY_NAMES,
-    TIMESTAMP_ACCURACY_NAMES,
-    AUTH_TYPE_NAMES,
-    DESC_TYPE_NAMES,
-    OPERATOR_LOCATION_TYPE_NAMES,
-    CLASSIFICATION_TYPE_NAMES,
-    EU_CATEGORY_NAMES,
-    EU_CLASS_NAMES,
-    sanitize_ascii_string,
-    decode_astm_message,
-    parse_astm_payload,
-)
+try:
+    from scanner.parser import (
+        ASTM_OUI,
+        APP_CODE_RID,
+        BLE_RID_UUID,
+        OPENDRONEID_EPOCH_2019,
+        MSG_TYPE_NAMES,
+        PROTO_VERSION_NAMES,
+        ID_TYPE_NAMES,
+        UA_TYPE_NAMES,
+        STATUS_NAMES,
+        HEIGHT_TYPE_NAMES,
+        HORIZ_ACCURACY_NAMES,
+        VERT_ACCURACY_NAMES,
+        SPEED_ACCURACY_NAMES,
+        TIMESTAMP_ACCURACY_NAMES,
+        AUTH_TYPE_NAMES,
+        DESC_TYPE_NAMES,
+        OPERATOR_LOCATION_TYPE_NAMES,
+        CLASSIFICATION_TYPE_NAMES,
+        EU_CATEGORY_NAMES,
+        EU_CLASS_NAMES,
+        sanitize_ascii_string,
+        decode_astm_message,
+        parse_astm_payload,
+    )
+except ImportError:
+    try:
+        from drone_rid_spoofer.parser import (
+            ASTM_OUI,
+            APP_CODE_RID,
+            BLE_RID_UUID,
+            OPENDRONEID_EPOCH_2019,
+            MSG_TYPE_NAMES,
+            PROTO_VERSION_NAMES,
+            ID_TYPE_NAMES,
+            UA_TYPE_NAMES,
+            STATUS_NAMES,
+            HEIGHT_TYPE_NAMES,
+            HORIZ_ACCURACY_NAMES,
+            VERT_ACCURACY_NAMES,
+            SPEED_ACCURACY_NAMES,
+            TIMESTAMP_ACCURACY_NAMES,
+            AUTH_TYPE_NAMES,
+            DESC_TYPE_NAMES,
+            OPERATOR_LOCATION_TYPE_NAMES,
+            CLASSIFICATION_TYPE_NAMES,
+            EU_CATEGORY_NAMES,
+            EU_CLASS_NAMES,
+            sanitize_ascii_string,
+            decode_astm_message,
+            parse_astm_payload,
+        )
+    except ImportError:
+        from parser import (
+            ASTM_OUI,
+            APP_CODE_RID,
+            BLE_RID_UUID,
+            OPENDRONEID_EPOCH_2019,
+            MSG_TYPE_NAMES,
+            PROTO_VERSION_NAMES,
+            ID_TYPE_NAMES,
+            UA_TYPE_NAMES,
+            STATUS_NAMES,
+            HEIGHT_TYPE_NAMES,
+            HORIZ_ACCURACY_NAMES,
+            VERT_ACCURACY_NAMES,
+            SPEED_ACCURACY_NAMES,
+            TIMESTAMP_ACCURACY_NAMES,
+            AUTH_TYPE_NAMES,
+            DESC_TYPE_NAMES,
+            OPERATOR_LOCATION_TYPE_NAMES,
+            CLASSIFICATION_TYPE_NAMES,
+            EU_CATEGORY_NAMES,
+            EU_CLASS_NAMES,
+            sanitize_ascii_string,
+            decode_astm_message,
+            parse_astm_payload,
+        )
 
 try:
     from scanner.db import (
@@ -446,6 +503,7 @@ class EncounterTracker:
     """
     Groups individual Remote ID packets into 5-minute (300s) Flight Encounters
     and commits completed/updated encounters into an SQLite database.
+    Merges sequential packets by both Serial number and MAC address.
     """
     def __init__(
         self,
@@ -454,7 +512,7 @@ class EncounterTracker:
         persist_interval_s: float = 0.0,
         default_node_id: Optional[str] = None,
     ):
-        self.db_path = db_path
+        self.db_path = os.path.abspath(db_path) if db_path else None
         self.timeout_s = timeout_s
         self.persist_interval_s = persist_interval_s
         self.default_node_id = default_node_id
@@ -463,28 +521,77 @@ class EncounterTracker:
         self.last_wal_checkpoint = time.time()
 
         if self.db_path:
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir and not os.path.exists(db_dir):
+                try:
+                    os.makedirs(db_dir, exist_ok=True)
+                except Exception:
+                    pass
             self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             init_encounters_db(conn, timeout_s=self.timeout_s)
+
+    def _remove_active(self, enc: Dict[str, Any]):
+        eid = enc.get("encounter_id")
+        keys_to_del = [k for k, v in list(self.active_encounters.items()) if v.get("encounter_id") == eid]
+        for k in keys_to_del:
+            del self.active_encounters[k]
 
     def update_with_packet(self, packet: Dict[str, Any]) -> str:
         """Update or create an active encounter from an incoming packet. Returns encounter_id."""
         mac = packet.get("mac", "UNKNOWN")
         serial = packet.get("serial_number") or packet.get("serial")
         node_id = packet.get("node_id") or packet.get("primary_node_id") or self.default_node_id
-        
-        # Robust timestamp resolution
-        ts = packet.get("timestamp") or packet.get("timestamp_epoch")
+
+        # Resolve messages upfront: decode messages_b64 if messages list is empty
+        msgs_to_process = list(packet.get("messages") or [])
+        if not msgs_to_process and packet.get("messages_b64"):
+            import base64
+            for b64_str in packet["messages_b64"]:
+                try:
+                    raw_b = base64.b64decode(b64_str)
+                    if parse_astm_payload:
+                        parsed, _ = parse_astm_payload(raw_b)
+                        if parsed:
+                            msgs_to_process.extend(parsed)
+                    elif decode_astm_message:
+                        dm = decode_astm_message(raw_b)
+                        if dm:
+                            msgs_to_process.append(dm)
+                except Exception:
+                    pass
+
+        # Extract serial from messages if not present at top level
+        if not serial:
+            for m in msgs_to_process:
+                if isinstance(m, dict) and m.get("type") == "Basic ID" and m.get("id"):
+                    serial = m.get("id")
+                    break
+
+        # Robust physical reception timestamp resolution
+        now_ts = time.time()
+        min_valid = 1700000000.0
+        max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+
+        ts = packet.get("reception_timestamp") or packet.get("timestamp") or packet.get("timestamp_epoch")
         if ts is None and packet.get("timestamp_iso"):
             try:
                 dt = datetime.fromisoformat(packet["timestamp_iso"].replace("Z", "+00:00"))
                 ts = dt.timestamp()
             except Exception:
-                ts = time.time()
-        if ts is None:
-            ts = time.time()
+                ts = None
+        if ts is None or ts < min_valid or ts > max_valid:
+            # Check if inner System message has a valid real-world epoch
+            recovered = None
+            for m in msgs_to_process:
+                if isinstance(m, dict):
+                    sys_ep = m.get("system_timestamp_epoch")
+                    if sys_ep and min_valid <= sys_ep <= max_valid:
+                        recovered = float(sys_ep)
+                        break
+            ts = recovered if recovered is not None else now_ts
 
         transport = packet.get("transport", "unknown")
         ch_raw = packet.get("channel", "N/A")
@@ -503,29 +610,36 @@ class EncounterTracker:
         if counter is None:
             counter = packet.get("msg_counter")
 
-        # Group encounters by transmitter MAC address within the 5-minute flight window
-        key = mac
-        now = time.time()
-
         with self.lock:
-            # Check if existing encounter timed out (> 5 minutes), belongs to different encounter_id, or has backward time jump
-            if key in self.active_encounters:
-                enc = self.active_encounters[key]
-                pkt_enc_id = packet.get("encounter_id")
-                if (pkt_enc_id and pkt_enc_id != enc["encounter_id"]) or (ts - enc["last_seen"] > self.timeout_s) or (ts < enc["first_seen"]):
+            # Look up active encounter by serial first, then by MAC
+            enc = None
+            if serial:
+                for active_enc in self.active_encounters.values():
+                    if active_enc.get("serial_number") == serial:
+                        enc = active_enc
+                        break
+            if not enc and mac and mac != "UNKNOWN" and mac in self.active_encounters:
+                enc = self.active_encounters[mac]
+
+            if enc:
+                is_timeout = (ts - enc["last_seen"] > self.timeout_s)
+                # Only treat as major backward time jump if delta > 60s
+                is_backward_jump = (enc["first_seen"] - ts > 60.0)
+                if is_timeout or is_backward_jump:
                     # Finalize old encounter
                     enc["is_active"] = 0
                     self._persist_encounter(enc)
-                    del self.active_encounters[key]
+                    self._remove_active(enc)
+                    enc = None
 
-            if key not in self.active_encounters:
+            if not enc:
                 # Generate unique encounter ID or preserve existing
-                enc_slug = mac.replace(":", "")[-6:]
+                enc_slug = mac.replace(":", "")[-6:] if mac and mac != "UNKNOWN" else "000000"
                 dt_tag = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%d-%H%M%S")
                 encounter_id = packet.get("encounter_id") or f"ENC-{dt_tag}-{enc_slug}"
 
                 drone_info = infer_drone_model(serial) if serial else {}
-                self.active_encounters[key] = {
+                enc = {
                     "encounter_id": encounter_id,
                     "mac": mac,
                     "serial_number": serial,
@@ -560,14 +674,55 @@ class EncounterTracker:
                     "is_active": 1,
                     "last_persisted": 0.0,
                 }
+                primary_key = mac if (mac and mac != "UNKNOWN") else encounter_id
+                self.active_encounters[primary_key] = enc
 
-            enc = self.active_encounters[key]
+            # If MAC is valid, ensure active_encounters indexes this MAC
+            if mac and mac != "UNKNOWN":
+                if mac in self.active_encounters and self.active_encounters[mac] is not enc:
+                    # Merge previous active encounter tracking this MAC into enc
+                    other_enc = self.active_encounters[mac]
+                    enc["packet_count"] += other_enc.get("packet_count", 0)
+                    enc["first_seen"] = min(enc["first_seen"], other_enc["first_seen"])
+                    enc["last_seen"] = max(enc["last_seen"], other_enc["last_seen"])
+                    enc["duration_s"] = round(enc["last_seen"] - enc["first_seen"], 2)
+                    enc["transports"].update(other_enc.get("transports", set()))
+                    enc["channels"].update(other_enc.get("channels", set()))
+                    enc["wifi_rates"].update(other_enc.get("wifi_rates", set()))
+                    enc["rssi_values"].extend(other_enc.get("rssi_values", []))
+                    enc["altitudes"].extend(other_enc.get("altitudes", []))
+                    enc["heights"].extend(other_enc.get("heights", []))
+                    enc["pressure_altitudes"].extend(other_enc.get("pressure_altitudes", []))
+                    enc["speeds"].extend(other_enc.get("speeds", []))
+                    enc["vert_speeds"].extend(other_enc.get("vert_speeds", []))
+                    enc["trajectory"].extend(other_enc.get("trajectory", []))
+                    self._remove_active(other_enc)
+                    if self.db_path:
+                        try:
+                            with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+                                conn.execute("DELETE FROM encounters WHERE encounter_id = ?;", (other_enc["encounter_id"],))
+                        except Exception:
+                            pass
+                self.active_encounters[mac] = enc
+
+            if serial:
+                if not enc.get("serial_number"):
+                    enc["serial_number"] = serial
+                    if not enc.get("drone_make"):
+                        inf = infer_drone_model(serial)
+                        enc["drone_make"] = inf.get("make")
+                        enc["drone_model"] = inf.get("model")
+
             if counter is not None:
                 enc["counter"] = counter
             if node_id and not enc.get("node_id"):
                 enc["node_id"] = node_id
-            enc["last_seen"] = ts
-            enc["last_seen_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            if ts < enc["first_seen"]:
+                enc["first_seen"] = ts
+                enc["first_seen_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            if ts > enc["last_seen"]:
+                enc["last_seen"] = ts
+                enc["last_seen_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
             enc["duration_s"] = round(enc["last_seen"] - enc["first_seen"], 2)
             enc["packet_count"] += 1
             enc["transports"].add(transport)
@@ -584,29 +739,9 @@ class EncounterTracker:
                         "modulation": packet.get("modulation"),
                     }
                 enc["rate_counts"][r_desc]["count"] += 1
-            if serial and not enc.get("serial_number"):
-                enc["serial_number"] = serial
-                if not enc.get("drone_make"):
-                    inf = infer_drone_model(serial)
-                    enc["drone_make"] = inf.get("make")
-                    enc["drone_model"] = inf.get("model")
 
             if rssi is not None:
                 enc["rssi_values"].append(rssi)
-
-            # Resolve messages: decode messages_b64 if messages list is empty
-            msgs_to_process = packet.get("messages", [])
-            if not msgs_to_process and packet.get("messages_b64"):
-                msgs_to_process = []
-                import base64
-                for b64_str in packet["messages_b64"]:
-                    try:
-                        raw_b = base64.b64decode(b64_str)
-                        dm = decode_astm_message(raw_b)
-                        if dm:
-                            msgs_to_process.append(dm)
-                    except Exception:
-                        pass
 
             # Parse message telemetry fields
             for msg in msgs_to_process:
@@ -703,22 +838,26 @@ class EncounterTracker:
             now = time.time()
         closed_ids = []
         with self.lock:
-            keys_to_delete = []
-            for key, enc in self.active_encounters.items():
-                if now - enc["last_seen"] > self.timeout_s:
-                    enc["is_active"] = 0
-                    self._persist_encounter(enc)
-                    closed_ids.append(enc["encounter_id"])
-                    keys_to_delete.append(key)
-            for k in keys_to_delete:
-                del self.active_encounters[k]
+            to_delete = []
+            seen_eids = set()
+            for enc in list(self.active_encounters.values()):
+                eid = enc.get("encounter_id")
+                if eid and eid not in seen_eids:
+                    seen_eids.add(eid)
+                    if now - enc["last_seen"] > self.timeout_s:
+                        enc["is_active"] = 0
+                        self._persist_encounter(enc)
+                        closed_ids.append(eid)
+                        to_delete.append(enc)
+            for enc in to_delete:
+                self._remove_active(enc)
 
             # Periodic WAL checkpoint every 5 minutes
             if now - self.last_wal_checkpoint > 300.0:
                 self.last_wal_checkpoint = now
                 if self.db_path:
                     try:
-                        with sqlite3.connect(self.db_path) as conn:
+                        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
                             conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
                     except Exception:
                         pass
@@ -727,9 +866,13 @@ class EncounterTracker:
     def finalize_all(self):
         """Mark all active encounters as completed on shutdown."""
         with self.lock:
-            for enc in self.active_encounters.values():
-                enc["is_active"] = 0
-                self._persist_encounter(enc)
+            seen_eids = set()
+            for enc in list(self.active_encounters.values()):
+                eid = enc.get("encounter_id")
+                if eid and eid not in seen_eids:
+                    seen_eids.add(eid)
+                    enc["is_active"] = 0
+                    self._persist_encounter(enc)
             self.active_encounters.clear()
 
     def _persist_encounter(self, enc: Dict[str, Any]):
@@ -799,10 +942,15 @@ class EncounterTracker:
         wifi_rates_str = ", ".join(wifi_rates_list) if wifi_rates_list else None
         trajectory_str = json.dumps(enc["trajectory"])
 
-        persisted_is_active = 0 if (time.time() - enc["last_seen"] > self.timeout_s) else enc["is_active"]
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir and not os.path.exists(db_dir):
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+            except Exception:
+                pass
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30.0) as conn:
                 conn.execute("""
                     INSERT OR REPLACE INTO encounters (
                         encounter_id, mac, serial_number, first_seen, first_seen_iso,
@@ -856,7 +1004,7 @@ class EncounterTracker:
                 ))
                 conn.commit()
         except Exception as e:
-            logger.debug(f"Error persisting encounter to SQLite: {e}")
+            logger.error(f"Error persisting encounter to SQLite ({self.db_path}): {e}")
 
 
 def rehydrate_db_from_jsonl(
@@ -879,21 +1027,32 @@ def rehydrate_db_from_jsonl(
         except Exception:
             node_id = "sensor-node-01"
 
-    if log_dir is None:
+    if log_dir in (None, ".", ""):
         search_patterns = [
             "rid_packets_*.jsonl",
             "rid_packets*.jsonl",
+            "*.jsonl",
             "central_logs/rid_packets*.jsonl",
             "central_logs/*.jsonl",
             os.path.join(repo_root, "rid_packets*.jsonl"),
+            os.path.join(repo_root, "*.jsonl"),
             os.path.join(repo_root, "central_logs", "rid_packets*.jsonl"),
             os.path.join(repo_root, "central_logs", "*.jsonl"),
             os.path.join(os.path.dirname(__file__), "..", "rid_packets*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "..", "*.jsonl"),
             os.path.join(os.path.dirname(__file__), "..", "central_logs", "rid_packets*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "..", "central_logs", "*.jsonl"),
             os.path.join(os.path.dirname(__file__), "rid_packets*.jsonl"),
+            os.path.join(os.path.dirname(__file__), "*.jsonl"),
         ]
     else:
-        search_patterns = [os.path.join(log_dir, "rid_packets_*.jsonl"), os.path.join(log_dir, "*.jsonl")]
+        search_patterns = [
+            os.path.join(log_dir, "rid_packets_*.jsonl"),
+            os.path.join(log_dir, "rid_packets*.jsonl"),
+            os.path.join(log_dir, "*.jsonl"),
+            os.path.join(log_dir, "central_logs", "rid_packets*.jsonl"),
+            os.path.join(log_dir, "central_logs", "*.jsonl"),
+        ]
 
     if db_path == "rid_detections.db":
         if os.path.isfile("rid_detections_central.db") and not os.path.isfile("rid_detections.db"):
@@ -905,6 +1064,8 @@ def rehydrate_db_from_jsonl(
     for pattern in search_patterns:
         for p in glob.glob(pattern):
             abs_p = os.path.abspath(p)
+            if abs_p.endswith(".bak") or ".bak." in abs_p:
+                continue
             if abs_p not in log_files and os.path.isfile(abs_p):
                 log_files.append(abs_p)
 
@@ -934,15 +1095,50 @@ def rehydrate_db_from_jsonl(
         logger.info("[*] Rehydration: No valid packet records found in JSONL logs.")
         return 0
 
+    now_ts = time.time()
+    min_valid = 1700000000.0
+    max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+
     def _resolve_ts(p: Dict[str, Any]) -> float:
-        ts = p.get("timestamp") or p.get("timestamp_epoch")
+        ts = p.get("reception_timestamp") or p.get("timestamp") or p.get("timestamp_epoch")
         if ts is None and p.get("timestamp_iso"):
             try:
                 dt = datetime.fromisoformat(p["timestamp_iso"].replace("Z", "+00:00"))
                 ts = dt.timestamp()
             except Exception:
                 pass
-        return float(ts) if ts is not None else 0.0
+        if ts is None or ts < min_valid or ts > max_valid:
+            for m in (p.get("messages") or []):
+                sys_ep = m.get("system_timestamp_epoch")
+                if sys_ep and min_valid <= sys_ep <= max_valid:
+                    return float(sys_ep)
+            if p.get("messages_b64"):
+                try:
+                    raw_blocks = [base64.b64decode(b) for b in p["messages_b64"]]
+                    if parse_astm_payload:
+                        parsed_msgs, _ = parse_astm_payload(b"".join(raw_blocks))
+                    elif decode_astm_message:
+                        parsed_msgs = [decode_astm_message(b) for b in raw_blocks if decode_astm_message(b)]
+                    else:
+                        parsed_msgs = []
+                    for m in parsed_msgs:
+                        sys_ep = m.get("system_timestamp_epoch")
+                        if sys_ep and min_valid <= sys_ep <= max_valid:
+                            return float(sys_ep)
+                except Exception:
+                    pass
+            enc_id = p.get("encounter_id", "")
+            parts = enc_id.split("-")
+            if len(parts) >= 3 and len(parts[1]) == 8 and len(parts[2]) == 6:
+                try:
+                    dt = datetime.strptime(f"{parts[1]}_{parts[2]}", "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+                    enc_ts = dt.timestamp()
+                    if min_valid <= enc_ts <= max_valid:
+                        return enc_ts
+                except Exception:
+                    pass
+            return 0.0
+        return float(ts)
 
     # Sort all packets chronologically so encounters build accurately over time
     all_packets.sort(key=_resolve_ts)
@@ -973,8 +1169,8 @@ def rehydrate_db_from_jsonl(
                 pass
 
         ts = _resolve_ts(p)
-        if ts <= 0.0:
-            ts = time.time()
+        if ts < min_valid or ts > max_valid:
+            ts = now_ts
 
         mac = p.get("mac", "UNKNOWN")
         serial = p.get("serial_number") or p.get("serial")
@@ -1008,7 +1204,7 @@ def rehydrate_db_from_jsonl(
     # Query count of encounters in DB
     rehydrated_count = 0
     try:
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
             rehydrated_count = conn.execute("SELECT COUNT(*) FROM encounters;").fetchone()[0]
     except Exception:
         pass
@@ -1419,7 +1615,16 @@ class BleNrfSnifferThread(threading.Thread):
                     try:
                         record = json.loads(line_str)
                         mac = record.get("mac")
-                        ts = record.get("timestamp", time.time())
+                        now_ts = time.time()
+                        min_valid = 1700000000.0
+                        max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+                        ts = record.get("timestamp")
+                        # In live mode or if timestamp is invalid/out-of-bounds, use current physical arrival time
+                        if not self.rx_pcap:
+                            if ts is None or ts < min_valid or ts > max_valid:
+                                ts = now_ts
+                        elif ts is None or ts < min_valid or ts > max_valid:
+                            ts = now_ts
                         rid_info = record.get("remote_id")
 
                         if not mac or mac == "UNKNOWN" or not rid_info:
@@ -1487,6 +1692,7 @@ class BleNrfSnifferThread(threading.Thread):
 
                         event: Dict[str, Any] = {
                             "timestamp": ts,
+                            "reception_timestamp": ts,
                             "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                             "transport": transport,
                             "interface": "nRF52840-UART",

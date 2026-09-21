@@ -23,7 +23,13 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from drone_rid_spoofer.parser import ASTM_F3411_SpecParser
+try:
+    from scanner.parser import ASTM_F3411_SpecParser
+except ImportError:
+    try:
+        from drone_rid_spoofer.parser import ASTM_F3411_SpecParser
+    except ImportError:
+        from parser import ASTM_F3411_SpecParser
 
 REMOTE_ID_UUID_BYTES = b"\xfa\xff"       # 16-bit UUID 0xFFFA in little-endian
 BLE_ADV_ACCESS_ADDR = b"\xd6\xbe\x89\x8e" # Little-endian 0x8E89BED6
@@ -754,7 +760,17 @@ def run_sniffer(
                 if len(data) < incl_len:
                     break
 
-                ts = ts_sec + (ts_usec / 1e6)
+                now_ts = time.time()
+                if nrf_port:
+                    # Live capture via nRF dongle: always use host physical arrival time
+                    # (nRF dongle hardware counter ticks are not real-world UTC epochs)
+                    ts = now_ts
+                else:
+                    # Static PCAP replay: use PCAP ts if valid epoch, otherwise fall back to host arrival time
+                    ts = ts_sec + (ts_usec / 1e6)
+                    if ts < 1700000000.0 or ts > (now_ts + 86400.0):
+                        ts = now_ts
+
                 active_mode = hopper_controller.current_mode if hopper_controller else None
                 process_packet(
                     data, ts,

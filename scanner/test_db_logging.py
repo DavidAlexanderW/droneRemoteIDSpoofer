@@ -340,7 +340,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
             db_path=self.db_path,
             encounter_timeout_s=5.0
         )
-        t0 = 1000.0
+        t0 = 1789482000.0
         pkt = {
             "timestamp": t0,
             "mac": "55:55:55:55:55:55",

@@ -9,6 +9,8 @@ Unit tests for combined_rid_listener.py:
 import unittest
 import struct
 import time
+import tempfile
+import sqlite3
 from scanner.combined_rid_listener import (
     SharedChannelState,
     WifiChannelHopperThread,
@@ -570,7 +572,7 @@ class TestCombinedRIDListener(unittest.TestCase):
             
             # Feed Location + System packet
             pkt = {
-                "timestamp": 1000.0,
+                "timestamp": 1789482000.0,
                 "transport": "wifi",
                 "channel": 6,
                 "mac": "11:22:33:44:55:66",
@@ -629,7 +631,7 @@ class TestCombinedRIDListener(unittest.TestCase):
                 self.assertEqual(traj[0][2], 540.0)
                 self.assertEqual(traj[0][3], 15.0)
                 self.assertEqual(traj[0][4], 180)
-                self.assertEqual(traj[0][5], 1000.0)
+                self.assertEqual(traj[0][5], 1789482000.0)
                 self.assertEqual(traj[0][6], 80.0) # height_m
                 self.assertEqual(traj[0][7], 0)    # height_type
                 self.assertEqual(traj[0][8], 415.0)# pressure_alt_m
@@ -794,6 +796,74 @@ class TestCombinedRIDListener(unittest.TestCase):
 
         import shutil
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_ble5_system_message_timestamp_decoupled_from_reception_time(self):
+        """Verify that BLE 5 System Message timestamps (e.g. 2019 epoch) do not corrupt encounter reception time."""
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            tracker = EncounterTracker(db_path=tmp.name, persist_interval_s=0.0, default_node_id="node-test-01")
+            
+            rx_ts_1 = 1789700000.0  # Physical reception time (2026)
+            rx_ts_2 = 1789700002.0  # 2 seconds later
+            
+            # BLE 5 packet carrying System Message with claimed 2019 epoch timestamp
+            pkt1 = {
+                "timestamp": rx_ts_1,
+                "reception_timestamp": rx_ts_1,
+                "transport": "bt5",
+                "channel": "BLE Ch 37",
+                "mac": "ED:28:BE:34:3E:6A",
+                "rssi_dbm": -55,
+                "serial_number": "BLE5_SYS_TEST",
+                "messages": [
+                    {
+                        "msg_type": 0,
+                        "type": "Basic ID",
+                        "id": "BLE5_SYS_TEST",
+                        "ua_type_name": "Helicopter / Multirotor",
+                    },
+                    {
+                        "msg_type": 1,
+                        "type": "Location",
+                        "lat": 47.3780,
+                        "lon": 8.5410,
+                        "geodetic_altitude_m": 450.0,
+                        "speed_mps": 12.0,
+                        "direction_deg": 90,
+                    },
+                    {
+                        "msg_type": 4,
+                        "type": "System",
+                        "pilot_lat": 47.3769,
+                        "pilot_lon": 8.5417,
+                        "pilot_alt_m": 430.0,
+                        "system_timestamp_epoch": 1546300818,  # Claimed 2019-01-01 00:00:18 UTC
+                        "system_timestamp_iso": "2019-01-01T00:00:18+00:00",
+                    }
+                ]
+            }
+            
+            enc_id1 = tracker.update_with_packet(pkt1)
+            self.assertTrue(enc_id1.startswith("ENC-2026"), f"Encounter ID {enc_id1} should be timestamped in 2026, not 2019")
+            
+            # Send 2nd packet
+            pkt2 = dict(pkt1)
+            pkt2["timestamp"] = rx_ts_2
+            pkt2["reception_timestamp"] = rx_ts_2
+            enc_id2 = tracker.update_with_packet(pkt2)
+            self.assertEqual(enc_id1, enc_id2, "Encounter should not split on claimed system timestamps")
+            
+            tracker.finalize_all()
+            
+            with sqlite3.connect(tmp.name) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (enc_id1,)).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row["first_seen"], rx_ts_1)
+                self.assertEqual(row["last_seen"], rx_ts_2)
+                self.assertEqual(row["duration_s"], 2.0)
+                self.assertEqual(row["packet_count"], 2)
+                self.assertTrue(row["first_seen_iso"].startswith("2026-"), f"first_seen_iso {row['first_seen_iso']} should start with 2026")
+                self.assertTrue(row["last_seen_iso"].startswith("2026-"), f"last_seen_iso {row['last_seen_iso']} should start with 2026")
 
 
 if __name__ == "__main__":

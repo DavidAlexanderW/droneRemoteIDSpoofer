@@ -97,21 +97,25 @@ class CentralDailyReplayLogger:
 
     async def log_packet(self, packet_envelope: Dict[str, Any], encounter_id: Optional[str] = None):
         """Asynchronously writes a standardized packet record to the central daily JSONL."""
-        ts = packet_envelope.get("timestamp") or packet_envelope.get("timestamp_epoch")
+        now_ts = time.time()
+        min_valid = 1700000000.0
+        max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+
+        ts = packet_envelope.get("reception_timestamp") or packet_envelope.get("timestamp") or packet_envelope.get("timestamp_epoch")
         if ts is None and packet_envelope.get("timestamp_iso"):
             try:
                 dt = datetime.fromisoformat(packet_envelope["timestamp_iso"].replace("Z", "+00:00"))
                 ts = dt.timestamp()
             except Exception:
-                ts = time.time()
-        if ts is None:
-            ts = time.time()
+                ts = now_ts
+        if ts is None or ts < min_valid or ts > max_valid:
+            ts = now_ts
 
         async with self.lock:
             handle = self._get_file_handle(ts)
             record = {
                 "timestamp": ts,
-                "timestamp_iso": packet_envelope.get("timestamp_iso") or datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                 "node_id": packet_envelope.get("node_id", "unknown"),
                 "node_meta": packet_envelope.get("node_meta", {}),
                 "transport": packet_envelope.get("transport", "unknown"),
@@ -276,16 +280,22 @@ class CentralIngestionHub:
 
     async def ingest_packet(self, envelope: Dict[str, Any]) -> Optional[str]:
         """Ingests a single packet envelope through deduplication, encounter tracker, and replay log."""
-        ts = envelope.get("timestamp") or envelope.get("timestamp_epoch")
+        now_ts = time.time()
+        min_valid = 1700000000.0
+        max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+
+        ts = envelope.get("reception_timestamp") or envelope.get("timestamp") or envelope.get("timestamp_epoch")
         if ts is None and envelope.get("timestamp_iso"):
             try:
                 dt = datetime.fromisoformat(envelope["timestamp_iso"].replace("Z", "+00:00"))
                 ts = dt.timestamp()
             except Exception:
-                ts = time.time()
-        if ts is None:
-            ts = time.time()
+                ts = now_ts
+        if ts is None or ts < min_valid or ts > max_valid:
+            ts = now_ts
         envelope["timestamp"] = ts
+        envelope["reception_timestamp"] = ts
+        envelope["timestamp_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
 
         if not envelope.get("serial_number") and envelope.get("serial"):
             envelope["serial_number"] = envelope["serial"]
@@ -293,7 +303,13 @@ class CentralIngestionHub:
         if not envelope.get("messages") and envelope.get("messages_b64"):
             try:
                 import base64
-                from drone_rid_spoofer.parser import decode_astm_message
+                try:
+                    from scanner.parser import decode_astm_message
+                except ImportError:
+                    try:
+                        from drone_rid_spoofer.parser import decode_astm_message
+                    except ImportError:
+                        from parser import decode_astm_message
                 raw_blocks = [base64.b64decode(b) for b in envelope["messages_b64"]]
                 envelope["messages"] = [decode_astm_message(b) for b in raw_blocks if decode_astm_message(b)]
             except Exception:

@@ -5,10 +5,12 @@ Ensures a single canonical source of truth for the SQLite schema, non-destructiv
 and automated CTA-2063-A make/model backfilling.
 """
 
+import json
 import os
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 # Ensure repo and scanner paths in sys.path
@@ -179,8 +181,51 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
                 conn.execute("UPDATE encounters SET drone_make = ?, drone_model = ? WHERE encounter_id = ?;", (inf["make"], inf["model"], enc_id))
     except Exception:
         pass
+    # 4. Auto-repair encounters corrupted by drone flight controller claimed system timestamps (< 2023 or future like 2061)
+    try:
+        max_valid_epoch = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+        min_valid_epoch = 1700000000.0        # Nov 2023
+        corrupted = conn.execute(
+            "SELECT encounter_id, first_seen, first_seen_iso, last_seen, last_seen_iso, duration_s FROM encounters WHERE first_seen < ? OR last_seen < ? OR first_seen > ? OR last_seen > ?;",
+            (min_valid_epoch, min_valid_epoch, max_valid_epoch, max_valid_epoch)
+        ).fetchall()
+        for r in corrupted:
+            enc_id = r[0]
+            f_seen = r[1]
+            f_iso = r[2]
+            l_seen = r[3]
+            l_iso = r[4]
+            dur = r[5] or 0.0
 
-    # 4. Indexes
+            # Recover physical reception timestamp from encounter_id slug (ENC-YYYYMMDD-HHMMSS-XXXXXX)
+            parts = enc_id.split("-")
+            recovered_ts = None
+            if len(parts) >= 4 and len(parts[1]) == 8 and len(parts[2]) == 6:
+                try:
+                    dt = datetime.strptime(f"{parts[1]}_{parts[2]}", "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+                    recovered_ts = dt.timestamp()
+                except Exception:
+                    pass
+
+            if recovered_ts and (min_valid_epoch <= recovered_ts <= max_valid_epoch):
+                new_f_seen = recovered_ts
+                new_l_seen = recovered_ts + max(0.0, float(dur))
+                new_f_iso = datetime.fromtimestamp(new_f_seen, timezone.utc).isoformat()
+                new_l_iso = datetime.fromtimestamp(new_l_seen, timezone.utc).isoformat()
+                conn.execute(
+                    "UPDATE encounters SET first_seen = ?, first_seen_iso = ?, last_seen = ?, last_seen_iso = ? WHERE encounter_id = ?;",
+                    (new_f_seen, new_f_iso, new_l_seen, new_l_iso, enc_id)
+                )
+    except Exception:
+        pass
+
+    # 4b. Merge sequential split encounters by Serial number or MAC address within timeout window
+    try:
+        merge_sequential_encounters(conn, timeout_s=timeout_s)
+    except Exception:
+        pass
+
+    # 5. Indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_mac ON encounters(mac);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_serial ON encounters(serial_number);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_time ON encounters(first_seen, last_seen);")
@@ -188,11 +233,229 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
     conn.execute("CREATE INDEX IF NOT EXISTS idx_encounters_node ON encounters(node_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_status ON receiver_nodes(status);")
 
-    # 5. Auto-reconcile lingering active encounters from prior runs
+    # 6. Auto-reconcile lingering active encounters from prior runs
     now = time.time()
     conn.execute("UPDATE encounters SET is_active = 0 WHERE is_active = 1 AND (? - last_seen) > ?;",
                  (now, timeout_s))
     conn.commit()
+
+
+def merge_sequential_encounters(conn: sqlite3.Connection, timeout_s: float = 300.0) -> int:
+    """
+    Scans the database and merges sequential flight encounters that belong to the same drone
+    (matching serial number or matching MAC address) within the inactivity timeout window (default: 300s).
+    Unifies durations, packet counts, transports, channels, PHY distributions, RSSI, telemetry, and trajectories.
+    """
+    conn.row_factory = sqlite3.Row
+    merged_total = 0
+
+    while True:
+        rows = conn.execute("""
+            SELECT * FROM encounters
+            ORDER BY first_seen ASC, last_seen ASC
+        """).fetchall()
+
+        # Build lookup maps by serial and by mac
+        serials_map: Dict[str, List[Any]] = {}
+        macs_map: Dict[str, List[Any]] = {}
+        for r in rows:
+            s = r["serial_number"]
+            m = r["mac"]
+            if s:
+                serials_map.setdefault(s, []).append(r)
+            elif m and m != "UNKNOWN":
+                macs_map.setdefault(m, []).append(r)
+
+        candidate = None
+
+        # Check serial matches first
+        for s, elist in serials_map.items():
+            if len(elist) > 1:
+                for i in range(len(elist) - 1):
+                    e1, e2 = elist[i], elist[i + 1]
+                    if e2["first_seen"] >= e1["first_seen"] - 60.0 and (e2["first_seen"] - e1["last_seen"] <= timeout_s):
+                        candidate = (e1, e2)
+                        break
+                if candidate:
+                    break
+
+        if not candidate:
+            for m, elist in macs_map.items():
+                if len(elist) > 1:
+                    for i in range(len(elist) - 1):
+                        e1, e2 = elist[i], elist[i + 1]
+                        if e2["first_seen"] >= e1["first_seen"] - 60.0 and (e2["first_seen"] - e1["last_seen"] <= timeout_s):
+                            candidate = (e1, e2)
+                            break
+                    if candidate:
+                        break
+
+        if not candidate:
+            break
+
+        e1, e2 = candidate
+        t_id = e1["encounter_id"]
+        s_id = e2["encounter_id"]
+        if t_id == s_id:
+            break
+
+        f_seen = min(e1["first_seen"], e2["first_seen"])
+        l_seen = max(e1["last_seen"], e2["last_seen"])
+        f_iso = datetime.fromtimestamp(f_seen, timezone.utc).isoformat()
+        l_iso = datetime.fromtimestamp(l_seen, timezone.utc).isoformat()
+        dur = round(l_seen - f_seen, 2)
+        pkts = (e1["packet_count"] or 0) + (e2["packet_count"] or 0)
+
+        # Transports and channels
+        t_set = set(filter(None, (e1["transports"] or "").split(",") + (e2["transports"] or "").split(",")))
+        c_set = set(filter(None, (e1["channels"] or "").split(",") + (e2["channels"] or "").split(",")))
+        transports = ",".join(sorted(t_set))
+        channels = ",".join(sorted(c_set))
+
+        # Wi-Fi rates and PHY distribution
+        wr_set = set(filter(None, [r.strip() for r in (e1["wifi_rates"] or "").split(",") if r.strip()] + [r.strip() for r in (e2["wifi_rates"] or "").split(",") if r.strip()]))
+        wifi_rates = ", ".join(sorted(wr_set)) if wr_set else None
+
+        phy1, phy2 = {}, {}
+        try:
+            if e1["phy_rate_dist_json"]:
+                phy1 = json.loads(e1["phy_rate_dist_json"])
+        except Exception:
+            pass
+        try:
+            if e2["phy_rate_dist_json"]:
+                phy2 = json.loads(e2["phy_rate_dist_json"])
+        except Exception:
+            pass
+
+        merged_phy = dict(phy1)
+        for k, v in phy2.items():
+            if k in merged_phy:
+                merged_phy[k]["count"] = merged_phy[k].get("count", 0) + v.get("count", 0)
+            else:
+                merged_phy[k] = v
+        phy_rate_dist_json = json.dumps(merged_phy) if merged_phy else None
+
+        # RSSI
+        r_mins = [v for v in [e1["min_rssi_dbm"], e2["min_rssi_dbm"]] if v is not None]
+        r_maxs = [v for v in [e1["max_rssi_dbm"], e2["max_rssi_dbm"]] if v is not None]
+        min_rssi = min(r_mins) if r_mins else None
+        max_rssi = max(r_maxs) if r_maxs else None
+        avg_rssi = None
+        if e1["avg_rssi_dbm"] is not None and e2["avg_rssi_dbm"] is not None:
+            c1, c2 = e1["packet_count"] or 1, e2["packet_count"] or 1
+            avg_rssi = round((e1["avg_rssi_dbm"] * c1 + e2["avg_rssi_dbm"] * c2) / (c1 + c2), 1)
+        elif e1["avg_rssi_dbm"] is not None:
+            avg_rssi = e1["avg_rssi_dbm"]
+        else:
+            avg_rssi = e2["avg_rssi_dbm"]
+
+        def _min_val(a, b):
+            v = [x for x in [a, b] if x is not None]
+            return min(v) if v else None
+
+        def _max_val(a, b):
+            v = [x for x in [a, b] if x is not None]
+            return max(v) if v else None
+
+        min_alt = _min_val(e1["min_alt_m"], e2["min_alt_m"])
+        max_alt = _max_val(e1["max_alt_m"], e2["max_alt_m"])
+        min_h = _min_val(e1["min_height_m"], e2["min_height_m"])
+        max_h = _max_val(e1["max_height_m"], e2["max_height_m"])
+        min_p = _min_val(e1["min_pressure_alt_m"], e2["min_pressure_alt_m"])
+        max_p = _max_val(e1["max_pressure_alt_m"], e2["max_pressure_alt_m"])
+        max_spd = _max_val(e1["max_speed_mps"], e2["max_speed_mps"])
+
+        # Trajectory merge
+        traj1, traj2 = [], []
+        try:
+            if e1["trajectory_json"]:
+                traj1 = json.loads(e1["trajectory_json"])
+        except Exception:
+            pass
+        try:
+            if e2["trajectory_json"]:
+                traj2 = json.loads(e2["trajectory_json"])
+        except Exception:
+            pass
+        combined_traj = traj1 + traj2
+        seen_pts = set()
+        deduped_traj = []
+        for pt in combined_traj:
+            if isinstance(pt, (list, tuple)) and len(pt) >= 6:
+                key = (round(pt[0], 5), round(pt[1], 5), round(pt[5], 1))
+                if key not in seen_pts:
+                    seen_pts.add(key)
+                    deduped_traj.append(pt)
+        deduped_traj.sort(key=lambda p: p[5] if len(p) >= 6 else 0)
+        traj_json = json.dumps(deduped_traj) if deduped_traj else None
+
+        dominant_rate_mbps = None
+        dominant_modulation = None
+        min_rate_mbps = None
+        max_rate_mbps = None
+        if merged_phy:
+            sorted_entries = sorted(merged_phy.items(), key=lambda x: x[1].get("count", 0), reverse=True)
+            if sorted_entries:
+                dom_info = sorted_entries[0][1]
+                dominant_rate_mbps = dom_info.get("rate_mbps")
+                dominant_modulation = dom_info.get("modulation")
+            all_r = [v["rate_mbps"] for v in merged_phy.values() if v.get("rate_mbps") is not None]
+            if all_r:
+                min_rate_mbps = min(all_r)
+                max_rate_mbps = max(all_r)
+
+        serial = e1["serial_number"] or e2["serial_number"]
+        drone_make = e1["drone_make"] or e2["drone_make"]
+        drone_model = e1["drone_model"] or e2["drone_model"]
+        if serial and (not drone_make or not drone_model):
+            inf = infer_drone_model(serial)
+            drone_make = drone_make or inf.get("make")
+            drone_model = drone_model or inf.get("model")
+
+        operator_id = e1["operator_id"] or e2["operator_id"]
+        self_id_desc = e1["self_id_desc"] or e2["self_id_desc"]
+        pilot_lat = e1["pilot_lat"] if e1["pilot_lat"] is not None else e2["pilot_lat"]
+        pilot_lon = e1["pilot_lon"] if e1["pilot_lon"] is not None else e2["pilot_lon"]
+        pilot_alt = e1["pilot_alt_m"] if e1["pilot_alt_m"] is not None else e2["pilot_alt_m"]
+        area_ceil = e1["area_ceil_m"] if e1["area_ceil_m"] is not None else e2["area_ceil_m"]
+        area_floor = e1["area_floor_m"] if e1["area_floor_m"] is not None else e2["area_floor_m"]
+        node_id = e1["node_id"] or e2["node_id"]
+        is_active = max(e1["is_active"] or 0, e2["is_active"] or 0)
+
+        # Prefer non-1970 encounter_id as primary target
+        final_id = t_id
+        if any(t_id.startswith(p) for p in ["ENC-1970", "ENC-1972", "ENC-1995", "ENC-2060", "ENC-2061"]):
+            if not any(s_id.startswith(p) for p in ["ENC-1970", "ENC-1972", "ENC-1995", "ENC-2060", "ENC-2061"]):
+                final_id = s_id
+
+        primary_mac = e1["mac"] if (e1["mac"] and e1["mac"] != "UNKNOWN") else e2["mac"]
+
+        # Delete existing split rows to prevent PRIMARY KEY uniqueness conflicts
+        conn.execute("DELETE FROM encounters WHERE encounter_id IN (?, ?);", (t_id, s_id))
+
+        conn.execute("""
+            INSERT OR REPLACE INTO encounters (
+                encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                last_seen, last_seen_iso, duration_s, packet_count, transports,
+                channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
+                max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm,
+                min_alt_m, max_alt_m, min_height_m, max_height_m, min_pressure_alt_m,
+                max_pressure_alt_m, max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m,
+                area_ceil_m, area_floor_m, operator_id, self_id_desc, drone_make,
+                drone_model, node_id, trajectory_json, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            final_id, primary_mac, serial, f_seen, f_iso, l_seen, l_iso, dur, pkts, transports,
+            channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps, max_rate_mbps,
+            phy_rate_dist_json, min_rssi, max_rssi, avg_rssi, min_alt, max_alt, min_h, max_h, min_p,
+            max_p, max_spd, pilot_lat, pilot_lon, pilot_alt, area_ceil, area_floor, operator_id,
+            self_id_desc, drone_make, drone_model, node_id, traj_json, is_active
+        ))
+        conn.commit()
+        merged_total += 1
+
+    return merged_total
 
 
 def get_db_connection(db_path: str, timeout_s: float = 300.0) -> sqlite3.Connection:

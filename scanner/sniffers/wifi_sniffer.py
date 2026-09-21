@@ -15,7 +15,13 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 # Local parser
-from drone_rid_spoofer.parser import ASTM_F3411_SpecParser, parse_astm_payload
+try:
+    from scanner.parser import ASTM_F3411_SpecParser, parse_astm_payload
+except ImportError:
+    try:
+        from drone_rid_spoofer.parser import ASTM_F3411_SpecParser, parse_astm_payload
+    except ImportError:
+        from parser import ASTM_F3411_SpecParser, parse_astm_payload
 
 # Globals
 START_TIME = None

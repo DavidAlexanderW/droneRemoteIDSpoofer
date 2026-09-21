@@ -11,7 +11,7 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 from scapy.all import sniff, Dot11Beacon, Dot11Elt
-from drone_rid_spoofer.parser import ASTM_F3411_SpecParser
+from scanner.parser import ASTM_F3411_SpecParser
 
 
 def packet_callback(pkt):

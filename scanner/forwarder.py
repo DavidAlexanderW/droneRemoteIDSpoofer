@@ -12,6 +12,7 @@ On reconnect/startup:
 """
 
 import asyncio
+from datetime import datetime, timezone
 import glob
 import json
 import logging
@@ -32,13 +33,16 @@ if _scanner_dir not in sys.path:
     sys.path.insert(0, _scanner_dir)
 
 try:
-    from drone_rid_spoofer.parser import decode_astm_message, parse_astm_payload
+    from scanner.parser import decode_astm_message, parse_astm_payload
 except ImportError:
     try:
-        from parser import decode_astm_message, parse_astm_payload
+        from drone_rid_spoofer.parser import decode_astm_message, parse_astm_payload
     except ImportError:
-        decode_astm_message = None
-        parse_astm_payload = None
+        try:
+            from parser import decode_astm_message, parse_astm_payload
+        except ImportError:
+            decode_astm_message = None
+            parse_astm_payload = None
 
 try:
     import websockets
@@ -387,18 +391,27 @@ class CentralStreamForwarder:
                 total_lines += 1
                 try:
                     pkt = json.loads(line_str)
-                    ts = pkt.get("timestamp") or pkt.get("timestamp_epoch")
+                    now_ts = time.time()
+                    min_valid = 1700000000.0
+                    max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+
+                    ts = pkt.get("reception_timestamp") or pkt.get("timestamp") or pkt.get("timestamp_epoch")
                     if ts is None:
                         iso_str = pkt.get("timestamp_iso")
                         if iso_str:
                             try:
-                                from datetime import datetime
                                 dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
                                 ts = dt.timestamp()
                             except Exception:
-                                ts = time.time()
-                        else:
-                            ts = time.time()
+                                ts = None
+                    if ts is None or ts < min_valid or ts > max_valid:
+                        recovered = None
+                        for m in (pkt.get("messages") or []):
+                            sys_ep = m.get("system_timestamp_epoch")
+                            if sys_ep and min_valid <= sys_ep <= max_valid:
+                                recovered = float(sys_ep)
+                                break
+                        ts = recovered if recovered is not None else now_ts
 
                     # Spool files obey watermark; historical archive backlog files sync in full (unless older than watermark and not forced)
                     should_sync = False
@@ -429,8 +442,10 @@ class CentralStreamForwarder:
                             "version": "1.0",
                             "node_id": self.node_id,
                             "node_meta": self.node_meta,
-                            "timestamp": ts,
                             **pkt,
+                            "timestamp": ts,
+                            "reception_timestamp": ts,
+                            "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                         }
                         batch_items.append(envelope)
 
