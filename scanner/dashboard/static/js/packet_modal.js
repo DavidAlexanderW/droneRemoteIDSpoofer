@@ -71,18 +71,30 @@ export class DeepPacketInspectorController {
   async open(encounterId, nodeId = null) {
     this.currentEncounterId = encounterId;
     this.currentEncounterNodeId = nodeId;
-    this.titleEl.textContent = `ENCOUNTER: ${encounterId}`;
+
+    // Header Overview Node Badge
+    const rxNode = (this.nodesList || []).find(n => n.node_id === nodeId);
+    const nodeDisplayName = rxNode && rxNode.name ? rxNode.name : nodeId;
+    const nodeBadgeHtml = nodeId ? ` <span class="pill-chip node-pill" style="font-size: 11px; margin-left: 8px; vertical-align: middle;" title="Receiver Node: ${nodeDisplayName}">📡 ${nodeDisplayName}</span>` : '';
+    this.titleEl.innerHTML = `ENCOUNTER: ${encounterId}${nodeBadgeHtml}`;
+
     this.modal.style.display = 'flex';
-    this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">Loading captured Remote ID packets...</td></tr>`;
+    this.tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 40px; color: var(--text-muted);">Loading captured Remote ID packets...</td></tr>`;
 
     try {
       const resp = await fetch(`/api/encounters/${encounterId}/packets`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       this.packets = data.packets || [];
+      if (!this.currentEncounterNodeId && data.node_id) {
+        this.currentEncounterNodeId = data.node_id;
+        const rx = (this.nodesList || []).find(n => n.node_id === data.node_id);
+        const name = rx && rx.name ? rx.name : data.node_id;
+        this.titleEl.innerHTML = `ENCOUNTER: ${encounterId} <span class="pill-chip node-pill" style="font-size: 11px; margin-left: 8px; vertical-align: middle;" title="Receiver Node: ${name}">📡 ${name}</span>`;
+      }
       this.renderTable();
     } catch (err) {
-      this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--accent-red);">Failed to load packets: ${err.message}</td></tr>`;
+      this.tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 40px; color: var(--accent-red);">Failed to load packets: ${err.message}</td></tr>`;
     }
   }
 
@@ -94,7 +106,7 @@ export class DeepPacketInspectorController {
 
   renderTable() {
     if (!this.packets || this.packets.length === 0) {
-      this.tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">No packets recorded for this encounter.</td></tr>`;
+      this.tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 40px; color: var(--text-muted);">No packets recorded for this encounter.</td></tr>`;
       this.totalCountEl.textContent = '0';
       this.showingCountEl.textContent = '0';
       return;
@@ -119,6 +131,14 @@ export class DeepPacketInspectorController {
         : '<span style="color: var(--text-muted);">--</span>';
       const transport = pkt.transport ? pkt.transport.toUpperCase() : 'BLE';
       const channel = pkt.channel || 'N/A';
+      const pktNodeId = pkt.node_id || this.currentEncounterNodeId;
+      let nodeChip = '<span style="color: var(--text-muted);">--</span>';
+      if (pktNodeId) {
+        const rxNode = (this.nodesList || []).find(n => n.node_id === pktNodeId);
+        const nodeDisplayName = rxNode && rxNode.name ? rxNode.name : pktNodeId;
+        const fullTitle = rxNode && rxNode.name ? `Receiver Node: ${rxNode.name} (${pktNodeId})` : `Receiver Node: ${pktNodeId}`;
+        nodeChip = `<span class="pill-chip node-pill" title="${fullTitle}"><span class="node-icon">📡</span> ${nodeDisplayName}</span>`;
+      }
       const rssi = pkt.rssi_dbm != null ? `${pkt.rssi_dbm} dBm` : 'N/A';
       const rateDesc = pkt.rate_desc || (pkt.rate_mbps ? `${pkt.rate_mbps} Mbps` : '--');
 
@@ -224,6 +244,7 @@ export class DeepPacketInspectorController {
           <td>${counterDisplay}</td>
           <td><span class="pill-chip ${transport.toLowerCase()}">${transport}</span></td>
           <td>ch${channel}</td>
+          <td>${nodeChip}</td>
           <td><span class="pill-chip font-mono" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 11px; padding: 1px 6px;">${rateDesc}</span></td>
           <td>${rssi}</td>
           <td>${blockTags || '<span style="color:var(--text-muted);">(No Decoded Blocks)</span>'}</td>
@@ -264,6 +285,12 @@ export class DeepPacketInspectorController {
     if (pkt.mac) frameInfo.push(`Transmitter MAC Address   : ${pkt.mac}`);
     if (pkt.transport) frameInfo.push(`Transport Protocol        : ${pkt.transport.toUpperCase()}`);
     if (pkt.channel != null) frameInfo.push(`Broadcast Channel         : ${pkt.channel}`);
+    const pktNode = pkt.node_id || this.currentEncounterNodeId;
+    if (pktNode) {
+      const rxNode = (this.nodesList || []).find(n => n.node_id === pktNode);
+      const nodeDisplayName = rxNode && rxNode.name ? `${rxNode.name} (${pktNode})` : pktNode;
+      frameInfo.push(`Detection Origin Node     : 📡 ${nodeDisplayName}`);
+    }
     if (pkt.rssi_dbm != null) frameInfo.push(`Antenna Signal (RSSI)     : ${pkt.rssi_dbm} dBm`);
     if (pkt.rate_desc) frameInfo.push(`PHY Rate / Modulation     : ${pkt.rate_desc}`);
     if (pkt.rate_mbps != null) frameInfo.push(`Data Rate (Mbps)          : ${pkt.rate_mbps}`);

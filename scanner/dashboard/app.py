@@ -726,6 +726,15 @@ def get_encounter_packets(encounter_id: str):
     Searches the JSONL replay log file if present, or reconstructs from trajectory fixes.
     """
     packets = []
+    enc_node_id = None
+    try:
+        conn_chk = get_db_connection()
+        row_chk = conn_chk.execute("SELECT node_id FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
+        if row_chk and row_chk["node_id"]:
+            enc_node_id = row_chk["node_id"]
+        conn_chk.close()
+    except Exception:
+        pass
 
     # 1. Attempt to extract from JSONL log files
     log_candidates = get_all_jsonl_log_candidates()
@@ -775,6 +784,7 @@ def get_encounter_packets(encounter_id: str):
                                     "index": len(packets) + 1,
                                     "time_offset_ms": rec.get("time_offset_ms", 0),
                                     "timestamp_iso": rec_iso,
+                                    "node_id": rec.get("node_id") or enc_node_id,
                                     "transport": rec.get("transport"),
                                     "channel": rec.get("channel"),
                                     "rssi_dbm": pkt_rssi,
@@ -896,6 +906,7 @@ def get_encounter_packets(encounter_id: str):
                     "index": idx + 1,
                     "time_offset_ms": delta_ms,
                     "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                    "node_id": row["node_id"] if ("node_id" in row.keys()) else enc_node_id,
                     "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
                     "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
                     "rssi_dbm": pt_rssi,
@@ -913,6 +924,7 @@ def get_encounter_packets(encounter_id: str):
                 "index": 1,
                 "time_offset_ms": 0,
                 "timestamp_iso": row["first_seen_iso"] or datetime.fromtimestamp(t0, timezone.utc).isoformat(),
+                "node_id": row["node_id"] if ("node_id" in row.keys()) else enc_node_id,
                 "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
                 "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
                 "rssi_dbm": row["avg_rssi_dbm"],
@@ -933,6 +945,7 @@ def get_encounter_packets(encounter_id: str):
         "encounter_id": encounter_id,
         "packet_count": len(packets),
         "packets": packets,
+        "node_id": enc_node_id,
     }
 
 

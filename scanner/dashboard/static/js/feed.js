@@ -154,12 +154,17 @@ export class EncountersFeedController {
         const encId = (enc.encounter_id || '').toLowerCase();
         const make = (enc.drone_make || '').toLowerCase();
         const model = (enc.drone_model || '').toLowerCase();
+        const nodeId = (enc.node_id || '').toLowerCase();
+        const rxNode = (this.nodesList || []).find(n => n.node_id === enc.node_id);
+        const nodeName = (rxNode && rxNode.name ? rxNode.name : '').toLowerCase();
         const match = mac.includes(this.searchQuery) ||
                       serial.includes(this.searchQuery) ||
                       op.includes(this.searchQuery) ||
                       encId.includes(this.searchQuery) ||
                       make.includes(this.searchQuery) ||
-                      model.includes(this.searchQuery);
+                      model.includes(this.searchQuery) ||
+                      nodeId.includes(this.searchQuery) ||
+                      nodeName.includes(this.searchQuery);
         if (!match) return false;
       }
 
@@ -256,9 +261,9 @@ export class EncountersFeedController {
       const distStr = enc._distM >= 1000 ? `${(enc._distM / 1000).toFixed(2)} km` : `${Math.round(enc._distM)} m`;
       const isPilot = Boolean(enc._distIsPilot);
       const nodeName = enc._distInfo && enc._distInfo.nodeName ? enc._distInfo.nodeName : 'Sensor';
-      distBadge = `<span class="pill-chip rx-dist-pill ${isDistanceMode ? 'highlight-sort' : ''}" title="${isPilot ? 'Pilot / GCS Distance' : 'Aircraft Distance'} to 📡 ${nodeName}">📡 ${isPilot ? 'GCS: ' : ''}${distStr}</span>`;
+      distBadge = `<span class="pill-chip rx-dist-pill ${isDistanceMode ? 'highlight-sort' : ''}" title="${isPilot ? 'Pilot / GCS Distance' : 'Aircraft Distance'} to 📡 ${nodeName}">📏 ${isPilot ? 'GCS: ' : ''}${distStr}</span>`;
     } else if (isDistanceMode) {
-      distBadge = `<span class="pill-chip rx-dist-pill no-fix" title="No GNSS position coordinates recorded">📡 No Range</span>`;
+      distBadge = `<span class="pill-chip rx-dist-pill no-fix" title="No GNSS position coordinates recorded">📏 No Range</span>`;
     }
 
     // Transports & Channel Chips
@@ -268,6 +273,15 @@ export class EncountersFeedController {
     }).join(' ');
 
     const channelBadge = this.formatChannelBadge(enc.transports, enc.channels);
+
+    // Node Origin Status Badge
+    let nodeBadge = '';
+    if (enc.node_id) {
+      const rxNode = (this.nodesList || []).find(n => n.node_id === enc.node_id);
+      const nodeDisplayName = rxNode && rxNode.name ? rxNode.name : enc.node_id;
+      const fullTitle = rxNode && rxNode.name ? `Receiver Node: ${rxNode.name} (${enc.node_id})` : `Receiver Node: ${enc.node_id}`;
+      nodeBadge = `<span class="pill-chip node-pill" title="${fullTitle}"><span class="node-icon">📡</span> ${nodeDisplayName}</span>`;
+    }
 
     // Operator ID Badge
     const operatorHtml = enc.operator_id ? `
@@ -319,7 +333,7 @@ export class EncountersFeedController {
         ${operatorHtml}
 
         <div class="card-meta-row">
-          <div class="card-transports">${transportChips} ${channelBadge} ${distBadge}</div>
+          <div class="card-transports">${transportChips} ${channelBadge} ${nodeBadge} ${distBadge}</div>
           <div class="card-stats">
             <span>Alt: <b>${maxAltStr}</b></span> · <span>Spd: <b>${maxSpeedStr}</b></span>
           </div>

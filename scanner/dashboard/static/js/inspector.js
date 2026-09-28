@@ -348,12 +348,40 @@ export class TelemetryInspectorController {
     document.getElementById('insp-operator').textContent = encounter.operator_id || 'NOT BROADCAST';
     document.getElementById('insp-selfid').textContent = encounter.self_id_desc || 'N/A';
 
-    // RF Transports & Channels
-    const transportsStr = (encounter.transports || []).map(t => t.toUpperCase()).join(', ');
-    const channelsStr = (encounter.channels || []).join(', ');
+    // RF Transports & Channels Badges
     const rfEl = document.getElementById('insp-rf-channels');
     if (rfEl) {
-      rfEl.textContent = `${transportsStr || 'N/A'} (CH: ${channelsStr || 'N/A'})`;
+      const transportChips = (encounter.transports || []).map(t => {
+        const clean = t.toLowerCase().trim();
+        return `<span class="pill-chip ${clean}">${clean.toUpperCase()}</span>`;
+      }).join(' ');
+
+      const isWifi = (encounter.transports || []).some(t => t.toLowerCase().includes('wifi') || t.toLowerCase().includes('nan'));
+      const channels = encounter.channels || [];
+      const channelChips = channels.map(ch => {
+        const num = parseInt(ch, 10);
+        let chLabel = `CH ${ch}`;
+        if (isWifi && !isNaN(num)) {
+          if (num >= 1 && num <= 14) chLabel = `CH ${num} (2.4G)`;
+          else if (num >= 36) chLabel = `CH ${num} (5.8G)`;
+        }
+        return `<span class="pill-chip channel-pill" title="Radio Frequency Channel">${chLabel}</span>`;
+      }).join(' ');
+
+      rfEl.innerHTML = `${transportChips || '<span style="color: var(--text-muted);">N/A</span>'} ${channelChips}`;
+    }
+
+    // Receiver Node Origin Badge
+    const nodeEl = document.getElementById('insp-node');
+    if (nodeEl) {
+      if (encounter.node_id) {
+        const rxNode = (this.nodesList || []).find(n => n.node_id === encounter.node_id);
+        const nodeDisplayName = rxNode && rxNode.name ? rxNode.name : encounter.node_id;
+        const fullTitle = rxNode && rxNode.name ? `Receiver Node: ${rxNode.name} (${encounter.node_id})` : `Receiver Node: ${encounter.node_id}`;
+        nodeEl.innerHTML = `<span class="pill-chip node-pill" title="${fullTitle}"><span class="node-icon">📡</span> ${nodeDisplayName}</span>`;
+      } else {
+        nodeEl.innerHTML = `<span style="color: var(--text-muted);">--</span>`;
+      }
     }
 
     // Wi-Fi / PHY Rates & Modulation
