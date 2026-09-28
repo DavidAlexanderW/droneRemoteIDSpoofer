@@ -192,6 +192,95 @@ class TestCentralHub(unittest.TestCase):
         self.assertEqual(nodes[0]["status"], "ONLINE")
         self.assertEqual(nodes[0]["packets_received_total"], 5)
 
+    def test_node_position_update_via_api_and_websocket_command(self):
+        # 1. Register node in DB
+        self.hub.register_node(
+            node_id="sensor-node-01",
+            node_meta={"name": "Zurich Node", "latitude": 47.37, "longitude": 8.54, "altitude_m": 410.0},
+        )
+
+        # 2. Mock connected edge node websocket
+        class MockEdgeWebSocket:
+            def __init__(self, hub):
+                self.hub = hub
+                self.sent_messages = []
+
+            async def send_text(self, text):
+                data = json.loads(text)
+                self.sent_messages.append(data)
+                # Immediately simulate remote node ACK
+                if data.get("type") == "update_location":
+                    req_id = data.get("request_id")
+                    fut = self.hub.pending_command_futures.get(req_id)
+                    if fut and not fut.done():
+                        fut.set_result({
+                            "type": "update_location_response",
+                            "request_id": req_id,
+                            "node_id": "sensor-node-01",
+                            "status": "ok",
+                            "latitude": data.get("latitude"),
+                            "longitude": data.get("longitude"),
+                            "altitude_m": data.get("altitude_m"),
+                        })
+
+        mock_ws = MockEdgeWebSocket(self.hub)
+        self.hub.active_node_connections["sensor-node-01"] = mock_ws
+
+        # 3. Call API to update position
+        resp = self.client.post("/api/nodes/sensor-node-01/position", json={
+            "latitude": 47.395,
+            "longitude": 8.565,
+            "altitude_m": 480.0,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["remote_synced"])
+        self.assertEqual(data["node"]["latitude"], 47.395)
+        self.assertEqual(data["node"]["longitude"], 8.565)
+
+        # Verify command was sent to edge node
+        self.assertEqual(len(mock_ws.sent_messages), 1)
+        cmd = mock_ws.sent_messages[0]
+        self.assertEqual(cmd["type"], "update_location")
+        self.assertEqual(cmd["node_id"], "sensor-node-01")
+        self.assertEqual(cmd["latitude"], 47.395)
+        self.assertEqual(cmd["longitude"], 8.565)
+
+    def test_in_flight_guard_prevents_heartbeat_reversion(self):
+        # 1. Register node with initial coordinates
+        self.hub.register_node(
+            node_id="sensor-node-guard",
+            node_meta={"name": "Guard Node", "latitude": 47.37, "longitude": 8.54},
+        )
+
+        # 2. Engage in-flight update to (47.45, 8.65)
+        self.hub.in_flight_position_updates["sensor-node-guard"] = {
+            "latitude": 47.45,
+            "longitude": 8.65,
+            "altitude_m": 430.0,
+            "timestamp": time.time(),
+        }
+
+        # 3. Incoming stale registration or packet meta arrives with old coordinates (47.37, 8.54)
+        self.hub.register_node(
+            node_id="sensor-node-guard",
+            node_meta={"name": "Guard Node", "latitude": 47.37, "longitude": 8.54},
+        )
+
+        # 4. Verify coordinates in DB are protected and preserved at the target coordinates
+        nodes = get_receiver_nodes(self.hub.db_conn)
+        target_node = next(n for n in nodes if n["node_id"] == "sensor-node-guard")
+        self.assertEqual(target_node["latitude"], 47.45)
+        self.assertEqual(target_node["longitude"], 8.65)
+
+        # 5. Routine heartbeat arrives - verify it touches liveness and NEVER changes coordinates
+        self.hub.heartbeat_node("sensor-node-guard", packets_increment=1)
+        nodes = get_receiver_nodes(self.hub.db_conn)
+        target_node = next(n for n in nodes if n["node_id"] == "sensor-node-guard")
+        self.assertEqual(target_node["latitude"], 47.45)
+        self.assertEqual(target_node["longitude"], 8.65)
+
 
 if __name__ == "__main__":
     unittest.main()

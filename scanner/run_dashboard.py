@@ -77,6 +77,12 @@ def parse_args():
         help="Override default map zoom level (e.g. 13)",
     )
     parser.add_argument(
+        "--hub-url",
+        type=str,
+        default=os.environ.get("RID_HUB_HTTP_URL", "http://127.0.0.1:8000"),
+        help="Central Ingestion Hub HTTP API URL for downstream sensor management",
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
         help="Enable auto-reloading for development",
@@ -86,6 +92,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.hub_url:
+        os.environ["RID_HUB_HTTP_URL"] = args.hub_url
 
     # Add scanner directory to sys.path
     scanner_dir = os.path.abspath(os.path.dirname(__file__))

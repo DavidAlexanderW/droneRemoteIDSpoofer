@@ -117,10 +117,12 @@ class TacticalApp {
       }
       const data = await resp.json();
       console.log(`[+] Sensor ${nodeId} position calibrated to:`, lat, lon, data);
+      if (this.mapCtrl) this.mapCtrl.clearPendingNodeUpdate(nodeId);
       await this.fetchNodes();
     } catch (err) {
       console.error(`Failed to update position for sensor ${nodeId}:`, err);
       alert(`Could not save position for node ${nodeId}: ${err.message}`);
+      if (this.mapCtrl) this.mapCtrl.clearPendingNodeUpdate(nodeId);
       await this.fetchNodes(); // Revert marker on map
     }
   }

@@ -62,12 +62,17 @@ export class TacticalMapController {
     // Multi-node receiver layers
     this.multiNodeMarkers = new Map();      // node_id -> Leaflet Marker
     this.multiNodeRingLayers = new Map();   // node_id -> Leaflet LayerGroup
+    this.pendingPositionUpdates = new Set(); // node_ids with in-flight drags to prevent snap-back
 
     this.showTrails = true;
     this.showWaypoints = true;
     this.showRangeRings = true;
 
     this.initMap();
+  }
+
+  clearPendingNodeUpdate(nodeId) {
+    this.pendingPositionUpdates.delete(nodeId);
   }
 
   setDashboardConfig(config) {
@@ -167,6 +172,9 @@ export class TacticalMapController {
           const newLon = parseFloat(newPos.lng.toFixed(6));
           node.latitude = newLat;
           node.longitude = newLon;
+          this.pendingPositionUpdates.add(nodeId);
+          // Optimistically re-render range rings around the new dragged position immediately
+          this.renderNodeRings(nodeId, newLat, newLon, node, isOnline);
           if (this.onUpdateNodePosition) {
             this.onUpdateNodePosition(nodeId, newLat, newLon);
           }
@@ -175,7 +183,10 @@ export class TacticalMapController {
         this.multiNodeMarkers.set(nodeId, marker);
       } else {
         const marker = this.multiNodeMarkers.get(nodeId);
-        marker.setLatLng([lat, lon]);
+        // Do not let background polls revert marker position if a drag update is in-flight
+        if (!this.pendingPositionUpdates.has(nodeId)) {
+          marker.setLatLng([lat, lon]);
+        }
         marker.setIcon(createNodeIcon());
         marker.bindPopup(popupHtml);
         if (marker.dragging) {
@@ -184,54 +195,9 @@ export class TacticalMapController {
         }
       }
 
-      // 2. Render Range Rings for this node
-      let ringGroup = this.multiNodeRingLayers.get(nodeId);
-      if (!ringGroup) {
-        ringGroup = L.layerGroup();
-        if (this.showRangeRings) ringGroup.addTo(this.map);
-        this.multiNodeRingLayers.set(nodeId, ringGroup);
-      }
-      ringGroup.clearLayers();
-
-      if (this.showRangeRings && isOnline) {
-        let rings = [500, 1000, 2500, 5000];
-        try {
-          if (node.range_rings_json) rings = JSON.parse(node.range_rings_json);
-        } catch (e) {}
-
-        rings.forEach((radiusM, idx) => {
-          const radiusKm = radiusM >= 1000 ? `${(radiusM / 1000).toFixed(1)} km` : `${radiusM} m`;
-
-          // 1. Circle Polygon (tactical amber radar overlay)
-          const ring = L.circle([lat, lon], {
-            radius: radiusM,
-            color: '#f59e0b',
-            weight: 1.3,
-            opacity: 0.55,
-            fill: true,
-            fillColor: '#f59e0b',
-            fillOpacity: 0.018 * (4 - Math.min(3, idx)),
-            dashArray: '5, 6',
-            interactive: false,
-          });
-          ringGroup.addLayer(ring);
-
-          // 2. Clear Cardinal Distance Label on North Perimeter of Circle
-          const dLat = (radiusM / 6371000.0) * (180.0 / Math.PI);
-          const labelLatLng = [lat + dLat, lon];
-
-          const labelMarker = L.marker(labelLatLng, {
-            icon: L.divIcon({
-              html: `<div class="range-ring-pill">${radiusKm}</div>`,
-              className: 'custom-range-ring-label',
-              iconSize: [60, 16],
-              iconAnchor: [30, 8],
-            }),
-            interactive: false,
-            zIndexOffset: 100,
-          });
-          ringGroup.addLayer(labelMarker);
-        });
+      // 2. Render Range Rings for this node (skip if update in flight)
+      if (!this.pendingPositionUpdates.has(nodeId)) {
+        this.renderNodeRings(nodeId, lat, lon, node, isOnline);
       }
     });
 
@@ -245,6 +211,58 @@ export class TacticalMapController {
           this.multiNodeRingLayers.delete(nodeId);
         }
       }
+    }
+  }
+
+  renderNodeRings(nodeId, lat, lon, node, isOnline) {
+    let ringGroup = this.multiNodeRingLayers.get(nodeId);
+    if (!ringGroup) {
+      ringGroup = L.layerGroup();
+      if (this.showRangeRings) ringGroup.addTo(this.map);
+      this.multiNodeRingLayers.set(nodeId, ringGroup);
+    }
+    ringGroup.clearLayers();
+
+    if (this.showRangeRings && isOnline) {
+      let rings = [500, 1000, 2500, 5000];
+      try {
+        if (node.range_rings_json) rings = JSON.parse(node.range_rings_json);
+        else if (Array.isArray(node.range_rings_m)) rings = node.range_rings_m;
+      } catch (e) {}
+
+      rings.forEach((radiusM, idx) => {
+        const radiusKm = radiusM >= 1000 ? `${(radiusM / 1000).toFixed(1)} km` : `${radiusM} m`;
+
+        // 1. Circle Polygon (tactical amber radar overlay)
+        const ring = L.circle([lat, lon], {
+          radius: radiusM,
+          color: '#f59e0b',
+          weight: 1.3,
+          opacity: 0.55,
+          fill: true,
+          fillColor: '#f59e0b',
+          fillOpacity: 0.018 * (4 - Math.min(3, idx)),
+          dashArray: '5, 6',
+          interactive: false,
+        });
+        ringGroup.addLayer(ring);
+
+        // 2. Clear Cardinal Distance Label on North Perimeter of Circle
+        const dLat = (radiusM / 6371000.0) * (180.0 / Math.PI);
+        const labelLatLng = [lat + dLat, lon];
+
+        const labelMarker = L.marker(labelLatLng, {
+          icon: L.divIcon({
+            html: `<div class="range-ring-pill">${radiusKm}</div>`,
+            className: 'custom-range-ring-label',
+            iconSize: [60, 16],
+            iconAnchor: [30, 8],
+          }),
+          interactive: false,
+          zIndexOffset: 100,
+        });
+        ringGroup.addLayer(labelMarker);
+      });
     }
   }
 

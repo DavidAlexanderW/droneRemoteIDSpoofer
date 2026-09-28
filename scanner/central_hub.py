@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import uvicorn
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -45,6 +45,7 @@ try:
         touch_receiver_node_heartbeat,
         update_node_sync_watermark,
         upsert_receiver_node,
+        update_receiver_node_position,
     )
     from scanner.drone_models import infer_drone_model
 except ImportError:
@@ -56,6 +57,7 @@ except ImportError:
         touch_receiver_node_heartbeat,
         update_node_sync_watermark,
         upsert_receiver_node,
+        update_receiver_node_position,
     )
     from drone_models import infer_drone_model
 
@@ -237,6 +239,10 @@ class CentralIngestionHub:
         self.replay_logger = CentralDailyReplayLogger(log_dir=self.log_dir)
         self.deduplicator = MultiNodeDeduplicator()
 
+        self.active_node_connections: Dict[str, Any] = {}
+        self.pending_command_futures: Dict[str, asyncio.Future] = {}
+        self.in_flight_position_updates: Dict[str, Dict[str, Any]] = {}
+
         self.stats = {
             "start_time": time.time(),
             "total_packets_received": 0,
@@ -249,7 +255,7 @@ class CentralIngestionHub:
         return get_node_sync_watermark(self.db_conn, node_id)
 
     def register_node(self, node_id: str, node_meta: Dict[str, Any]):
-        """Upserts a receiver node's registration and location in the database."""
+        """Upserts a receiver node's registration and location in the database with in-flight guard."""
         name = node_meta.get("name", node_id)
         lat = float(node_meta.get("latitude", 0.0))
         lon = float(node_meta.get("longitude", 0.0))
@@ -257,6 +263,24 @@ class CentralIngestionHub:
         rings = json.dumps(node_meta.get("range_rings_m", [500, 1000, 2500, 5000]))
         desc = node_meta.get("description", "")
         locked = bool(node_meta.get("locked", False))
+
+        # In-flight guard: if a position update is currently in-flight for this node, preserve target coordinates
+        if node_id in self.in_flight_position_updates:
+            target = self.in_flight_position_updates[node_id]
+            lat = float(target["latitude"])
+            lon = float(target["longitude"])
+            if target.get("altitude_m") is not None:
+                alt = float(target["altitude_m"])
+        else:
+            # If node is already registered in DB and is unlocked, check if DB already has calibrated coordinates
+            existing = self.db_conn.execute("SELECT latitude, longitude, altitude_m, locked FROM receiver_nodes WHERE node_id = ?;", (node_id,)).fetchone()
+            if existing and not bool(existing["locked"]) and not locked:
+                db_lat = float(existing["latitude"])
+                db_lon = float(existing["longitude"])
+                if (db_lat != 0.0 or db_lon != 0.0) and (lat == 0.0 and lon == 0.0):
+                    lat = db_lat
+                    lon = db_lon
+                    alt = float(existing["altitude_m"])
 
         upsert_receiver_node(
             self.db_conn,
@@ -270,6 +294,30 @@ class CentralIngestionHub:
             locked=locked,
             status="ONLINE",
         )
+
+    async def send_node_command(self, node_id: str, command: Dict[str, Any], timeout_s: float = 5.0) -> Dict[str, Any]:
+        """Dispatches a JSON command to a connected edge node over WebSocket and awaits acknowledgment."""
+        ws = self.active_node_connections.get(node_id)
+        if not ws:
+            return {"status": "offline", "detail": f"Node '{node_id}' is not connected via WebSocket."}
+
+        req_id = command.get("request_id") or f"cmd-{node_id}-{int(time.time() * 1000)}"
+        command["request_id"] = req_id
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self.pending_command_futures[req_id] = fut
+
+        try:
+            await ws.send_text(json.dumps(command))
+            response = await asyncio.wait_for(fut, timeout=timeout_s)
+            return response
+        except asyncio.TimeoutError:
+            self.pending_command_futures.pop(req_id, None)
+            return {"status": "timeout", "detail": f"Node '{node_id}' did not respond within {timeout_s}s."}
+        except Exception as e:
+            self.pending_command_futures.pop(req_id, None)
+            return {"status": "error", "detail": str(e)}
 
     def heartbeat_node(self, node_id: str, packets_increment: int = 0):
         """Refreshes node heartbeat timestamp in database."""
@@ -386,11 +434,76 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
         nodes = get_receiver_nodes(hub.db_conn)
         return {"nodes": nodes, "count": len(nodes)}
 
+    @app.post("/api/nodes/{node_id}/position")
+    @app.post("/api/nodes/{node_id}/location")
+    async def api_update_node_position(node_id: str, payload: Dict[str, Any]):
+        """
+        Updates physical coordinates of an unlocked sensor node in the database,
+        engages an in-flight guard, and dispatches update_location to the connected
+        edge node over WebSocket to persist the new coordinates directly to disk.
+        """
+        lat = payload.get("latitude", payload.get("lat"))
+        lon = payload.get("longitude", payload.get("lon"))
+        alt = payload.get("altitude_m", payload.get("alt_m"))
+
+        if lat is None or lon is None:
+            raise HTTPException(status_code=400, detail="Missing required 'latitude' or 'longitude' in payload.")
+
+        # Guard against in-flight race conditions (heartbeats or packets arriving during update)
+        hub.in_flight_position_updates[node_id] = {
+            "latitude": float(lat),
+            "longitude": float(lon),
+            "altitude_m": float(alt) if alt is not None else None,
+            "timestamp": time.time(),
+        }
+
+        try:
+            updated = update_receiver_node_position(
+                hub.db_conn,
+                node_id=node_id,
+                latitude=float(lat),
+                longitude=float(lon),
+                altitude_m=float(alt) if alt is not None else None,
+            )
+        except KeyError as e:
+            hub.in_flight_position_updates.pop(node_id, None)
+            raise HTTPException(status_code=404, detail=str(e))
+        except PermissionError as e:
+            hub.in_flight_position_updates.pop(node_id, None)
+            raise HTTPException(status_code=403, detail=str(e))
+
+        # Check if node is connected via WebSocket
+        is_connected = node_id in hub.active_node_connections
+        remote_resp = None
+        if is_connected:
+            remote_resp = await hub.send_node_command(
+                node_id=node_id,
+                command={
+                    "type": "update_location",
+                    "node_id": node_id,
+                    "latitude": float(lat),
+                    "longitude": float(lon),
+                    "altitude_m": float(alt) if alt is not None else updated.get("altitude_m", 0.0),
+                },
+                timeout_s=5.0,
+            )
+        else:
+            hub.in_flight_position_updates.pop(node_id, None)
+
+        return {
+            "status": "ok",
+            "node": updated,
+            "remote_synced": bool(remote_resp and remote_resp.get("status") == "ok"),
+            "remote_response": remote_resp,
+            "detail": "Synchronized to remote node disk" if is_connected else "Updated in database; will sync on node reconnect."
+        }
+
     @app.websocket("/stream/node")
     async def websocket_node_stream(websocket: WebSocket, node_id: str = Query("unknown")):
         await websocket.accept()
         logger.info(f"[+] Node connected to WebSocket stream: '{node_id}' from {websocket.client.host}")
 
+        actual_node_id = node_id
         # Wait for handshake payload
         try:
             raw_handshake = await asyncio.wait_for(websocket.receive_text(), timeout=15.0)
@@ -398,7 +511,27 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
             actual_node_id = hs_data.get("node_id", node_id)
             node_meta = hs_data.get("node_meta", {})
 
-            # Register node
+            # Register connection in active registry
+            hub.active_node_connections[actual_node_id] = websocket
+
+            # Check if there is already a calibrated position in DB for this node
+            db_row = hub.db_conn.execute("SELECT latitude, longitude, altitude_m, locked FROM receiver_nodes WHERE node_id = ?;", (actual_node_id,)).fetchone()
+            calibrated_pos = None
+            if db_row and (float(db_row["latitude"]) != 0.0 or float(db_row["longitude"]) != 0.0):
+                calibrated_pos = {
+                    "latitude": float(db_row["latitude"]),
+                    "longitude": float(db_row["longitude"]),
+                    "altitude_m": float(db_row["altitude_m"]),
+                }
+
+            # If node is unlocked and we have calibrated coordinates in DB, preserve them during registration
+            if calibrated_pos and not bool(node_meta.get("locked")):
+                node_meta["latitude"] = calibrated_pos["latitude"]
+                node_meta["longitude"] = calibrated_pos["longitude"]
+                if calibrated_pos.get("altitude_m") is not None:
+                    node_meta["altitude_m"] = calibrated_pos["altitude_m"]
+
+            # Register node in DB
             hub.register_node(actual_node_id, node_meta)
             watermark = hub.get_last_synced_epoch(actual_node_id)
 
@@ -408,6 +541,7 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
                 "node_id": actual_node_id,
                 "last_synced_epoch": watermark,
                 "ack_enabled": True,
+                "calibrated_position": calibrated_pos,
             }
             await websocket.send_text(json.dumps(ack_response))
 
@@ -419,16 +553,19 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
 
                 if msg_type == "heartbeat":
                     hb_node_id = data.get("node_id", actual_node_id)
-                    hb_meta = data.get("node_meta")
-                    if hb_meta:
-                        hub.register_node(hb_node_id, hb_meta)
-                    else:
-                        hub.heartbeat_node(hb_node_id)
+                    # Routine heartbeat only refreshes liveness and packet count, NEVER overwrites coordinates
+                    hub.heartbeat_node(hb_node_id)
                     await websocket.send_text(json.dumps({
                         "type": "heartbeat_ack",
                         "status": "ok",
                         "timestamp": time.time(),
                     }))
+                elif msg_type == "update_location_response":
+                    req_id = data.get("request_id")
+                    hub.in_flight_position_updates.pop(actual_node_id, None)
+                    fut = hub.pending_command_futures.pop(req_id, None)
+                    if fut and not fut.done():
+                        fut.set_result(data)
                 elif msg_type == "batch":
                     batch_id = data.get("batch_id", "unknown")
                     count = await hub.ingest_batch(data)
@@ -446,10 +583,12 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
                     hub.heartbeat_node(actual_node_id, packets_increment=1)
 
         except WebSocketDisconnect:
-            logger.info(f"[*] Node '{node_id}' disconnected from WebSocket stream.")
+            logger.info(f"[*] Node '{actual_node_id}' disconnected from WebSocket stream.")
         except Exception as e:
-            logger.warning(f"[!] WebSocket exception for node '{node_id}': {e}")
+            logger.warning(f"[!] WebSocket exception for node '{actual_node_id}': {e}")
         finally:
+            if hub.active_node_connections.get(actual_node_id) is websocket:
+                del hub.active_node_connections[actual_node_id]
             try:
                 await websocket.close()
             except Exception:

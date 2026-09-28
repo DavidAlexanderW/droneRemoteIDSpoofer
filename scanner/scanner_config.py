@@ -111,13 +111,23 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 def save_scanner_config(config_data: Dict[str, Any], config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Persists scanner station configuration to JSON file on disk.
+    Preserves existing configured fields if the file is already present.
     """
     path = os.path.abspath(config_path) if config_path else get_default_config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     
     merged = dict(DEFAULT_SCANNER_CONFIG)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+                if isinstance(existing, dict):
+                    merged.update(existing)
+        except Exception:
+            pass
+
     merged.update(config_data)
-    merged["locked"] = bool(config_data.get("locked", False))
+    merged["locked"] = bool(config_data.get("locked", merged.get("locked", False)))
     merged["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
     
     # Atomic write to prevent partial file writes

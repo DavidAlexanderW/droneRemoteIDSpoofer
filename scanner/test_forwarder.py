@@ -253,6 +253,59 @@ class TestCentralStreamForwarder(unittest.TestCase):
 
         loop.close()
 
+    def test_forwarder_apply_position_update_writes_disk(self):
+        cfg_path = os.path.join(self.test_dir, "test_scanner_config.json")
+        callback_called = []
+
+        forwarder = CentralStreamForwarder(
+            hub_ws_url="ws://127.0.0.1:9999/stream/node",
+            node_id="test-node-pos",
+            node_meta={"name": "Pos Node", "latitude": 47.37, "longitude": 8.54, "locked": False},
+            config_path=cfg_path,
+            on_position_updated=lambda lat, lon, alt: callback_called.append((lat, lon, alt)),
+            spool_dir=self.spool_dir,
+            quiet=True,
+        )
+
+        success = forwarder._apply_position_update(47.3912, 8.5432, 435.0)
+        self.assertTrue(success)
+        self.assertEqual(forwarder.node_meta["latitude"], 47.3912)
+        self.assertEqual(forwarder.node_meta["longitude"], 8.5432)
+        self.assertEqual(forwarder.node_meta["altitude_m"], 435.0)
+        self.assertEqual(len(callback_called), 1)
+        self.assertEqual(callback_called[0], (47.3912, 8.5432, 435.0))
+
+        # Verify disk file was written and contains updated coordinates
+        self.assertTrue(os.path.exists(cfg_path))
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            disk_cfg = json.load(f)
+        self.assertEqual(disk_cfg["latitude"], 47.3912)
+        self.assertEqual(disk_cfg["longitude"], 8.5432)
+        self.assertEqual(disk_cfg["altitude_m"], 435.0)
+
+    def test_forwarder_locked_rejects_position_update(self):
+        cfg_path = os.path.join(self.test_dir, "test_locked_config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"latitude": 47.37, "longitude": 8.54, "locked": True}, f)
+
+        forwarder = CentralStreamForwarder(
+            hub_ws_url="ws://127.0.0.1:9999/stream/node",
+            node_id="test-node-locked",
+            node_meta={"name": "Locked Node", "latitude": 47.37, "longitude": 8.54, "locked": True},
+            config_path=cfg_path,
+            spool_dir=self.spool_dir,
+            quiet=True,
+        )
+
+        success = forwarder._apply_position_update(47.50, 8.70)
+        self.assertFalse(success)
+        self.assertEqual(forwarder.node_meta["latitude"], 47.37)
+
+        # Verify disk file was NOT modified
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            disk_cfg = json.load(f)
+        self.assertEqual(disk_cfg["latitude"], 47.37)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -145,6 +145,15 @@ try:
         reconcile_stale_encounters,
         touch_receiver_node_heartbeat,
         upsert_receiver_node,
+        update_receiver_node_position,
+        sanitize_serial,
+        sanitize_operator_id,
+        is_fuzzy_serial_match,
+        is_fuzzy_operator_match,
+        is_better_serial,
+        is_better_operator_id,
+        haversine_m,
+        merge_sequential_encounters,
     )
     from scanner.drone_models import infer_drone_model
     from scanner.forwarder import CentralStreamForwarder
@@ -157,15 +166,39 @@ except ImportError:
             reconcile_stale_encounters,
             touch_receiver_node_heartbeat,
             upsert_receiver_node,
+            update_receiver_node_position,
+            sanitize_serial,
+            sanitize_operator_id,
+            is_fuzzy_serial_match,
+            is_fuzzy_operator_match,
+            is_better_serial,
+            is_better_operator_id,
+            haversine_m,
+            merge_sequential_encounters,
         )
         from drone_models import infer_drone_model
         from forwarder import CentralStreamForwarder
         from scanner_config import load_scanner_config
     except ImportError:
         CentralStreamForwarder = None
+        merge_sequential_encounters = None
         load_scanner_config = lambda *args, **kwargs: {}
         def infer_drone_model(serial):
             return {"make": None, "model": None, "company": None, "country": None, "is_inferred": False}
+        def sanitize_serial(s):
+            return s
+        def sanitize_operator_id(op):
+            return op
+        def is_fuzzy_serial_match(s1, s2):
+            return s1 == s2
+        def is_fuzzy_operator_match(op1, op2):
+            return op1 == op2
+        def is_better_serial(new_s, old_s):
+            return bool(new_s and not old_s)
+        def is_better_operator_id(new_op, old_op):
+            return bool(new_op and not old_op)
+        def haversine_m(lat1, lon1, lat2, lon2):
+            return 0.0
 
 
 # ============================================================================
@@ -530,8 +563,11 @@ class EncounterTracker:
             self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        try:
             init_encounters_db(conn, timeout_s=self.timeout_s)
+        finally:
+            conn.close()
 
     def _remove_active(self, enc: Dict[str, Any]):
         eid = enc.get("encounter_id")
@@ -563,12 +599,31 @@ class EncounterTracker:
                 except Exception:
                     pass
 
-        # Extract serial from messages if not present at top level
-        if not serial:
-            for m in msgs_to_process:
-                if isinstance(m, dict) and m.get("type") == "Basic ID" and m.get("id"):
-                    serial = m.get("id")
-                    break
+        # Extract serial, operator ID, and location from messages upfront for encounter matching
+        operator_id = packet.get("operator_id")
+        pkt_lat = None
+        pkt_lon = None
+        for m in msgs_to_process:
+            if not isinstance(m, dict):
+                continue
+            m_type = m.get("type")
+            if m_type == "Basic ID":
+                b_id = m.get("id")
+                id_t = m.get("id_type")
+                if id_t == 1 or (id_t is None and not serial):
+                    if not serial or is_better_serial(b_id, serial):
+                        serial = b_id
+                elif id_t == 2:
+                    if not operator_id:
+                        operator_id = b_id
+            elif m_type == "Operator ID":
+                op_val = m.get("operator_id") or m.get("id")
+                if op_val and (not operator_id or is_better_operator_id(op_val, operator_id)):
+                    operator_id = op_val
+            elif m_type == "Location":
+                if m.get("lat") is not None and m.get("lon") is not None:
+                    pkt_lat = m.get("lat")
+                    pkt_lon = m.get("lon")
 
         # Robust physical reception timestamp resolution
         now_ts = time.time()
@@ -611,15 +666,42 @@ class EncounterTracker:
             counter = packet.get("msg_counter")
 
         with self.lock:
-            # Look up active encounter by serial first, then by MAC
             enc = None
-            if serial:
-                for active_enc in self.active_encounters.values():
-                    if active_enc.get("serial_number") == serial:
+            s_new = sanitize_serial(serial)
+            op_new = sanitize_operator_id(operator_id)
+
+            # 1. Exact or Fuzzy Serial Match
+            if s_new:
+                for active_enc in list(self.active_encounters.values()):
+                    s_act = sanitize_serial(active_enc.get("serial_number"))
+                    if s_act and (s_new == s_act or is_fuzzy_serial_match(s_new, s_act)):
                         enc = active_enc
                         break
+
+            # 2. Exact or Fuzzy Operator ID Match
+            if not enc and op_new:
+                for active_enc in list(self.active_encounters.values()):
+                    op_act = sanitize_operator_id(active_enc.get("operator_id"))
+                    if op_act and (op_new == op_act or is_fuzzy_operator_match(op_new, op_act)):
+                        enc = active_enc
+                        break
+
+            # 3. Exact MAC Match
             if not enc and mac and mac != "UNKNOWN" and mac in self.active_encounters:
                 enc = self.active_encounters[mac]
+
+            # 4. BLE Spatial Proximity Match (within 500m or realistic drone speed)
+            if not enc and transport in ("bt4", "bt5") and pkt_lat is not None and pkt_lon is not None:
+                for active_enc in list(self.active_encounters.values()):
+                    if ("bt" in (active_enc.get("transports") or [])) and active_enc.get("trajectory"):
+                        last_pt = active_enc["trajectory"][-1]
+                        dist = haversine_m(pkt_lat, pkt_lon, last_pt[0], last_pt[1])
+                        dt = abs(ts - active_enc["last_seen"])
+                        if dt <= self.timeout_s and (dist <= 500.0 or dist <= max(1.0, dt) * 35.0):
+                            s_act = sanitize_serial(active_enc.get("serial_number"))
+                            if not s_new or not s_act or is_fuzzy_serial_match(s_new, s_act):
+                                enc = active_enc
+                                break
 
             if enc:
                 is_timeout = (ts - enc["last_seen"] > self.timeout_s)
@@ -638,11 +720,12 @@ class EncounterTracker:
                 dt_tag = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%d-%H%M%S")
                 encounter_id = packet.get("encounter_id") or f"ENC-{dt_tag}-{enc_slug}"
 
-                drone_info = infer_drone_model(serial) if serial else {}
+                best_initial_serial = s_new or serial
+                drone_info = infer_drone_model(best_initial_serial) if best_initial_serial else {}
                 enc = {
                     "encounter_id": encounter_id,
                     "mac": mac,
-                    "serial_number": serial,
+                    "serial_number": best_initial_serial,
                     "drone_make": drone_info.get("make"),
                     "drone_model": drone_info.get("model"),
                     "node_id": node_id,
@@ -668,7 +751,7 @@ class EncounterTracker:
                     "pilot_alt_m": None,
                     "area_ceil_m": None,
                     "area_floor_m": None,
-                    "operator_id": None,
+                    "operator_id": op_new or operator_id,
                     "self_id_desc": None,
                     "trajectory": [],
                     "is_active": 1,
@@ -698,20 +781,31 @@ class EncounterTracker:
                     enc["trajectory"].extend(other_enc.get("trajectory", []))
                     self._remove_active(other_enc)
                     if self.db_path:
+                        conn_del = None
                         try:
-                            with sqlite3.connect(self.db_path, timeout=30.0) as conn:
-                                conn.execute("DELETE FROM encounters WHERE encounter_id = ?;", (other_enc["encounter_id"],))
+                            conn_del = sqlite3.connect(self.db_path, timeout=30.0)
+                            conn_del.execute("DELETE FROM encounters WHERE encounter_id = ?;", (other_enc["encounter_id"],))
+                            conn_del.commit()
                         except Exception:
                             pass
+                        finally:
+                            if conn_del:
+                                try:
+                                    conn_del.close()
+                                except Exception:
+                                    pass
                 self.active_encounters[mac] = enc
 
-            if serial:
-                if not enc.get("serial_number"):
-                    enc["serial_number"] = serial
-                    if not enc.get("drone_make"):
-                        inf = infer_drone_model(serial)
-                        enc["drone_make"] = inf.get("make")
-                        enc["drone_model"] = inf.get("model")
+            if serial and is_better_serial(serial, enc.get("serial_number")):
+                enc["serial_number"] = sanitize_serial(serial) or serial
+                inf = infer_drone_model(enc["serial_number"])
+                if inf.get("make"):
+                    enc["drone_make"] = inf.get("make")
+                if inf.get("model"):
+                    enc["drone_model"] = inf.get("model")
+
+            if operator_id and is_better_operator_id(operator_id, enc.get("operator_id")):
+                enc["operator_id"] = sanitize_operator_id(operator_id) or operator_id
 
             if counter is not None:
                 enc["counter"] = counter
@@ -789,13 +883,18 @@ class EncounterTracker:
 
                 elif m_type == "Basic ID":
                     b_id = msg.get("id")
-                    if b_id:
-                        if not enc.get("serial_number"):
-                            enc["serial_number"] = b_id
-                        if not enc.get("drone_make"):
-                            inf = infer_drone_model(b_id)
-                            enc["drone_make"] = inf.get("make")
-                            enc["drone_model"] = inf.get("model")
+                    id_t = msg.get("id_type")
+                    if b_id and (id_t == 1 or id_t is None):
+                        if not enc.get("serial_number") or is_better_serial(b_id, enc.get("serial_number")):
+                            enc["serial_number"] = sanitize_serial(b_id) or b_id
+                            inf = infer_drone_model(enc["serial_number"])
+                            if inf.get("make"):
+                                enc["drone_make"] = inf.get("make")
+                            if inf.get("model"):
+                                enc["drone_model"] = inf.get("model")
+                    elif b_id and id_t == 2:
+                        if not enc.get("operator_id") or is_better_operator_id(b_id, enc.get("operator_id")):
+                            enc["operator_id"] = sanitize_operator_id(b_id) or b_id
 
                 elif m_type == "System":
                     if msg.get("pilot_lat") is not None:
@@ -813,8 +912,8 @@ class EncounterTracker:
 
                 elif m_type == "Operator ID":
                     op_val = msg.get("operator_id") or msg.get("id")
-                    if op_val:
-                        enc["operator_id"] = op_val
+                    if op_val and (not enc.get("operator_id") or is_better_operator_id(op_val, enc.get("operator_id"))):
+                        enc["operator_id"] = sanitize_operator_id(op_val) or op_val
 
                 elif m_type == "Self-ID":
                     desc_val = msg.get("description") or msg.get("desc")
@@ -856,11 +955,18 @@ class EncounterTracker:
             if now - self.last_wal_checkpoint > 300.0:
                 self.last_wal_checkpoint = now
                 if self.db_path:
+                    conn_chk = None
                     try:
-                        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
-                            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                        conn_chk = sqlite3.connect(self.db_path, timeout=30.0)
+                        conn_chk.execute("PRAGMA wal_checkpoint(PASSIVE);")
                     except Exception:
                         pass
+                    finally:
+                        if conn_chk:
+                            try:
+                                conn_chk.close()
+                            except Exception:
+                                pass
         return closed_ids
 
     def finalize_all(self):
@@ -949,62 +1055,69 @@ class EncounterTracker:
             except Exception:
                 pass
 
+        conn = None
         try:
-            with sqlite3.connect(self.db_path, timeout=30.0) as conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO encounters (
-                        encounter_id, mac, serial_number, first_seen, first_seen_iso,
-                        last_seen, last_seen_iso, duration_s, packet_count, transports,
-                        channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
-                        max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm, min_alt_m,
-                        max_alt_m, min_height_m, max_height_m, min_pressure_alt_m, max_pressure_alt_m,
-                        max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m, area_ceil_m, area_floor_m,
-                        operator_id, self_id_desc, drone_make, drone_model, node_id, trajectory_json, is_active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """, (
-                    enc["encounter_id"],
-                    enc["mac"],
-                    enc["serial_number"],
-                    enc["first_seen"],
-                    enc["first_seen_iso"],
-                    enc["last_seen"],
-                    enc["last_seen_iso"],
-                    enc["duration_s"],
-                    enc["packet_count"],
-                    transports_str,
-                    channels_str,
-                    wifi_rates_str,
-                    dominant_rate_mbps,
-                    dominant_modulation,
-                    min_rate_mbps,
-                    max_rate_mbps,
-                    phy_rate_dist_json,
-                    min_rssi,
-                    max_rssi,
-                    avg_rssi,
-                    min_alt,
-                    max_alt,
-                    min_height,
-                    max_height,
-                    min_p_alt,
-                    max_p_alt,
-                    max_speed,
-                    enc["pilot_lat"],
-                    enc["pilot_lon"],
-                    enc["pilot_alt_m"],
-                    enc.get("area_ceil_m"),
-                    enc.get("area_floor_m"),
-                    enc["operator_id"],
-                    enc["self_id_desc"],
-                    enc.get("drone_make"),
-                    enc.get("drone_model"),
-                    enc.get("node_id"),
-                    trajectory_str,
-                    enc["is_active"]
-                ))
-                conn.commit()
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.execute("""
+                INSERT OR REPLACE INTO encounters (
+                    encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports,
+                    channels, wifi_rates, dominant_rate_mbps, dominant_modulation, min_rate_mbps,
+                    max_rate_mbps, phy_rate_dist_json, min_rssi_dbm, max_rssi_dbm, avg_rssi_dbm, min_alt_m,
+                    max_alt_m, min_height_m, max_height_m, min_pressure_alt_m, max_pressure_alt_m,
+                    max_speed_mps, pilot_lat, pilot_lon, pilot_alt_m, area_ceil_m, area_floor_m,
+                    operator_id, self_id_desc, drone_make, drone_model, node_id, trajectory_json, is_active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                enc["encounter_id"],
+                enc["mac"],
+                enc["serial_number"],
+                enc["first_seen"],
+                enc["first_seen_iso"],
+                enc["last_seen"],
+                enc["last_seen_iso"],
+                enc["duration_s"],
+                enc["packet_count"],
+                transports_str,
+                channels_str,
+                wifi_rates_str,
+                dominant_rate_mbps,
+                dominant_modulation,
+                min_rate_mbps,
+                max_rate_mbps,
+                phy_rate_dist_json,
+                min_rssi,
+                max_rssi,
+                avg_rssi,
+                min_alt,
+                max_alt,
+                min_height,
+                max_height,
+                min_p_alt,
+                max_p_alt,
+                max_speed,
+                enc["pilot_lat"],
+                enc["pilot_lon"],
+                enc["pilot_alt_m"],
+                enc.get("area_ceil_m"),
+                enc.get("area_floor_m"),
+                enc["operator_id"],
+                enc["self_id_desc"],
+                enc.get("drone_make"),
+                enc.get("drone_model"),
+                enc.get("node_id"),
+                trajectory_str,
+                enc["is_active"]
+            ))
+            conn.commit()
         except Exception as e:
             logger.error(f"Error persisting encounter to SQLite ({self.db_path}): {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 def rehydrate_db_from_jsonl(
@@ -1201,13 +1314,34 @@ def rehydrate_db_from_jsonl(
 
     tracker.finalize_all()
 
-    # Query count of encounters in DB
+    # Consolidate any remaining split encounters across the entire database
+    if merge_sequential_encounters and db_path:
+        conn_m = None
+        try:
+            conn_m = sqlite3.connect(db_path, timeout=30.0)
+            merge_sequential_encounters(conn_m, timeout_s=tracker.timeout_s)
+        except Exception as e:
+            logger.debug(f"Post-rehydration merge exception: {e}")
+        finally:
+            if conn_m:
+                try:
+                    conn_m.close()
+                except Exception:
+                    pass
+
     rehydrated_count = 0
+    conn_cnt = None
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            rehydrated_count = conn.execute("SELECT COUNT(*) FROM encounters;").fetchone()[0]
+        conn_cnt = sqlite3.connect(db_path, timeout=30.0)
+        rehydrated_count = conn_cnt.execute("SELECT COUNT(*) FROM encounters;").fetchone()[0]
     except Exception:
         pass
+    finally:
+        if conn_cnt:
+            try:
+                conn_cnt.close()
+            except Exception:
+                pass
 
     logger.info(f"[+] Rehydration complete: {rehydrated_count} encounter(s) updated in {db_path}")
     return rehydrated_count
@@ -1798,22 +1932,29 @@ class UnifiedTelemetryLogger:
 
         # Register local node in database if local SQLite DB active
         if db_path and self.node_id:
+            conn_reg = None
             try:
-                with sqlite3.connect(db_path) as conn:
-                    upsert_receiver_node(
-                        conn,
-                        node_id=self.node_id,
-                        name=self.node_meta.get("name", self.node_id),
-                        latitude=float(self.node_meta.get("latitude", 0.0)),
-                        longitude=float(self.node_meta.get("longitude", 0.0)),
-                        altitude_m=float(self.node_meta.get("altitude_m", 0.0)),
-                        range_rings_json=json.dumps(self.node_meta.get("range_rings_m", [500, 1000, 2500, 5000])),
-                        description=self.node_meta.get("description", ""),
-                        locked=bool(self.node_meta.get("locked", False)),
-                        status="ONLINE",
-                    )
+                conn_reg = sqlite3.connect(db_path, timeout=30.0)
+                upsert_receiver_node(
+                    conn_reg,
+                    node_id=self.node_id,
+                    name=self.node_meta.get("name", self.node_id),
+                    latitude=float(self.node_meta.get("latitude", 0.0)),
+                    longitude=float(self.node_meta.get("longitude", 0.0)),
+                    altitude_m=float(self.node_meta.get("altitude_m", 0.0)),
+                    range_rings_json=json.dumps(self.node_meta.get("range_rings_m", [500, 1000, 2500, 5000])),
+                    description=self.node_meta.get("description", ""),
+                    locked=bool(self.node_meta.get("locked", False)),
+                    status="ONLINE",
+                )
             except Exception as e:
                 logger.debug(f"Could not register local receiver node in DB: {e}")
+            finally:
+                if conn_reg:
+                    try:
+                        conn_reg.close()
+                    except Exception:
+                        pass
 
         self.stats = {
             "total_packets": 0,
@@ -1879,11 +2020,18 @@ class UnifiedTelemetryLogger:
         if self.encounter_tracker and self.encounter_tracker.db_path and self.node_id:
             if now - self.last_node_heartbeat >= 15.0:
                 self.last_node_heartbeat = now
+                conn_hb = None
                 try:
-                    with sqlite3.connect(self.encounter_tracker.db_path) as conn:
-                        touch_receiver_node_heartbeat(conn, self.node_id)
+                    conn_hb = sqlite3.connect(self.encounter_tracker.db_path, timeout=30.0)
+                    touch_receiver_node_heartbeat(conn_hb, self.node_id)
                 except Exception:
                     pass
+                finally:
+                    if conn_hb:
+                        try:
+                            conn_hb.close()
+                        except Exception:
+                            pass
 
         # 3. In quiet mode, emit periodic heartbeat every 30s even when 0 packets arrive
         if self.quiet and (now - self.last_heartbeat >= 30.0):
@@ -2300,10 +2448,21 @@ def main():
                 backlog_patterns.append(os.path.join(repo_root, "rid_packets*.jsonl"))
                 backlog_patterns.append(os.path.join(repo_root, "capture*.jsonl"))
 
+            def on_position_updated_cb(lat: float, lon: float, alt: Optional[float] = None):
+                if 'logger_worker' in locals() and logger_worker and logger_worker.encounter_tracker and logger_worker.encounter_tracker.db_path and args.node_id:
+                    try:
+                        conn_up = sqlite3.connect(logger_worker.encounter_tracker.db_path, timeout=10.0)
+                        update_receiver_node_position(conn_up, args.node_id, lat, lon, alt)
+                        conn_up.close()
+                    except Exception as e:
+                        logger.debug(f"Could not update local receiver node position in DB: {e}")
+
             forwarder = CentralStreamForwarder(
                 hub_ws_url=args.hub_url,
                 node_id=args.node_id,
                 node_meta=cfg,
+                config_path=args.scanner_config,
+                on_position_updated=on_position_updated_cb,
                 spool_dir=args.spool_dir,
                 backlog_paths=backlog_patterns,
                 max_ram_queue=args.max_ram_queue,

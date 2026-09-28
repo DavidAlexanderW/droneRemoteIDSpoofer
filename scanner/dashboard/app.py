@@ -79,6 +79,16 @@ except ImportError:
     except ImportError:
         decode_astm_message = None
 
+try:
+    from scanner.scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
+except ImportError:
+    try:
+        from scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
+    except ImportError:
+        load_scanner_config = None
+        save_scanner_config = None
+        get_scanner_config_path = None
+
 app = FastAPI(
     title="Tactical Drone Remote ID Airspace Monitor",
     description="Real-time ASTM F3411 Drone Remote ID monitoring, radar mapping, and telemetry analysis API",
@@ -184,6 +194,8 @@ def get_nodes_endpoint():
 def update_node_position_endpoint(node_id: str, payload: Dict[str, Any]):
     """
     Updates the physical coordinates of an unlocked sensor node in the database.
+    Dispatches the update to Central Hub (to synchronize over WebSocket to remote node disk)
+    and falls back to updating local scanner_config.json if running in standalone local mode.
     If the node is locked on disk via scanner_config.json ('locked': true), returns 403 Forbidden.
     """
     lat = payload.get("latitude", payload.get("lat"))
@@ -194,6 +206,8 @@ def update_node_position_endpoint(node_id: str, payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="Missing required 'latitude' or 'longitude' in payload.")
 
     conn = get_db_connection()
+    updated = None
+    node_found_in_local_db = False
     try:
         updated = update_receiver_node_position(
             conn,
@@ -202,13 +216,75 @@ def update_node_position_endpoint(node_id: str, payload: Dict[str, Any]):
             longitude=float(lon),
             altitude_m=float(alt) if alt is not None else None,
         )
-        return {"status": "ok", "node": updated}
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        node_found_in_local_db = True
+    except KeyError:
+        # Not found in local database; will attempt via Central Hub if configured
+        pass
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     finally:
         conn.close()
+
+    # 1. Forward position update to Central Hub (which dispatches update_location to remote edge node over WS)
+    hub_url = os.environ.get("RID_HUB_HTTP_URL", "http://127.0.0.1:8000").rstrip("/")
+    remote_synced = False
+    hub_resp = None
+
+    try:
+        req_data = json.dumps({
+            "latitude": float(lat),
+            "longitude": float(lon),
+            "altitude_m": float(alt) if alt is not None else (updated.get("altitude_m") if updated else None),
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{hub_url}/api/nodes/{urllib.parse.quote(node_id)}/position",
+            data=req_data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            if resp.status == 200:
+                hub_resp = json.loads(resp.read().decode("utf-8"))
+                remote_synced = bool(hub_resp.get("remote_synced"))
+                if not updated and hub_resp.get("node"):
+                    updated = hub_resp["node"]
+    except urllib.error.HTTPError as http_err:
+        if http_err.code in (400, 403, 404):
+            err_body = http_err.read().decode("utf-8")
+            try:
+                detail = json.loads(err_body).get("detail", str(http_err))
+            except Exception:
+                detail = str(http_err)
+            raise HTTPException(status_code=http_err.code, detail=detail)
+    except Exception:
+        # Central Hub not running or unreachable; fall back to local disk persistence
+        pass
+
+    # 2. Local disk fallback: if running standalone locally and scanner_config.json belongs to this node
+    if not remote_synced and load_scanner_config and save_scanner_config and get_scanner_config_path:
+        try:
+            cfg_p = get_scanner_config_path()
+            if os.path.exists(cfg_p):
+                local_cfg = load_scanner_config(cfg_p)
+                if local_cfg.get("node_id") == node_id and not local_cfg.get("locked"):
+                    local_cfg["latitude"] = float(lat)
+                    local_cfg["longitude"] = float(lon)
+                    if alt is not None:
+                        local_cfg["altitude_m"] = float(alt)
+                    save_scanner_config(local_cfg, cfg_p)
+                    remote_synced = True
+        except Exception:
+            pass
+
+    if not node_found_in_local_db and not updated:
+        raise HTTPException(status_code=404, detail=f"Receiver node '{node_id}' not found in database or Central Hub.")
+
+    return {
+        "status": "ok",
+        "node": updated,
+        "remote_synced": remote_synced,
+        "hub_response": hub_resp,
+    }
 
 
 @app.post("/api/config/dashboard")

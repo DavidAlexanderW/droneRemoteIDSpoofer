@@ -49,6 +49,15 @@ try:
 except ImportError:
     websockets = None
 
+try:
+    from scanner.scanner_config import save_scanner_config, get_default_config_path
+except ImportError:
+    try:
+        from scanner_config import save_scanner_config, get_default_config_path
+    except ImportError:
+        save_scanner_config = None
+        get_default_config_path = lambda: "scanner_config.json"
+
 logger = logging.getLogger("DroneRIDForwarder")
 
 
@@ -64,6 +73,8 @@ class CentralStreamForwarder:
         hub_ws_url: str,
         node_id: str,
         node_meta: Optional[Dict[str, Any]] = None,
+        config_path: Optional[str] = None,
+        on_position_updated: Optional[Any] = None,
         spool_dir: str = "spool",
         backlog_paths: Optional[List[str]] = None,
         max_ram_queue: int = 10000,
@@ -74,6 +85,9 @@ class CentralStreamForwarder:
         self.hub_ws_url = hub_ws_url.strip()
         self.node_id = node_id.strip()
         self.node_meta = node_meta or {}
+        self.config_path = os.path.abspath(config_path) if config_path else (get_default_config_path() if get_default_config_path else "scanner_config.json")
+        self.on_position_updated = on_position_updated
+        self._ws_send_lock: Optional[asyncio.Lock] = None
         self.spool_dir = os.path.abspath(spool_dir)
         self.backlog_paths = backlog_paths or []
         self.max_ram_queue = max(1, max_ram_queue)
@@ -101,6 +115,43 @@ class CentralStreamForwarder:
         self.thread: Optional[threading.Thread] = None
 
         os.makedirs(self.spool_dir, exist_ok=True)
+
+    async def _safe_ws_send(self, ws, text: str):
+        """Thread-safe and task-safe serialized WebSocket sender."""
+        if self._ws_send_lock:
+            async with self._ws_send_lock:
+                await ws.send(text)
+        else:
+            await ws.send(text)
+
+    def _apply_position_update(self, lat: float, lon: float, alt: Optional[float] = None) -> bool:
+        """
+        Updates in-memory node_meta and persists changes to scanner_config.json on disk.
+        Returns False if the node is locked.
+        """
+        with self.lock:
+            if self.node_meta.get("locked"):
+                logger.warning(f"[!] Cannot update position: Node '{self.node_id}' is locked on disk via scanner_config.json.")
+                return False
+            self.node_meta["latitude"] = float(lat)
+            self.node_meta["longitude"] = float(lon)
+            if alt is not None:
+                self.node_meta["altitude_m"] = float(alt)
+
+        if save_scanner_config and self.config_path:
+            try:
+                save_scanner_config(self.node_meta, self.config_path)
+                logger.info(f"[+] Node '{self.node_id}' position updated & saved to disk: ({lat:.6f}, {lon:.6f}) in {self.config_path}")
+            except Exception as e:
+                logger.error(f"[-] Failed to persist updated position to disk: {e}")
+
+        if callable(self.on_position_updated):
+            try:
+                self.on_position_updated(lat, lon, self.node_meta.get("altitude_m"))
+            except Exception as e:
+                logger.warning(f"[!] Error in on_position_updated callback: {e}")
+
+        return True
 
     def start(self):
         """Starts the background event loop and connection worker."""
@@ -232,6 +283,7 @@ class CentralStreamForwarder:
             ws_url = f"{self.hub_ws_url}?node_id={self.node_id}" if "?" not in self.hub_ws_url else f"{self.hub_ws_url}&node_id={self.node_id}"
 
             try:
+                self._ws_send_lock = asyncio.Lock()
                 async with websockets.connect(
                     ws_url,
                     ping_interval=20,
@@ -251,12 +303,25 @@ class CentralStreamForwarder:
                         "node_meta": self.node_meta,
                         "timestamp_epoch": time.time(),
                     }
-                    await ws.send(json.dumps(handshake_payload))
+                    await self._safe_ws_send(ws, json.dumps(handshake_payload))
 
                     raw_ack = await asyncio.wait_for(ws.recv(), timeout=10.0)
                     ack = json.loads(raw_ack)
                     last_synced_epoch = float(ack.get("last_synced_epoch", 0.0))
                     logger.info(f"[+] Handshake complete with Hub. Node '{self.node_id}' sync watermark: {last_synced_epoch:.2f}")
+
+                    # Check if Hub calibrated position is newer / present for an unlocked node
+                    calibrated_pos = ack.get("calibrated_position")
+                    if calibrated_pos and not self.node_meta.get("locked"):
+                        cal_lat = calibrated_pos.get("latitude")
+                        cal_lon = calibrated_pos.get("longitude")
+                        cal_alt = calibrated_pos.get("altitude_m")
+                        if cal_lat is not None and cal_lon is not None:
+                            cur_lat = float(self.node_meta.get("latitude", 0.0))
+                            cur_lon = float(self.node_meta.get("longitude", 0.0))
+                            if abs(cur_lat - float(cal_lat)) > 1e-6 or abs(cur_lon - float(cal_lon)) > 1e-6:
+                                logger.info(f"[*] Calibrating node position from Hub handshake: ({cal_lat}, {cal_lon})")
+                                self._apply_position_update(float(cal_lat), float(cal_lon), float(cal_alt) if cal_alt is not None else None)
 
                     # 2. Historical & Spool Catch-Up Phase (Drains spool files & backlog)
                     await self._sync_all_spool_and_backlog(ws, last_synced_epoch)
@@ -280,7 +345,7 @@ class CentralStreamForwarder:
                                         "node_meta": self.node_meta,
                                         "timestamp_epoch": now,
                                     }
-                                    await ws.send(json.dumps(heartbeat_payload))
+                                    await self._safe_ws_send(ws, json.dumps(heartbeat_payload))
 
                                 # Detect zombie Hub (application alive but not processing)
                                 if self.last_hub_ack_time and (now - self.last_hub_ack_time > self.hub_ack_timeout_s):
@@ -295,7 +360,7 @@ class CentralStreamForwarder:
                                     continue
 
                                 # Send live packet envelope
-                                await ws.send(json.dumps({"type": "packet", **pkt}))
+                                await self._safe_ws_send(ws, json.dumps({"type": "packet", **pkt}))
                                 with self.lock:
                                     self.stats["packets_streamed_live"] += 1
 
@@ -320,8 +385,8 @@ class CentralStreamForwarder:
                 retry_delay = min(retry_delay * 1.5, max_retry_delay)
 
     async def _hub_receiver_loop(self, ws):
-        """Concurrent reader task that drains incoming Hub messages (heartbeat_acks, future commands)
-        to prevent the receive buffer from filling up and stalling protocol-level ping/pong frames."""
+        """Concurrent reader task that drains incoming Hub messages (heartbeat_acks, commands)
+        and executes remote commands dispatched from Central Hub."""
         try:
             async for msg_str in ws:
                 try:
@@ -329,9 +394,47 @@ class CentralStreamForwarder:
                     msg_type = msg.get("type", "")
                     if msg_type == "heartbeat_ack":
                         self.last_hub_ack_time = time.time()
-                    # Future: handle Hub-to-Node commands here (e.g., channel change, reboot)
-                except (json.JSONDecodeError, Exception):
-                    pass
+                    elif msg_type == "update_location":
+                        req_id = msg.get("request_id")
+                        target_node = msg.get("node_id", self.node_id)
+                        if target_node == self.node_id:
+                            lat = msg.get("latitude")
+                            lon = msg.get("longitude")
+                            alt = msg.get("altitude_m")
+                            if lat is None or lon is None:
+                                resp = {
+                                    "type": "update_location_response",
+                                    "request_id": req_id,
+                                    "node_id": self.node_id,
+                                    "status": "error",
+                                    "error": "Missing latitude or longitude in update_location command.",
+                                }
+                            elif self.node_meta.get("locked"):
+                                resp = {
+                                    "type": "update_location_response",
+                                    "request_id": req_id,
+                                    "node_id": self.node_id,
+                                    "status": "error",
+                                    "error": f"Receiver node '{self.node_id}' is locked on disk via scanner_config.json.",
+                                }
+                            else:
+                                success = self._apply_position_update(
+                                    float(lat),
+                                    float(lon),
+                                    float(alt) if alt is not None else None,
+                                )
+                                resp = {
+                                    "type": "update_location_response",
+                                    "request_id": req_id,
+                                    "node_id": self.node_id,
+                                    "status": "ok" if success else "error",
+                                    "latitude": self.node_meta.get("latitude"),
+                                    "longitude": self.node_meta.get("longitude"),
+                                    "altitude_m": self.node_meta.get("altitude_m"),
+                                }
+                            await self._safe_ws_send(ws, json.dumps(resp))
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.debug(f"Error handling message in _hub_receiver_loop: {e}")
         except websockets.ConnectionClosed:
             pass
 
@@ -488,7 +591,7 @@ class CentralStreamForwarder:
             "node_meta": self.node_meta,
             "items": items,
         }
-        await ws.send(json.dumps(payload))
+        await self._safe_ws_send(ws, json.dumps(payload))
 
         # Wait for batch_ack from Central Hub
         raw_ack = await asyncio.wait_for(ws.recv(), timeout=30.0)
@@ -569,6 +672,7 @@ def main():
         hub_ws_url=args.hub_url,
         node_id=args.node_id,
         node_meta=cfg,
+        config_path=args.scanner_config,
         spool_dir=args.spool_dir,
         backlog_paths=backlog_files,
         batch_size=args.batch_size,

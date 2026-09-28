@@ -426,6 +426,45 @@ class TestDashboardAPI(unittest.TestCase):
         self.assertEqual(resp.status_code, 403)
         self.assertIn("locked on disk", resp.json()["detail"])
 
+    def test_node_position_update_updates_local_config_file(self):
+        """Verify that updating position also updates local scanner_config.json on disk if present."""
+        cfg_path = os.path.join(self.temp_dir.name, "scanner_config.json")
+        os.environ["RID_SCANNER_CONFIG_PATH"] = cfg_path
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "node_id": "node-local-test",
+                "latitude": 47.37,
+                "longitude": 8.54,
+                "locked": False,
+            }, f)
+
+        from db import upsert_receiver_node
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        upsert_receiver_node(
+            conn,
+            node_id="node-local-test",
+            name="Local Node",
+            latitude=47.37,
+            longitude=8.54,
+            altitude_m=410.0,
+            locked=False,
+        )
+        conn.close()
+
+        resp = self.client.post("/api/nodes/node-local-test/position", json={
+            "latitude": 47.42,
+            "longitude": 8.62,
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["remote_synced"])
+
+        # Verify disk file updated
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["latitude"], 47.42)
+        self.assertEqual(saved["longitude"], 8.62)
+
     def test_dashboard_config_disk_persistence(self):
         """Verify dashboard viewport config load and persistent save to disk via /api/config/dashboard."""
         cfg_path = os.path.join(self.temp_dir.name, "dashboard_config.json")
