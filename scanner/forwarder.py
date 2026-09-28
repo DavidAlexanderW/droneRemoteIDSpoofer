@@ -38,11 +38,7 @@ except ImportError:
     try:
         from drone_rid_spoofer.parser import decode_astm_message, parse_astm_payload
     except ImportError:
-        try:
-            from parser import decode_astm_message, parse_astm_payload
-        except ImportError:
-            decode_astm_message = None
-            parse_astm_payload = None
+        from parser import decode_astm_message, parse_astm_payload
 
 try:
     import websockets
@@ -52,11 +48,7 @@ except ImportError:
 try:
     from scanner.scanner_config import save_scanner_config, get_default_config_path
 except ImportError:
-    try:
-        from scanner_config import save_scanner_config, get_default_config_path
-    except ImportError:
-        save_scanner_config = None
-        get_default_config_path = lambda: "scanner_config.json"
+    from scanner_config import save_scanner_config, get_default_config_path
 
 logger = logging.getLogger("DroneRIDForwarder")
 
@@ -610,12 +602,9 @@ def main():
     try:
         from scanner.scanner_config import load_scanner_config
     except ImportError:
-        try:
-            from scanner_config import load_scanner_config
-        except ImportError:
-            load_scanner_config = None
+        from scanner_config import load_scanner_config
 
-    cfg = load_scanner_config() if load_scanner_config else {}
+    cfg = load_scanner_config()
     default_node_id = cfg.get("node_id", "sensor-node-01")
     default_hub_url = cfg.get("hub_ws_url", "ws://127.0.0.1:8000/stream/node")
     default_spool_dir = cfg.get("spool_dir", "spool")
@@ -637,7 +626,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.scanner_config and load_scanner_config:
+    if args.scanner_config:
         try:
             cfg = load_scanner_config(args.scanner_config)
             if args.hub_url == default_hub_url:

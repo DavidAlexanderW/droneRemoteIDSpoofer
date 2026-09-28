@@ -139,6 +139,21 @@ except ImportError:
         )
 
 try:
+    from scanner.scanner_config import load_scanner_config, save_scanner_config
+except ImportError:
+    from scanner_config import load_scanner_config, save_scanner_config
+
+try:
+    from scanner.drone_models import infer_drone_model
+except ImportError:
+    from drone_models import infer_drone_model
+
+try:
+    from scanner.forwarder import CentralStreamForwarder
+except ImportError:
+    from forwarder import CentralStreamForwarder
+
+try:
     from scanner.db import (
         init_encounters_db,
         get_db_connection as db_get_connection,
@@ -155,50 +170,23 @@ try:
         haversine_m,
         merge_sequential_encounters,
     )
-    from scanner.drone_models import infer_drone_model
-    from scanner.forwarder import CentralStreamForwarder
-    from scanner.scanner_config import load_scanner_config
 except ImportError:
-    try:
-        from db import (
-            init_encounters_db,
-            get_db_connection as db_get_connection,
-            reconcile_stale_encounters,
-            touch_receiver_node_heartbeat,
-            upsert_receiver_node,
-            update_receiver_node_position,
-            sanitize_serial,
-            sanitize_operator_id,
-            is_fuzzy_serial_match,
-            is_fuzzy_operator_match,
-            is_better_serial,
-            is_better_operator_id,
-            haversine_m,
-            merge_sequential_encounters,
-        )
-        from drone_models import infer_drone_model
-        from forwarder import CentralStreamForwarder
-        from scanner_config import load_scanner_config
-    except ImportError:
-        CentralStreamForwarder = None
-        merge_sequential_encounters = None
-        load_scanner_config = lambda *args, **kwargs: {}
-        def infer_drone_model(serial):
-            return {"make": None, "model": None, "company": None, "country": None, "is_inferred": False}
-        def sanitize_serial(s):
-            return s
-        def sanitize_operator_id(op):
-            return op
-        def is_fuzzy_serial_match(s1, s2):
-            return s1 == s2
-        def is_fuzzy_operator_match(op1, op2):
-            return op1 == op2
-        def is_better_serial(new_s, old_s):
-            return bool(new_s and not old_s)
-        def is_better_operator_id(new_op, old_op):
-            return bool(new_op and not old_op)
-        def haversine_m(lat1, lon1, lat2, lon2):
-            return 0.0
+    from db import (
+        init_encounters_db,
+        get_db_connection as db_get_connection,
+        reconcile_stale_encounters,
+        touch_receiver_node_heartbeat,
+        upsert_receiver_node,
+        update_receiver_node_position,
+        sanitize_serial,
+        sanitize_operator_id,
+        is_fuzzy_serial_match,
+        is_fuzzy_operator_match,
+        is_better_serial,
+        is_better_operator_id,
+        haversine_m,
+        merge_sequential_encounters,
+    )
 
 
 # ============================================================================
@@ -1135,7 +1123,7 @@ def rehydrate_db_from_jsonl(
 
     if node_id is None:
         try:
-            cfg = load_scanner_config() if load_scanner_config else {}
+            cfg = load_scanner_config()
             node_id = cfg.get("node_id", "sensor-node-01")
         except Exception:
             node_id = "sensor-node-01"
@@ -2356,10 +2344,7 @@ def main():
     parser.add_argument("--drain-retention-ms", type=float, default=5.0, help="Buffer drain retention window in ms for previous channel packet attribution (default: 5.0ms)")
 
     # Distributed Hub & Forwarding Options
-    try:
-        cfg = load_scanner_config() if load_scanner_config else {}
-    except Exception:
-        cfg = {}
+    cfg = load_scanner_config()
     default_node_id = cfg.get("node_id", "sensor-node-01")
     default_hub_url = cfg.get("hub_ws_url")
     default_spool_dir = cfg.get("spool_dir", "spool")

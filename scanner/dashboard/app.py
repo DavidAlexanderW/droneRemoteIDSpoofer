@@ -74,20 +74,12 @@ except ImportError:
 try:
     from scanner.parser import decode_astm_message
 except ImportError:
-    try:
-        from parser import decode_astm_message
-    except ImportError:
-        decode_astm_message = None
+    from parser import decode_astm_message
 
 try:
     from scanner.scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
 except ImportError:
-    try:
-        from scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
-    except ImportError:
-        load_scanner_config = None
-        save_scanner_config = None
-        get_scanner_config_path = None
+    from scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
 
 app = FastAPI(
     title="Tactical Drone Remote ID Airspace Monitor",

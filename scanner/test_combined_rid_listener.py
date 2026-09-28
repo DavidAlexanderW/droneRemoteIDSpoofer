@@ -865,6 +865,36 @@ class TestCombinedRIDListener(unittest.TestCase):
                 self.assertTrue(row["first_seen_iso"].startswith("2026-"), f"first_seen_iso {row['first_seen_iso']} should start with 2026")
                 self.assertTrue(row["last_seen_iso"].startswith("2026-"), f"last_seen_iso {row['last_seen_iso']} should start with 2026")
 
+    def test_scanner_config_imports_and_loading(self):
+        """Verify that load_scanner_config is genuinely imported and loads config parameters from disk."""
+        import scanner.combined_rid_listener as crl
+        # Verify it is not a dummy lambda
+        self.assertNotEqual(crl.load_scanner_config.__name__, "<lambda>", "load_scanner_config must not be a fallback lambda")
+
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as tmp:
+            custom_cfg = {
+                "node_id": "test-remote-node-99",
+                "name": "Remote Station 99",
+                "latitude": 46.9480,
+                "longitude": 7.4474,
+                "altitude_m": 540.0,
+                "hub_ws_url": "ws://remote-hub.local:8000/stream/node",
+                "ble_mode": "extended",
+            }
+            json.dump(custom_cfg, tmp)
+            tmp.flush()
+
+            loaded = crl.load_scanner_config(tmp.name)
+            self.assertIsInstance(loaded, dict)
+            self.assertGreater(len(loaded), 0, "Config dictionary must not be empty")
+            self.assertEqual(loaded.get("node_id"), "test-remote-node-99")
+            self.assertEqual(loaded.get("hub_ws_url"), "ws://remote-hub.local:8000/stream/node")
+            self.assertAlmostEqual(loaded.get("latitude"), 46.9480)
+            self.assertAlmostEqual(loaded.get("longitude"), 7.4474)
+
+            os.unlink(tmp.name)
+
 
 if __name__ == "__main__":
     unittest.main()
+

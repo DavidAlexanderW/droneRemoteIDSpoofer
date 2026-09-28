@@ -24,11 +24,7 @@ if scanner_dir not in sys.path:
 try:
     from scanner.drone_models import infer_drone_model
 except ImportError:
-    try:
-        from drone_models import infer_drone_model
-    except ImportError:
-        def infer_drone_model(serial: Optional[str]) -> Dict[str, Any]:
-            return {"make": None, "model": None, "company": None, "country": None, "is_inferred": False}
+    from drone_models import infer_drone_model
 
 
 # Canonical table schema columns (name, SQLite type)
@@ -240,10 +236,129 @@ def init_encounters_db(conn: sqlite3.Connection, timeout_s: float = 300.0) -> No
     conn.commit()
 
 
+def sanitize_serial(s: Optional[str]) -> Optional[str]:
+    """Sanitizes serial number by stripping non-alphanumeric noise and truncation."""
+    if not s:
+        return None
+    s_str = str(s).strip()
+    for delim in ["@", "\x00", ";", "#", "$"]:
+        if delim in s_str:
+            s_str = s_str.split(delim)[0]
+    cleaned = "".join(c for c in s_str if c.isalnum() or c in "-_")
+    if len(cleaned) > 20:
+        cleaned = cleaned[:20]
+    return cleaned if len(cleaned) >= 6 else None
+
+
+def sanitize_operator_id(op: Optional[str]) -> Optional[str]:
+    """Sanitizes CAA Operator ID by stripping non-alphanumeric noise and truncation."""
+    if not op:
+        return None
+    s_str = str(op).strip()
+    for delim in ["\x00", ";", "#", "$"]:
+        if delim in s_str:
+            s_str = s_str.split(delim)[0]
+    cleaned = "".join(c for c in s_str if c.isalnum() or c in "-_")
+    # Standard European / CAA ID is 16 chars (e.g. CHEhyolaf9zzbdz0)
+    if len(cleaned) > 16 and (cleaned.startswith("CHE") or cleaned.startswith("DEU") or cleaned.startswith("FRA") or cleaned.startswith("AUT") or cleaned.startswith("GBR")):
+        cleaned = cleaned[:16]
+    return cleaned if len(cleaned) >= 6 else None
+
+
+def is_fuzzy_serial_match(s1: Optional[str], s2: Optional[str]) -> bool:
+    """Matches serials accounting for BLE RF bit flips or minor noise."""
+    if not s1 or not s2:
+        return False
+    if s1 == s2:
+        return True
+    # Substring / suffix match (e.g. lost leading char from RF noise: 595B11A20400103 vs 1595B11A20400103)
+    if len(s1) >= 10 and len(s2) >= 10:
+        if s1 in s2 or s2 in s1:
+            return True
+        if s1[-10:] == s2[-10:]:
+            return True
+    if len(s1) == len(s2) and len(s1) >= 12:
+        diffs = sum(1 for a, b in zip(s1, s2) if a != b)
+        if diffs <= 3:
+            return True
+    if len(s1) >= 8 and len(s2) >= 8 and s1[:8] == s2[:8]:
+        return True
+    return False
+
+
+def is_fuzzy_operator_match(op1: Optional[str], op2: Optional[str]) -> bool:
+    """Matches operator IDs accounting for BLE RF bit flips."""
+    s1 = sanitize_operator_id(op1)
+    s2 = sanitize_operator_id(op2)
+    if not s1 or not s2:
+        return False
+    if s1 == s2:
+        return True
+    if len(s1) == len(s2) and len(s1) >= 12:
+        diffs = sum(1 for a, b in zip(s1, s2) if a != b)
+        if diffs <= 3:
+            return True
+    return False
+
+
+def is_better_serial(new_s: Optional[str], old_s: Optional[str]) -> bool:
+    """Determines whether new_s is a higher quality/canonical serial than old_s."""
+    if not old_s:
+        return True
+    if not new_s:
+        return False
+    known_prefixes = ("1581F", "1595B", "1596E", "1752E")
+    n_qual = sum([
+        14 <= len(new_s) <= 20,
+        any(new_s.startswith(p) for p in known_prefixes),
+        new_s.isalnum()
+    ])
+    o_qual = sum([
+        14 <= len(old_s) <= 20,
+        any(old_s.startswith(p) for p in known_prefixes),
+        old_s.isalnum()
+    ])
+    return n_qual > o_qual
+
+
+def is_better_operator_id(new_op: Optional[str], old_op: Optional[str]) -> bool:
+    """Determines whether new_op is a higher quality/canonical operator ID than old_op."""
+    if not old_op:
+        return True
+    if not new_op:
+        return False
+    s_new = sanitize_operator_id(new_op) or ""
+    s_old = sanitize_operator_id(old_op) or ""
+    known_prefixes = ("CHE", "DEU", "FRA", "AUT", "GBR")
+    n_qual = sum([
+        len(s_new) == 16,
+        any(s_new.startswith(p) for p in known_prefixes),
+        s_new.isalnum()
+    ])
+    o_qual = sum([
+        len(s_old) == 16,
+        any(s_old.startswith(p) for p in known_prefixes),
+        s_old.isalnum()
+    ])
+    return n_qual > o_qual
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculates great-circle distance between two coordinates in meters."""
+    import math
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    return 2.0 * R * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
 def merge_sequential_encounters(conn: sqlite3.Connection, timeout_s: float = 300.0) -> int:
     """
     Scans the database and merges sequential flight encounters that belong to the same drone
-    (matching serial number or matching MAC address) within the inactivity timeout window (default: 300s).
+    (matching serial number, operator ID, matching MAC address, or BLE spatial proximity)
+    within the inactivity timeout window (default: 300s).
     Unifies durations, packet counts, transports, channels, PHY distributions, RSSI, telemetry, and trajectories.
     """
     conn.row_factory = sqlite3.Row
@@ -255,40 +370,54 @@ def merge_sequential_encounters(conn: sqlite3.Connection, timeout_s: float = 300
             ORDER BY first_seen ASC, last_seen ASC
         """).fetchall()
 
-        # Build lookup maps by serial and by mac
-        serials_map: Dict[str, List[Any]] = {}
-        macs_map: Dict[str, List[Any]] = {}
-        for r in rows:
-            s = r["serial_number"]
-            m = r["mac"]
-            if s:
-                serials_map.setdefault(s, []).append(r)
-            elif m and m != "UNKNOWN":
-                macs_map.setdefault(m, []).append(r)
-
         candidate = None
 
-        # Check serial matches first
-        for s, elist in serials_map.items():
-            if len(elist) > 1:
-                for i in range(len(elist) - 1):
-                    e1, e2 = elist[i], elist[i + 1]
-                    if e2["first_seen"] >= e1["first_seen"] - 60.0 and (e2["first_seen"] - e1["last_seen"] <= timeout_s):
-                        candidate = (e1, e2)
-                        break
-                if candidate:
+        for i in range(len(rows) - 1):
+            e1 = rows[i]
+            for j in range(i + 1, len(rows)):
+                e2 = rows[j]
+                dt = e2["first_seen"] - e1["last_seen"]
+                # If e2 starts significantly after e1 (> 10 minutes), stop inner loop
+                if dt > max(timeout_s, 600.0):
                     break
+                if dt < -60.0:
+                    continue
 
-        if not candidate:
-            for m, elist in macs_map.items():
-                if len(elist) > 1:
-                    for i in range(len(elist) - 1):
-                        e1, e2 = elist[i], elist[i + 1]
-                        if e2["first_seen"] >= e1["first_seen"] - 60.0 and (e2["first_seen"] - e1["last_seen"] <= timeout_s):
-                            candidate = (e1, e2)
-                            break
-                    if candidate:
-                        break
+                s1 = sanitize_serial(e1["serial_number"])
+                s2 = sanitize_serial(e2["serial_number"])
+                op1 = sanitize_operator_id(e1["operator_id"])
+                op2 = sanitize_operator_id(e2["operator_id"])
+                m1 = e1["mac"]
+                m2 = e2["mac"]
+
+                t1 = json.loads(e1["trajectory_json"] or "[]")
+                t2 = json.loads(e2["trajectory_json"] or "[]")
+                dist = None
+                if t1 and t2:
+                    dist = haversine_m(t1[-1][0], t1[-1][1], t2[0][0], t2[0][1])
+
+                should_merge = False
+
+                # 1. Serial match (exact or fuzzy)
+                if s1 and s2 and is_fuzzy_serial_match(s1, s2) and dt <= timeout_s:
+                    should_merge = True
+                # 2. Operator ID match (exact or fuzzy)
+                elif op1 and op2 and (op1 == op2 or is_fuzzy_operator_match(op1, op2)) and dt <= timeout_s:
+                    should_merge = True
+                # 3. MAC address match
+                elif m1 and m2 and m1 == m2 and m1 != "UNKNOWN" and dt <= timeout_s:
+                    should_merge = True
+                # 4. BLE spatial proximity match (within 500m & realistic speed)
+                elif ("bt" in (e1["transports"] or "") or "bt" in (e2["transports"] or "")) and dist is not None:
+                    if (dist <= 500.0 or dist <= max(1.0, dt) * 35.0) and dt <= timeout_s:
+                        if not s1 or not s2 or is_fuzzy_serial_match(s1, s2):
+                            should_merge = True
+
+                if should_merge:
+                    candidate = (e1, e2)
+                    break
+            if candidate:
+                break
 
         if not candidate:
             break
@@ -405,15 +534,28 @@ def merge_sequential_encounters(conn: sqlite3.Connection, timeout_s: float = 300
                 min_rate_mbps = min(all_r)
                 max_rate_mbps = max(all_r)
 
-        serial = e1["serial_number"] or e2["serial_number"]
+        # Select best serial
+        s_cands = [s for s in [sanitize_serial(e1["serial_number"]), sanitize_serial(e2["serial_number"]), e1["serial_number"], e2["serial_number"]] if s]
+        serial = None
+        for cand in s_cands:
+            if is_better_serial(cand, serial):
+                serial = cand
+
         drone_make = e1["drone_make"] or e2["drone_make"]
         drone_model = e1["drone_model"] or e2["drone_model"]
-        if serial and (not drone_make or not drone_model):
+        if serial:
             inf = infer_drone_model(serial)
-            drone_make = drone_make or inf.get("make")
-            drone_model = drone_model or inf.get("model")
+            if inf.get("make"):
+                drone_make = inf.get("make")
+            if inf.get("model"):
+                drone_model = inf.get("model")
 
-        operator_id = e1["operator_id"] or e2["operator_id"]
+        # Select best operator ID
+        op_cands = [op for op in [sanitize_operator_id(e1["operator_id"]), sanitize_operator_id(e2["operator_id"]), e1["operator_id"], e2["operator_id"]] if op]
+        operator_id = None
+        for cand in op_cands:
+            if is_better_operator_id(cand, operator_id):
+                operator_id = cand
         self_id_desc = e1["self_id_desc"] or e2["self_id_desc"]
         pilot_lat = e1["pilot_lat"] if e1["pilot_lat"] is not None else e2["pilot_lat"]
         pilot_lon = e1["pilot_lon"] if e1["pilot_lon"] is not None else e2["pilot_lon"]
