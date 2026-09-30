@@ -19,6 +19,7 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 from scanner.dashboard.app import app
+from scanner.db import init_encounters_db, upsert_receiver_node
 
 
 class TestDashboardAPI(unittest.TestCase):
@@ -38,7 +39,6 @@ class TestDashboardAPI(unittest.TestCase):
         # Initialize SQLite test database with realistic mock flight encounters
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        from db import init_encounters_db
         init_encounters_db(conn)
 
         # Insert Mock Encounter 1: Active BLE5 Flight with Public Operator ID
@@ -374,7 +374,6 @@ class TestDashboardAPI(unittest.TestCase):
 
     def test_node_position_update_unlocked(self):
         """Verify position update for an unlocked receiver node via POST /api/nodes/{node_id}/position."""
-        from db import upsert_receiver_node
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         upsert_receiver_node(
@@ -403,7 +402,6 @@ class TestDashboardAPI(unittest.TestCase):
 
     def test_node_position_update_locked(self):
         """Verify that position update for a locked receiver node returns 403 Forbidden."""
-        from db import upsert_receiver_node
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         upsert_receiver_node(
@@ -437,7 +435,6 @@ class TestDashboardAPI(unittest.TestCase):
                 "locked": False,
             }, f)
 
-        from db import upsert_receiver_node
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         upsert_receiver_node(
@@ -561,7 +558,7 @@ class TestDashboardAPI(unittest.TestCase):
             self.assertEqual(data["doc_status"], "ACCEPTED")
 
             # Verify that learned model registry was updated
-            from drone_models import infer_drone_model
+            from scanner.drone_models import infer_drone_model
             inf = infer_drone_model("1581F4TEST001")
             self.assertTrue(inf["is_inferred"])
             self.assertEqual(inf["make"], "DJI")
@@ -597,7 +594,7 @@ class TestDashboardAPI(unittest.TestCase):
             self.assertIn("No matching Declaration of Compliance", data_nf["message"])
 
     def test_db_path_resolution(self):
-        from dashboard.app import get_db_path
+        from scanner.dashboard.app import get_db_path
         # 1. When RID_DB_PATH is set
         os.environ["RID_DB_PATH"] = "/custom/path/detections.db"
         self.assertEqual(get_db_path(), "/custom/path/detections.db")
@@ -608,7 +605,7 @@ class TestDashboardAPI(unittest.TestCase):
             central_db = os.path.join(tmpdir, "rid_detections_central.db")
             with open(central_db, "w") as f:
                 f.write("")
-            with patch("dashboard.app.repo_root", tmpdir):
+            with patch("scanner.dashboard.app.repo_root", tmpdir):
                 resolved = get_db_path()
                 self.assertEqual(resolved, os.path.abspath(central_db))
 

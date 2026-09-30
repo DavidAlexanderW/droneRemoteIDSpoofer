@@ -126,6 +126,7 @@ def main():
         save_dashboard_config(dash_config, config_path)
 
     # Resolve database path (explicit flag > central DB on disk > standard DB)
+    scanner_dir = os.path.abspath(os.path.dirname(__file__))
     repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
     if args.db is not None:
         db_path = os.path.abspath(args.db)
