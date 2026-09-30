@@ -206,8 +206,7 @@ class BinaryPcapStreamer:
                         self.ble_connected = True
                     backoff = 1.0
 
-                    if not self.quiet:
-                        logger.info(f"[+] Connected to Central Hub binary PCAP stream for {media.upper()}: {ws_url}")
+                    logger.info(f"[+] Connected to Central Hub binary PCAP stream for {media.upper()}: {ws_url}")
 
                     while self.running:
                         # Drain batch from queue
@@ -222,14 +221,22 @@ class BinaryPcapStreamer:
                             await asyncio.sleep(self.batch_interval_s)
 
             except Exception as e:
+                was_connected = self.wifi_connected if media == "wifi" else self.ble_connected
                 if media == "wifi":
                     self.wifi_connected = False
                 else:
                     self.ble_connected = False
 
                 if self.running:
-                    if not self.quiet:
-                        logger.debug(f"[-] {media.upper()} binary PCAP stream disconnected ({e}). Retrying in {backoff:.1f}s...")
+                    attempts = (
+                        self.stats["wifi_connect_attempts"] if media == "wifi" else self.stats["ble_connect_attempts"]
+                    )
+                    if was_connected or attempts == 1 or (attempts % 20 == 0):
+                        logger.warning(
+                            f"[!] {media.upper()} binary PCAP stream connection error ({e}). Retrying in {backoff:.1f}s... (URL: {ws_url})"
+                        )
+                    elif not self.quiet:
+                        logger.debug(f"[-] {media.upper()} binary PCAP stream retry ({e}) in {backoff:.1f}s...")
                     await asyncio.sleep(backoff)
                     backoff = min(max_backoff, backoff * 1.5)
 

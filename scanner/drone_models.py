@@ -22,6 +22,7 @@ DEFAULT_LEARNED_MODELS_PATH = os.path.join(
 CTA_MANUFACTURERS: Dict[str, Dict[str, str]] = {
     # Major Consumer & Enterprise OEMs
     "1581": {"make": "DJI", "company": "SZ DJI Technology Co., Ltd.", "country": "China"},
+    "1595": {"make": "DJI", "company": "SZ DJI Technology Co., Ltd.", "country": "China"},
     "1596": {"make": "Autel Robotics", "company": "Autel Robotics Co., Ltd.", "country": "China / USA"},
     "1668": {"make": "Skydio", "company": "Skydio, Inc.", "country": "United States"},
     "1748": {"make": "Parrot", "company": "Parrot Drones SAS", "country": "France"},
@@ -66,6 +67,8 @@ MODEL_PREFIX_MAP: Dict[str, Dict[str, str]] = {
     "1581FD": {"make": "DJI", "model": "Matrice 3D / 3TD Dock Series"},
     "1581FE": {"make": "DJI", "model": "Matrice 400 / Enterprise Next-Gen"},
     "1581FF": {"make": "DJI", "model": "DJI Enterprise / Flight Hub Module"},
+    "1595B1": {"make": "DJI", "model": "Mini 4 Pro / Air 3 Series"},
+    "1595B": {"make": "DJI", "model": "Mini 4 Pro / Air 3 / Neo Series"},
 
     # --- Autel Robotics Models (MFR: 1596, Length Code: E) ---
     "1596E1": {"make": "Autel Robotics", "model": "EVO II Pro / Dual 640T Series"},

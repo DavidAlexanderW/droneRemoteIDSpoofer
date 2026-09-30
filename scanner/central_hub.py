@@ -61,66 +61,91 @@ logger = logging.getLogger("DroneRIDCentralHub")
 # ============================================================================
 
 class CentralDailyReplayLogger:
-    """Manages appending validated raw frames and envelopes to central daily JSONL files."""
+    """Manages appending validated raw frames and envelopes to central daily JSONL files with batched flushes."""
 
-    def __init__(self, log_dir: str = "central_logs"):
+    def __init__(self, log_dir: str = "central_logs", flush_interval_s: float = 1.0, flush_batch_size: int = 50):
         self.log_dir = os.path.abspath(log_dir)
         os.makedirs(self.log_dir, exist_ok=True)
+        self.flush_interval_s = max(0.1, flush_interval_s)
+        self.flush_batch_size = max(1, flush_batch_size)
         self.current_day_str: Optional[str] = None
         self.file_handle = None
+        self._unflushed_count = 0
+        self._last_flush = time.time()
         self.lock = asyncio.Lock()
 
-    def _get_file_handle(self, epoch_ts: float):
+    def _get_file_handle_sync(self, epoch_ts: float):
         day_str = datetime.fromtimestamp(epoch_ts, timezone.utc).strftime("%Y%m%d")
         if day_str != self.current_day_str or self.file_handle is None:
             if self.file_handle:
                 try:
+                    self.file_handle.flush()
                     self.file_handle.close()
                 except Exception:
                     pass
             self.current_day_str = day_str
             target_path = os.path.join(self.log_dir, f"rid_packets_{day_str}.jsonl")
             self.file_handle = open(target_path, "a", encoding="utf-8")
+            self._unflushed_count = 0
+            self._last_flush = time.time()
             logger.info(f"[*] Appending central forensic replay log to: {target_path}")
         return self.file_handle
 
+    def _write_record_sync(self, ts: float, line: str, force_flush: bool = False):
+        handle = self._get_file_handle_sync(ts)
+        handle.write(line)
+        self._unflushed_count += 1
+        now = time.time()
+        if force_flush or self._unflushed_count >= self.flush_batch_size or (now - self._last_flush) >= self.flush_interval_s:
+            handle.flush()
+            self._unflushed_count = 0
+            self._last_flush = now
+
     async def log_packet(self, packet_envelope: Dict[str, Any], encounter_id: Optional[str] = None):
         """Asynchronously writes a standardized packet record to the central daily JSONL."""
-        now_ts = time.time()
-        min_valid = 1700000000.0
-        max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
+        ts = resolve_reception_timestamp(packet_envelope)
 
-        ts = packet_envelope.get("reception_timestamp") or packet_envelope.get("timestamp") or packet_envelope.get("timestamp_epoch")
-        if ts is None and packet_envelope.get("timestamp_iso"):
-            try:
-                dt = datetime.fromisoformat(packet_envelope["timestamp_iso"].replace("Z", "+00:00"))
-                ts = dt.timestamp()
-            except Exception:
-                ts = now_ts
-        if ts is None or ts < min_valid or ts > max_valid:
-            ts = now_ts
+        record = {
+            "timestamp": ts,
+            "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+            "node_id": packet_envelope.get("node_id", "unknown"),
+            "node_meta": packet_envelope.get("node_meta", {}),
+            "transport": packet_envelope.get("transport", "unknown"),
+            "channel": packet_envelope.get("channel"),
+            "rssi_dbm": packet_envelope.get("rssi_dbm"),
+            "mac": packet_envelope.get("mac", "UNKNOWN"),
+            "serial": packet_envelope.get("serial_number") or packet_envelope.get("serial"),
+            "counter": packet_envelope.get("counter", 0),
+            "messages_b64": packet_envelope.get("messages_b64", []),
+            "messages": packet_envelope.get("messages", []),
+            "rate_mbps": packet_envelope.get("rate_mbps"),
+            "modulation": packet_envelope.get("modulation"),
+            "encounter_id": encounter_id,
+        }
+        line = json.dumps(record) + "\n"
 
         async with self.lock:
-            handle = self._get_file_handle(ts)
-            record = {
-                "timestamp": ts,
-                "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
-                "node_id": packet_envelope.get("node_id", "unknown"),
-                "node_meta": packet_envelope.get("node_meta", {}),
-                "transport": packet_envelope.get("transport", "unknown"),
-                "channel": packet_envelope.get("channel"),
-                "rssi_dbm": packet_envelope.get("rssi_dbm"),
-                "mac": packet_envelope.get("mac", "UNKNOWN"),
-                "serial": packet_envelope.get("serial_number") or packet_envelope.get("serial"),
-                "counter": packet_envelope.get("counter", 0),
-                "messages_b64": packet_envelope.get("messages_b64", []),
-                "messages": packet_envelope.get("messages", []),
-                "rate_mbps": packet_envelope.get("rate_mbps"),
-                "modulation": packet_envelope.get("modulation"),
-                "encounter_id": encounter_id,
-            }
-            handle.write(json.dumps(record) + "\n")
-            handle.flush()
+            await asyncio.to_thread(self._write_record_sync, ts, line, False)
+
+    def flush(self):
+        """Synchronously flushes active file handle."""
+        if self.file_handle:
+            try:
+                self.file_handle.flush()
+                self._unflushed_count = 0
+                self._last_flush = time.time()
+            except Exception:
+                pass
+
+    def close(self):
+        """Flushes and closes active file handle synchronously."""
+        if self.file_handle:
+            try:
+                self.file_handle.flush()
+                self.file_handle.close()
+            except Exception:
+                pass
+            self.file_handle = None
 
 
 # ============================================================================
@@ -371,6 +396,9 @@ class CentralIngestionHub:
         if max_ts > 0.0:
             self.update_node_watermark(node_id, max_ts, count=len(items))
 
+        if self.replay_logger:
+            self.replay_logger.flush()
+
         self.stats["total_batches_received"] += 1
         return len(items)
 
@@ -378,12 +406,8 @@ class CentralIngestionHub:
         """Flushes and closes all loggers, trackers, and database handles."""
         if self.pcap_logger:
             self.pcap_logger.close()
-        if self.replay_logger and self.replay_logger.file_handle:
-            try:
-                self.replay_logger.file_handle.close()
-            except Exception:
-                pass
-            self.replay_logger.file_handle = None
+        if self.replay_logger:
+            self.replay_logger.close()
         if self.encounter_tracker:
             self.encounter_tracker.finalize_all()
         if self.db_conn:

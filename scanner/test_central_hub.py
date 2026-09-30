@@ -528,6 +528,45 @@ class TestCentralHub(unittest.TestCase):
         self.assertEqual(target_node["latitude"], 47.45)
         self.assertEqual(target_node["longitude"], 8.65)
 
+    def test_central_daily_replay_logger_batching_and_lifecycle(self):
+        """Verifies CentralDailyReplayLogger batch writes, dynamic timestamping, and closure."""
+        from scanner.central_hub import CentralDailyReplayLogger
+        import tempfile
+        import shutil
+
+        temp_log_dir = tempfile.mkdtemp(prefix="test_replay_logger_")
+        try:
+            logger_inst = CentralDailyReplayLogger(log_dir=temp_log_dir, flush_interval_s=1.0, flush_batch_size=5)
+            loop = asyncio.new_event_loop()
+
+            # Log 3 packets (less than flush_batch_size=5)
+            t0 = 1788800000.0
+            for i in range(3):
+                pkt = {
+                    "timestamp": t0 + i,
+                    "node_id": "test_batch_node",
+                    "transport": "bt5",
+                    "mac": "AA:BB:CC:11:22:33",
+                    "serial_number": "BATCH_TEST_DRONE",
+                    "rssi_dbm": -65 + i,
+                }
+                loop.run_until_complete(logger_inst.log_packet(pkt, encounter_id="ENC-TEST-001"))
+
+            # Explicit flush and close
+            logger_inst.flush()
+            logger_inst.close()
+            loop.close()
+
+            files = [f for f in os.listdir(temp_log_dir) if f.endswith(".jsonl")]
+            self.assertEqual(len(files), 1)
+            with open(os.path.join(temp_log_dir, files[0]), "r", encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(len(lines), 3)
+            self.assertEqual(lines[0]["serial"], "BATCH_TEST_DRONE")
+            self.assertEqual(lines[0]["encounter_id"], "ENC-TEST-001")
+        finally:
+            shutil.rmtree(temp_log_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
