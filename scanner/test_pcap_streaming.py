@@ -108,6 +108,57 @@ class TestPcapStreaming(unittest.TestCase):
 
         streamer.running = False
 
+    def test_selective_transport_flags_no_ble_no_wifi(self):
+        """Verifies that BinaryPcapStreamer honors enable_wifi and enable_ble flags."""
+        # Case 1: BLE disabled (--no-ble)
+        streamer_no_ble = BinaryPcapStreamer(
+            hub_url="ws://127.0.0.1:8000",
+            node_id="node_no_ble",
+            enable_wifi=True,
+            enable_ble=False,
+            quiet=True,
+        )
+        streamer_no_ble.running = True
+        streamer_no_ble.enqueue_ble_raw(b"\xAA" * 50)
+        streamer_no_ble.enqueue_wifi(b"\xBB" * 50, ts=1788800000.0)
+
+        stats = streamer_no_ble.get_stats()
+        self.assertFalse(stats["enable_ble"])
+        self.assertTrue(stats["enable_wifi"])
+        self.assertEqual(stats["ble_packets_enqueued"], 0)
+        self.assertEqual(stats["wifi_packets_enqueued"], 1)
+        streamer_no_ble.running = False
+
+        # Case 2: Wi-Fi disabled (--no-wifi)
+        streamer_no_wifi = BinaryPcapStreamer(
+            hub_url="ws://127.0.0.1:8000",
+            node_id="node_no_wifi",
+            enable_wifi=False,
+            enable_ble=True,
+            quiet=True,
+        )
+        streamer_no_wifi.running = True
+        streamer_no_wifi.enqueue_wifi(b"\xBB" * 50, ts=1788800000.0)
+        streamer_no_wifi.enqueue_ble_raw(b"\xAA" * 50)
+
+        stats = streamer_no_wifi.get_stats()
+        self.assertTrue(stats["enable_ble"])
+        self.assertFalse(stats["enable_wifi"])
+        self.assertEqual(stats["wifi_packets_enqueued"], 0)
+        self.assertEqual(stats["ble_packets_enqueued"], 1)
+        streamer_no_wifi.running = False
+
+        # Case 3: Both disabled
+        streamer_none = BinaryPcapStreamer(
+            hub_url="ws://127.0.0.1:8000",
+            node_id="node_none",
+            enable_wifi=False,
+            enable_ble=False,
+            quiet=True,
+        )
+        streamer_none.start()
+        self.assertFalse(streamer_none.running)
+
     def test_hub_binary_pcap_websocket_endpoint(self):
         """Tests the hub /stream/pcap/{node_id}/{media} binary WebSocket route directly."""
         node_id = "node_pcap_test"

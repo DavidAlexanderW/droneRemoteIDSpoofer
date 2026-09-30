@@ -77,6 +77,8 @@ class BinaryPcapStreamer:
         batch_max_bytes: int = 32768,
         max_buffer_bytes: int = 50 * 1024 * 1024,  # 50 MB RAM buffer
         quiet: bool = False,
+        enable_wifi: bool = True,
+        enable_ble: bool = True,
     ):
         self.base_ws_url = normalize_ws_base_url(hub_url)
         self.node_id = str(node_id).strip() or "node"
@@ -84,6 +86,8 @@ class BinaryPcapStreamer:
         self.batch_max_bytes = max(1024, batch_max_bytes)
         self.max_buffer_bytes = max(256, max_buffer_bytes)
         self.quiet = quiet
+        self.enable_wifi = enable_wifi
+        self.enable_ble = enable_ble
 
         self.wifi_url = f"{self.base_ws_url}/stream/pcap/{self.node_id}/wifi"
         self.ble_url = f"{self.base_ws_url}/stream/pcap/{self.node_id}/ble"
@@ -122,6 +126,11 @@ class BinaryPcapStreamer:
         if self.running:
             return
 
+        if not self.enable_wifi and not self.enable_ble:
+            if not self.quiet:
+                logger.info("[*] Binary PCAP streaming skipped (both Wi-Fi and BLE disabled).")
+            return
+
         if websockets is None:
             logger.error("[-] 'websockets' library is required for BinaryPcapStreamer but not installed.")
             return
@@ -134,7 +143,12 @@ class BinaryPcapStreamer:
         )
         self.worker_thread.start()
         if not self.quiet:
-            logger.info(f"[*] Binary PCAP Streamer active -> Hub: {self.base_ws_url} (Node ID: {self.node_id})")
+            channels = []
+            if self.enable_wifi:
+                channels.append("Wi-Fi")
+            if self.enable_ble:
+                channels.append("BLE")
+            logger.info(f"[*] Binary PCAP Streamer active ({' + '.join(channels)}) -> Hub: {self.base_ws_url} (Node ID: {self.node_id})")
 
     def _run_event_loop(self):
         """Runs the dedicated asyncio event loop for WebSocket connections."""
@@ -152,10 +166,17 @@ class BinaryPcapStreamer:
                 pass
 
     async def _main_async_loop(self):
-        """Spawns concurrent worker tasks for Wi-Fi and BLE streaming."""
-        wifi_task = asyncio.create_task(self._channel_stream_worker("wifi", self.wifi_url, self.wifi_queue))
-        ble_task = asyncio.create_task(self._channel_stream_worker("ble", self.ble_url, self.ble_queue))
-        await asyncio.gather(wifi_task, ble_task, return_exceptions=True)
+        """Spawns concurrent worker tasks for enabled media streaming."""
+        tasks = []
+        if self.enable_wifi:
+            tasks.append(asyncio.create_task(self._channel_stream_worker("wifi", self.wifi_url, self.wifi_queue)))
+        if self.enable_ble:
+            tasks.append(asyncio.create_task(self._channel_stream_worker("ble", self.ble_url, self.ble_queue)))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            while self.running:
+                await asyncio.sleep(0.5)
 
     async def _channel_stream_worker(self, media: str, ws_url: str, pkt_queue: queue.Queue):
         """Autonomous persistent streaming worker for a single media channel (wifi or ble)."""
@@ -237,7 +258,7 @@ class BinaryPcapStreamer:
         Enqueues a raw 802.11 frame (with Radiotap header).
         Prepends the 16-byte libpcap record header.
         """
-        if not self.running or not frame:
+        if not self.running or not self.enable_wifi or not frame:
             return
 
         ts_val = ts if ts is not None else time.time()
@@ -263,7 +284,7 @@ class BinaryPcapStreamer:
         Enqueues raw BLE PCAP bytes received from the nRF sniffer pipe.
         Can contain one or more complete PCAP records.
         """
-        if not self.running or not raw_chunk:
+        if not self.running or not self.enable_ble or not raw_chunk:
             return
 
         with self.queue_lock:
@@ -285,7 +306,7 @@ class BinaryPcapStreamer:
         Enqueues a raw Nordic BLE frame (DLT 272).
         Prepends the 16-byte libpcap record header.
         """
-        if not self.running or not frame:
+        if not self.running or not self.enable_ble or not frame:
             return
 
         ts_val = ts if ts is not None else time.time()
@@ -298,6 +319,8 @@ class BinaryPcapStreamer:
         with self.queue_lock:
             return {
                 **self.stats,
+                "enable_wifi": self.enable_wifi,
+                "enable_ble": self.enable_ble,
                 "wifi_connected": self.wifi_connected,
                 "ble_connected": self.ble_connected,
                 "wifi_buffer_bytes": self.wifi_buffer_bytes,

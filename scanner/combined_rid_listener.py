@@ -1550,7 +1550,7 @@ class WifiSnifferThread(threading.Thread):
                 ts = time.time()
 
                 # Tapping raw frame for concurrent binary PCAP streaming
-                if self.pcap_streamer:
+                if self.pcap_streamer and getattr(self.pcap_streamer, "enable_wifi", True):
                     self.pcap_streamer.enqueue_wifi(frame, ts)
 
                 # Fast check for ASTM OUI (FA:0B:BC) in Vendor Specific IEs (0xDD) or NAN Action frames
@@ -1748,9 +1748,9 @@ class BleNrfSnifferThread(threading.Thread):
         ]
         nrf_script = next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
 
-        # Setup local PCAP tap server if pcap_streamer is attached
+        # Setup local PCAP tap server if pcap_streamer is attached and BLE PCAP is enabled
         local_pcap_port = None
-        if self.pcap_streamer:
+        if self.pcap_streamer and getattr(self.pcap_streamer, "enable_ble", True):
             try:
                 self.pcap_server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.pcap_server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2615,15 +2615,25 @@ def main():
             logger.error("[-] CentralStreamForwarder module could not be loaded. Running standalone.")
 
         pcap_streamer = None
-        if BinaryPcapStreamer is not None:
+        has_wifi = not args.no_wifi
+        has_ble = not args.no_ble
+
+        if BinaryPcapStreamer is not None and (has_wifi or has_ble):
             pcap_streamer = BinaryPcapStreamer(
                 hub_url=args.hub_url,
                 node_id=args.node_id,
                 quiet=args.quiet,
+                enable_wifi=has_wifi,
+                enable_ble=has_ble,
             )
             pcap_streamer.start()
-            logger.info(f"[*] Operational Mode: CONCURRENT BINARY PCAP STREAMING -> Hub: {pcap_streamer.base_ws_url}")
-        else:
+            channels = []
+            if has_wifi:
+                channels.append("Wi-Fi")
+            if has_ble:
+                channels.append("BLE")
+            logger.info(f"[*] Operational Mode: CONCURRENT BINARY PCAP STREAMING ({' + '.join(channels)}) -> Hub: {pcap_streamer.base_ws_url}")
+        elif BinaryPcapStreamer is None:
             logger.warning("[!] BinaryPcapStreamer module not available. Binary PCAP streaming disabled.")
     else:
         pcap_streamer = None
@@ -2736,6 +2746,13 @@ def main():
     print(f"\n{C_BOLD}{C_GREEN}🚀 COMBINED BLUETOOTH & WI-FI REMOTE ID LISTENER ACTIVE{C_RESET}")
     if is_hub_mode and forwarder:
         print(f"  • Central Hub URL    : {C_CYAN}{args.hub_url}{C_RESET} (Node ID: {C_BOLD}{args.node_id}{C_RESET})")
+        if pcap_streamer and (pcap_streamer.enable_wifi or pcap_streamer.enable_ble):
+            active_channels = []
+            if pcap_streamer.enable_wifi:
+                active_channels.append("Wi-Fi")
+            if pcap_streamer.enable_ble:
+                active_channels.append("BLE")
+            print(f"  • Binary PCAP Stream : {C_MAGENTA}Concurrent {' + '.join(active_channels)} full capture streaming to Hub{C_RESET}")
         print(f"  • Reliability Buffer : {C_MAGENTA}RAM Max: {args.max_ram_queue} pkts | Disk Spool: {args.spool_dir}/{C_RESET} (0 disk writes on happy path)")
     else:
         if db_path_to_use:
