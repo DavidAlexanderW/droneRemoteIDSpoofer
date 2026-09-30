@@ -46,7 +46,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
         # Initialize tracker with short 1.0s timeout for testing
         tracker = EncounterTracker(db_path=self.db_path, timeout_s=1.0)
 
-        t0 = 1756129000.0
+        t0 = 1770000000.0
         pkt1 = {
             "timestamp": t0,
             "mac": "60:60:1F:AA:BB:CC",
@@ -136,7 +136,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
         # Test case reported by user: Packet 1 arrives with ONLY Location (no serial), Packet 2 arrives with Basic ID
         # Both MUST merge into the same encounter without generating a split duplicate encounter.
         tracker = EncounterTracker(db_path=self.db_path, timeout_s=300.0)
-        t0 = 1756129000.0
+        t0 = 1770000000.0
         mac = "D6:D0:BC:41:7F:F9"
 
         # Packet 1: Location only (serial = None)
@@ -229,7 +229,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
     def test_geojson_export_structure(self):
         tracker = EncounterTracker(db_path=self.db_path, timeout_s=300.0)
         pkt = {
-            "timestamp": 1756129000.0,
+            "timestamp": 1770000000.0,
             "mac": "11:22:33:44:55:66",
             "serial_number": "GEOJSON_DRONE",
             "transport": "wifi",
@@ -262,7 +262,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
             quiet=True,
         )
 
-        t0 = 1756129000.0  # 2025-08-25
+        t0 = 1770000000.0  # 2025-08-25
         pkt = {
             "timestamp": t0,
             "transport": "bt5",
@@ -294,7 +294,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
     def test_persistence_throttling(self):
         # Initialize tracker with 2.0s persist interval
         tracker = EncounterTracker(db_path=self.db_path, timeout_s=300.0, persist_interval_s=2.0)
-        t0 = 1756129000.0
+        t0 = 1770000000.0
         pkt1 = {
             "timestamp": t0,
             "mac": "22:22:22:22:22:22",
