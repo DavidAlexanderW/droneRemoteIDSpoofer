@@ -177,11 +177,12 @@ class CentralStreamForwarder:
         if not self.running:
             return
 
+        clean_event = {k: v for k, v in packet_event.items() if k != "raw_bytes"}
         envelope = {
             "version": "1.0",
             "node_id": self.node_id,
             "node_meta": self.node_meta,
-            **packet_event,
+            **clean_event,
         }
 
         with self.lock:

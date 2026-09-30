@@ -154,6 +154,14 @@ except ImportError:
     from forwarder import CentralStreamForwarder
 
 try:
+    from scanner.pcap_streamer import BinaryPcapStreamer
+except ImportError:
+    try:
+        from pcap_streamer import BinaryPcapStreamer
+    except ImportError:
+        BinaryPcapStreamer = None
+
+try:
     from scanner.db import (
         init_encounters_db,
         get_db_connection as db_get_connection,
@@ -187,6 +195,11 @@ except ImportError:
         haversine_m,
         merge_sequential_encounters,
     )
+
+try:
+    from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
+except ImportError:
+    from pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
 
 
 # ============================================================================
@@ -1493,13 +1506,24 @@ class WifiSnifferThread(threading.Thread):
         interface: str,
         channel_state: SharedChannelState,
         event_queue: queue.Queue,
+        pcap_streamer: Optional[Any] = None,
     ):
         super().__init__(name="WifiSnifferThread", daemon=True)
         self.interface = interface
         self.channel_state = channel_state
         self.event_queue = event_queue
+        self.pcap_streamer = pcap_streamer
         self.running = False
         self.sock: Optional[socket.socket] = None
+
+    def stop(self):
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
 
     def run(self):
         self.running = True
@@ -1524,6 +1548,10 @@ class WifiSnifferThread(threading.Thread):
                     continue
 
                 ts = time.time()
+
+                # Tapping raw frame for concurrent binary PCAP streaming
+                if self.pcap_streamer:
+                    self.pcap_streamer.enqueue_wifi(frame, ts)
 
                 # Fast check for ASTM OUI (FA:0B:BC) in Vendor Specific IEs (0xDD) or NAN Action frames
                 vendor_ie_idx = -1
@@ -1621,6 +1649,8 @@ class WifiSnifferThread(threading.Thread):
                     "messages": parsed_messages,
                     "messages_b64": messages_b64,
                     "raw_length": len(frame),
+                    "raw_hex": frame.hex().upper(),
+                    "raw_bytes": frame,
                 }
 
                 self.event_queue.put(event)
@@ -1658,6 +1688,7 @@ class BleNrfSnifferThread(threading.Thread):
         ble_mode: str = "hop",
         bt5_dwell_s: float = 5.0,
         bt4_dwell_s: float = 1.0,
+        pcap_streamer: Optional[Any] = None,
     ):
         super().__init__(name="BleNrfSnifferThread", daemon=True)
         self.event_queue = event_queue
@@ -1667,8 +1698,38 @@ class BleNrfSnifferThread(threading.Thread):
         self.ble_mode = ble_mode
         self.bt5_dwell_s = bt5_dwell_s
         self.bt4_dwell_s = bt4_dwell_s
+        self.pcap_streamer = pcap_streamer
         self.running = False
         self.proc: Optional[subprocess.Popen] = None
+        self.pcap_server_sock: Optional[socket.socket] = None
+        self.pcap_rx_thread: Optional[threading.Thread] = None
+
+    def _pcap_receiver_worker(self, server_sock: socket.socket):
+        """Accepts local connection from nrf_bt_sniffer_json.py and feeds raw BLE PCAP chunks into pcap_streamer."""
+        while self.running:
+            try:
+                conn, _ = server_sock.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+            conn.settimeout(1.0)
+            while self.running and (self.proc and self.proc.poll() is None):
+                try:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    if self.pcap_streamer:
+                        self.pcap_streamer.enqueue_ble_raw(chunk)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def stop(self):
         self.running = False
@@ -1686,6 +1747,28 @@ class BleNrfSnifferThread(threading.Thread):
             os.path.join(script_dir, "..", "nrf_bt_sniffer_json.py"),
         ]
         nrf_script = next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
+
+        # Setup local PCAP tap server if pcap_streamer is attached
+        local_pcap_port = None
+        if self.pcap_streamer:
+            try:
+                self.pcap_server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.pcap_server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.pcap_server_sock.bind(("127.0.0.1", 0))
+                self.pcap_server_sock.listen(1)
+                self.pcap_server_sock.settimeout(1.0)
+                local_pcap_port = self.pcap_server_sock.getsockname()[1]
+
+                self.pcap_rx_thread = threading.Thread(
+                    target=self._pcap_receiver_worker,
+                    args=(self.pcap_server_sock,),
+                    daemon=True,
+                    name="BlePcapTapReceiver",
+                )
+                self.pcap_rx_thread.start()
+            except Exception as e:
+                logger.warning(f"[!] Could not initialize local BLE PCAP tap socket: {e}")
+                self.pcap_server_sock = None
 
         while self.running:
             # 1. Detect or verify UART serial port if live
@@ -1706,13 +1789,19 @@ class BleNrfSnifferThread(threading.Thread):
                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             time.sleep(0.3)
 
+            repo_root = os.path.abspath(os.path.join(script_dir, ".."))
+            venv_python = os.path.join(repo_root, ".venv", "bin", "python")
+            py_bin = venv_python if os.path.exists(venv_python) else sys.executable
+
             cmd = [
-                sys.executable, nrf_script,
+                py_bin, nrf_script,
                 "--only-rid",
                 "--ble-mode", self.ble_mode,
                 "--bt5-dwell", str(self.bt5_dwell_s),
                 "--bt4-dwell", str(self.bt4_dwell_s),
             ]
+            if local_pcap_port:
+                cmd.extend(["--raw-pcap-port", str(local_pcap_port)])
             if self.coded:
                 cmd.append("--coded")
             if active_port:
@@ -1834,6 +1923,8 @@ class BleNrfSnifferThread(threading.Thread):
                             "messages": parsed_msgs,
                             "messages_b64": messages_b64,
                             "raw_length": record.get("raw_length", 0),
+                            "raw_hex": raw_hex,
+                            "raw_bytes": bytes.fromhex(raw_hex) if raw_hex else None,
                             "pdu_type": record.get("pdu_type"),
                         }
 
@@ -1873,6 +1964,13 @@ class BleNrfSnifferThread(threading.Thread):
                     pass
             self.proc = None
 
+        if self.pcap_server_sock:
+            try:
+                self.pcap_server_sock.close()
+            except Exception:
+                pass
+            self.pcap_server_sock = None
+
     def stop(self):
         self.running = False
         self.stop_process()
@@ -1901,6 +1999,8 @@ class UnifiedTelemetryLogger:
         forwarder: Optional[Any] = None,
         node_id: Optional[str] = None,
         node_meta: Optional[Dict[str, Any]] = None,
+        log_pcap: Optional[str] = None,
+        pcap_dir: Optional[str] = None,
     ):
         self.forwarder = forwarder
         self.node_id = node_id
@@ -1910,6 +2010,34 @@ class UnifiedTelemetryLogger:
         self.quiet = quiet
         self.current_log_path: Optional[str] = None
         self.log_file_handle = None
+
+        # PCAP Logging (Daily rotated per node: 1 file for Bluetooth, 1 file for Wi-Fi)
+        self.pcap_logger: Optional[DailyNodePcapLogger] = None
+        if log_pcap or pcap_dir:
+            if pcap_dir:
+                resolved_pcap_dir = pcap_dir
+                pcap_prefix = log_pcap if (log_pcap and not os.path.isdir(log_pcap) and "/" not in log_pcap and "\\" not in log_pcap) else ""
+            elif log_pcap:
+                if os.path.isdir(log_pcap) or log_pcap.endswith(("/", "\\")):
+                    resolved_pcap_dir = log_pcap
+                    pcap_prefix = ""
+                elif "/" in log_pcap or "\\" in log_pcap:
+                    resolved_pcap_dir = os.path.dirname(os.path.abspath(log_pcap))
+                    pcap_prefix = os.path.basename(log_pcap)
+                else:
+                    resolved_pcap_dir = log_pcap
+                    pcap_prefix = ""
+            else:
+                resolved_pcap_dir = "pcaps"
+                pcap_prefix = ""
+
+            self.pcap_logger = DailyNodePcapLogger(
+                base_dir=resolved_pcap_dir,
+                node_id=self.node_id or "node",
+                rotate_daily=True,
+                file_prefix=pcap_prefix,
+                quiet=quiet,
+            )
 
         self.encounter_tracker = EncounterTracker(
             db_path=db_path,
@@ -2106,6 +2234,10 @@ class UnifiedTelemetryLogger:
             handle.write(json.dumps(replay_record) + "\n")
             handle.flush()
 
+        # 4. Write to Daily PCAP (1 for Wi-Fi, 1 for BLE per node) (if configured)
+        if self.pcap_logger:
+            self.pcap_logger.log_event(event)
+
         # In quiet mode, per-packet display is suppressed (heartbeats handled in periodic_maintenance)
         if self.quiet:
             return
@@ -2245,6 +2377,8 @@ class UnifiedTelemetryLogger:
             except Exception:
                 pass
             self.log_file_handle = None
+        if self.pcap_logger:
+            self.pcap_logger.close()
 
     def print_summary(self):
         duration = time.time() - self.start_time
@@ -2257,6 +2391,14 @@ class UnifiedTelemetryLogger:
         print(f"  • Physical Transport Breakdown:")
         for t_name, count in self.stats["transports"].items():
             print(f"      - {t_name:<12}: {count}")
+
+        if self.pcap_logger:
+            p_stats = self.pcap_logger.get_stats()
+            print(f"  • Daily PCAP Captures (Node: {p_stats['node_id']}):")
+            wifi_file = os.path.basename(p_stats['current_wifi_file']) if p_stats.get('current_wifi_file') else 'None'
+            ble_file = os.path.basename(p_stats['current_ble_file']) if p_stats.get('current_ble_file') else 'None'
+            print(f"      - Wi-Fi PCAP  : {p_stats['wifi_packets']} pkts ({p_stats['wifi_bytes']} bytes) -> {wifi_file}")
+            print(f"      - BLE PCAP    : {p_stats['ble_packets']} pkts ({p_stats['ble_bytes']} bytes) -> {ble_file}")
 
         if self.stats["wifi_channels"]:
             print(f"  • Wi-Fi Channels Active (2.4GHz / 5.8GHz):")
@@ -2372,6 +2514,8 @@ def main():
     parser.add_argument("--persist-interval", type=float, default=2.0, help="Maximum frequency in seconds to persist active encounters to SQLite (default: 2.0s)")
     parser.add_argument("--log-jsonl", default=None, help="Optional replay-compatible JSONL log file path")
     parser.add_argument("--rotate-daily", action="store_true", help="Automatically split JSONL log file daily (<name>_YYYYMMDD.jsonl)")
+    parser.add_argument("--log-pcap", nargs="?", const="pcaps", default=None, help="Enable daily PCAP logging with optional output directory or path prefix (default: pcaps)")
+    parser.add_argument("--pcap-dir", default=None, help="Directory to store daily PCAP log files (default: pcaps if --log-pcap enabled)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Quiet / daemon mode: suppress per-packet console banner and print periodic heartbeat status")
     parser.add_argument("--sync-only", action="store_true", help="Synchronize pending spool files and historical backlog to Central Hub and exit")
     parser.add_argument("--rehydrate", action="store_true", help="Retroactively re-parse all raw base64 ASTM messages from rid_packets_*.jsonl files and update the SQLite database")
@@ -2399,6 +2543,10 @@ def main():
             args.ble_bt5_dwell = float(cfg.get("ble_bt5_dwell_s", default_ble_bt5_dwell))
         if args.ble_bt4_dwell == default_ble_bt4_dwell:
             args.ble_bt4_dwell = float(cfg.get("ble_bt4_dwell_s", default_ble_bt4_dwell))
+        if not args.log_pcap and cfg.get("log_pcap"):
+            args.log_pcap = "pcaps"
+        if not args.pcap_dir and (cfg.get("pcap_dir") or cfg.get("log_pcap_dir")):
+            args.pcap_dir = cfg.get("pcap_dir") or cfg.get("log_pcap_dir")
 
     if not args.no_wifi and not args.wifi_iface:
         args.no_wifi = True
@@ -2465,7 +2613,20 @@ def main():
                 return
         else:
             logger.error("[-] CentralStreamForwarder module could not be loaded. Running standalone.")
+
+        pcap_streamer = None
+        if BinaryPcapStreamer is not None:
+            pcap_streamer = BinaryPcapStreamer(
+                hub_url=args.hub_url,
+                node_id=args.node_id,
+                quiet=args.quiet,
+            )
+            pcap_streamer.start()
+            logger.info(f"[*] Operational Mode: CONCURRENT BINARY PCAP STREAMING -> Hub: {pcap_streamer.base_ws_url}")
+        else:
+            logger.warning("[!] BinaryPcapStreamer module not available. Binary PCAP streaming disabled.")
     else:
+        pcap_streamer = None
         logger.info(f"[*] Operational Mode: STANDALONE LOCAL -> Encounters DB: {args.db_file or 'disabled'} (No Hub URL configured)")
 
     if args.no_wifi and args.no_ble:
@@ -2490,6 +2651,8 @@ def main():
         db_path_to_use = args.db_file
 
     log_jsonl_to_use = args.log_jsonl if (not is_hub_mode or args.log_jsonl) else None
+    log_pcap_to_use = (args.log_pcap or args.pcap_dir) if (not is_hub_mode or args.log_pcap or args.pcap_dir) else None
+    pcap_dir_to_use = (args.pcap_dir or (args.log_pcap if (args.log_pcap and os.path.isdir(args.log_pcap)) else None)) if log_pcap_to_use else None
 
     event_queue: queue.Queue = queue.Queue()
     channel_state = SharedChannelState(initial_channel=initial_wifi_ch, drain_retention_ms=args.drain_retention_ms)
@@ -2503,6 +2666,8 @@ def main():
         forwarder=forwarder,
         node_id=args.node_id,
         node_meta=cfg,
+        log_pcap=log_pcap_to_use,
+        pcap_dir=pcap_dir_to_use,
     )
 
     threads: List[threading.Thread] = []
@@ -2532,6 +2697,7 @@ def main():
             interface=args.wifi_iface,
             channel_state=channel_state,
             event_queue=event_queue,
+            pcap_streamer=pcap_streamer,
         )
         threads.append(wifi_thread)
 
@@ -2552,6 +2718,7 @@ def main():
             ble_mode=args.ble_mode,
             bt5_dwell_s=args.ble_bt5_dwell,
             bt4_dwell_s=args.ble_bt4_dwell,
+            pcap_streamer=pcap_streamer,
         )
         threads.append(ble_thread)
 
@@ -2575,6 +2742,8 @@ def main():
             print(f"  • SQLite Encounters DB: {C_MAGENTA}{db_path_to_use}{C_RESET} (Timeout: {args.encounter_timeout_s:.0f}s / {args.encounter_timeout_s/60:.1f}m)")
         if log_jsonl_to_use:
             print(f"  • Replay JSONL Log   : {C_MAGENTA}{log_jsonl_to_use}{C_RESET}")
+    if log_pcap_to_use and logger_worker.pcap_logger:
+        print(f"  • Daily PCAP Logs    : {C_MAGENTA}{logger_worker.pcap_logger.base_dir}/{C_RESET} (Wi-Fi & BLE daily per node: {logger_worker.pcap_logger.node_id})")
     print(f"{C_GRAY}Press Ctrl+C at any time to stop and view capture statistics.{C_RESET}\n")
 
     # Start capture threads
@@ -2601,6 +2770,8 @@ def main():
             wifi_thread.stop()
         if ble_thread:
             ble_thread.stop()
+        if pcap_streamer:
+            pcap_streamer.stop()
 
         for t in threads:
             t.join(timeout=1.0)

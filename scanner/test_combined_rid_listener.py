@@ -7,6 +7,8 @@ Unit tests for combined_rid_listener.py:
 """
 
 import unittest
+import os
+import json
 import struct
 import time
 import tempfile
@@ -893,6 +895,245 @@ class TestCombinedRIDListener(unittest.TestCase):
             self.assertAlmostEqual(loaded.get("longitude"), 7.4474)
 
             os.unlink(tmp.name)
+
+    def test_pcap_global_and_record_headers(self):
+        """Verify standard 24-byte PCAP global header and 16-byte record header construction."""
+        from scanner.pcap_logger import (
+            build_pcap_global_header,
+            build_pcap_record_header,
+            DLT_IEEE802_11_RADIO,
+            DLT_NORDIC_BLE,
+            PCAP_MAGIC_MICROSECONDS,
+            PCAP_GLOBAL_HEADER_LEN,
+            PCAP_RECORD_HEADER_LEN,
+        )
+        # Wi-Fi Radiotap Header
+        hdr_wifi = build_pcap_global_header(DLT_IEEE802_11_RADIO)
+        self.assertEqual(len(hdr_wifi), PCAP_GLOBAL_HEADER_LEN)
+        magic, v_maj, v_min, tz, sig, snaplen, net = struct.unpack("<IHHiIII", hdr_wifi)
+        self.assertEqual(magic, PCAP_MAGIC_MICROSECONDS)
+        self.assertEqual(v_maj, 2)
+        self.assertEqual(v_min, 4)
+        self.assertEqual(net, DLT_IEEE802_11_RADIO)
+
+        # Bluetooth Header
+        hdr_ble = build_pcap_global_header(DLT_NORDIC_BLE)
+        self.assertEqual(len(hdr_ble), PCAP_GLOBAL_HEADER_LEN)
+        _, _, _, _, _, _, net_ble = struct.unpack("<IHHiIII", hdr_ble)
+        self.assertEqual(net_ble, DLT_NORDIC_BLE)
+
+        # Record header
+        ts = 1790683200.123456
+        rec_hdr = build_pcap_record_header(ts, 120)
+        self.assertEqual(len(rec_hdr), PCAP_RECORD_HEADER_LEN)
+        sec, usec, incl_len, orig_len = struct.unpack("<IIII", rec_hdr)
+        self.assertEqual(sec, 1790683200)
+        self.assertEqual(usec, 123456)
+        self.assertEqual(incl_len, 120)
+        self.assertEqual(orig_len, 120)
+
+    def test_daily_node_pcap_logger_separation_and_rotation(self):
+        """Verify that DailyNodePcapLogger creates 1 daily file for Bluetooth and 1 for Wi-Fi per node."""
+        from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            node_id = "sensor-node-ch"
+            logger = DailyNodePcapLogger(base_dir=tmp_dir, node_id=node_id, rotate_daily=True, quiet=True)
+
+            # Day 1: 2026-09-28 12:00:00 UTC (1790596800.0)
+            ts_day1 = 1790596800.0
+            wifi_pkt_day1 = b"\x00\x00\x08\x00\x00\x00\x00\x00WIFI_RAW_FRAME_1"
+            ble_pkt_day1 = b"\x00\x0a\x00\x02\x00\x00\x06\x0a\x01\x25\x37\x01\x00\x00\x00\x00\x00BLE_RAW_PKT_1"
+
+            logger.write_packet("wifi", wifi_pkt_day1, ts=ts_day1)
+            logger.write_packet("ble", ble_pkt_day1, ts=ts_day1)
+
+            # Day 2: 2026-09-29 12:00:00 UTC (1790683200.0)
+            ts_day2 = 1790683200.0
+            wifi_pkt_day2 = b"\x00\x00\x08\x00\x00\x00\x00\x00WIFI_RAW_FRAME_2"
+            ble_pkt_day2 = b"\x00\x0a\x00\x02\x00\x00\x06\x0a\x01\x25\x37\x01\x00\x00\x00\x00\x00BLE_RAW_PKT_2"
+
+            logger.write_packet("wifi", wifi_pkt_day2, ts=ts_day2)
+            logger.write_packet("ble", ble_pkt_day2, ts=ts_day2)
+            logger.close()
+
+            # Check files created in directory
+            files = sorted(os.listdir(tmp_dir))
+            expected_files = [
+                f"{node_id}_ble_20260928.pcap",
+                f"{node_id}_ble_20260929.pcap",
+                f"{node_id}_wifi_20260928.pcap",
+                f"{node_id}_wifi_20260929.pcap",
+            ]
+            self.assertEqual(files, expected_files, f"Expected daily files per node, found: {files}")
+
+            # Verify contents of Wi-Fi Day 1 file
+            wifi_day1_path = os.path.join(tmp_dir, f"{node_id}_wifi_20260928.pcap")
+            with open(wifi_day1_path, "rb") as f:
+                hdr = f.read(24)
+                magic, _, _, _, _, _, net = struct.unpack("<IHHiIII", hdr)
+                self.assertEqual(magic, 0xa1b2c3d4)
+                self.assertEqual(net, DLT_IEEE802_11_RADIO)
+                rec = f.read(16)
+                s, us, ilen, _ = struct.unpack("<IIII", rec)
+                self.assertEqual(s, int(ts_day1))
+                self.assertEqual(ilen, len(wifi_pkt_day1))
+                self.assertEqual(f.read(ilen), wifi_pkt_day1)
+                self.assertEqual(len(f.read()), 0, "No trailing unexpected bytes")
+
+            # Verify contents of BLE Day 1 file
+            ble_day1_path = os.path.join(tmp_dir, f"{node_id}_ble_20260928.pcap")
+            with open(ble_day1_path, "rb") as f:
+                hdr = f.read(24)
+                magic, _, _, _, _, _, net = struct.unpack("<IHHiIII", hdr)
+                self.assertEqual(magic, 0xa1b2c3d4)
+                self.assertEqual(net, DLT_NORDIC_BLE)
+                rec = f.read(16)
+                s, us, ilen, _ = struct.unpack("<IIII", rec)
+                self.assertEqual(s, int(ts_day1))
+                self.assertEqual(ilen, len(ble_pkt_day1))
+                self.assertEqual(f.read(ilen), ble_pkt_day1)
+
+    def test_pcap_append_to_existing_file(self):
+        """Verify that reopening a logger appends packet records without duplicating the 24-byte global header."""
+        from scanner.pcap_logger import DailyNodePcapLogger
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            node_id = "test-node"
+            ts = 1790683200.0  # 2026-09-29
+
+            logger1 = DailyNodePcapLogger(base_dir=tmp_dir, node_id=node_id, rotate_daily=True, quiet=True)
+            logger1.write_packet("wifi", b"PACKET_1", ts=ts)
+            logger1.close()
+
+            pcap_path = os.path.join(tmp_dir, f"{node_id}_wifi_20260929.pcap")
+            size_after_one = os.path.getsize(pcap_path)
+            self.assertEqual(size_after_one, 24 + 16 + len(b"PACKET_1"))
+
+            # Re-open in second logger instance
+            logger2 = DailyNodePcapLogger(base_dir=tmp_dir, node_id=node_id, rotate_daily=True, quiet=True)
+            logger2.write_packet("wifi", b"PACKET_2_LONGER", ts=ts)
+            logger2.close()
+
+            size_after_two = os.path.getsize(pcap_path)
+            self.assertEqual(size_after_two, size_after_one + 16 + len(b"PACKET_2_LONGER"))
+
+            # Read back both packets
+            with open(pcap_path, "rb") as f:
+                hdr = f.read(24)
+                magic, _, _, _, _, _, _ = struct.unpack("<IHHiIII", hdr)
+                self.assertEqual(magic, 0xa1b2c3d4)
+
+                # Packet 1
+                rec1 = f.read(16)
+                _, _, len1, _ = struct.unpack("<IIII", rec1)
+                self.assertEqual(f.read(len1), b"PACKET_1")
+
+                # Packet 2
+                rec2 = f.read(16)
+                _, _, len2, _ = struct.unpack("<IIII", rec2)
+                self.assertEqual(f.read(len2), b"PACKET_2_LONGER")
+
+    def test_unified_telemetry_logger_with_daily_pcap(self):
+        """Verify that UnifiedTelemetryLogger logs Wi-Fi and Bluetooth to daily PCAPs per node."""
+        from scanner.combined_rid_listener import UnifiedTelemetryLogger
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            node_id = "node-alpha-01"
+            utl = UnifiedTelemetryLogger(
+                node_id=node_id,
+                pcap_dir=tmp_dir,
+                db_path=None,
+                quiet=True,
+            )
+            self.assertIsNotNone(utl.pcap_logger)
+
+            ts = 1790683200.0  # 2026-09-29
+            # Wi-Fi event with raw_hex
+            wifi_event = {
+                "timestamp": ts,
+                "transport": "wifi",
+                "mac": "11:22:33:44:55:66",
+                "raw_hex": "0000080000000000AABBCCDDEEFF",
+            }
+            utl.process_event(wifi_event)
+
+            # BLE event with raw_bytes
+            ble_event = {
+                "timestamp": ts + 0.5,
+                "transport": "bt5",
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "raw_bytes": b"\x00\x0a\x00\x02\x00\x00\x06\x0a\x01\x25\x37\x01\x00\x00\x00\x00\x00PAYLOAD",
+            }
+            utl.process_event(ble_event)
+
+            stats = utl.pcap_logger.get_stats()
+            self.assertEqual(stats["wifi_packets"], 1)
+            self.assertEqual(stats["ble_packets"], 1)
+            self.assertEqual(stats["node_id"], node_id)
+
+            utl.close()
+
+            # Verify files on disk
+            wifi_file = os.path.join(tmp_dir, f"{node_id}_wifi_20260929.pcap")
+            ble_file = os.path.join(tmp_dir, f"{node_id}_ble_20260929.pcap")
+            self.assertTrue(os.path.exists(wifi_file), f"Wi-Fi PCAP {wifi_file} should exist")
+            self.assertTrue(os.path.exists(ble_file), f"BLE PCAP {ble_file} should exist")
+
+    def test_central_multi_node_pcap_logging(self):
+        """Verify that DailyNodePcapLogger can record packets from multiple nodes into distinct per-node daily files."""
+        from scanner.pcap_logger import DailyNodePcapLogger
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            central_logger = DailyNodePcapLogger(base_dir=tmp_dir, rotate_daily=True, quiet=True)
+            ts = 1790683200.0  # 2026-09-29
+
+            # Packet from Node 1 (Wi-Fi)
+            central_logger.log_event({
+                "node_id": "sensor-node-01",
+                "transport": "wifi",
+                "timestamp": ts,
+                "mac": "11:11:11:11:11:11",
+                "raw_hex": "0000080000000000AABBCCDDEEFF",
+            })
+
+            # Packet from Node 1 (BLE)
+            central_logger.log_event({
+                "node_id": "sensor-node-01",
+                "transport": "bt5",
+                "timestamp": ts + 1.0,
+                "mac": "11:11:11:11:11:11",
+                "raw_hex": "000a00020000060a012537010000000000D6BE898E0206111111111111",
+            })
+
+            # Packet from Node 2 (Wi-Fi)
+            central_logger.log_event({
+                "node_id": "sensor-node-02",
+                "transport": "wifi",
+                "timestamp": ts + 2.0,
+                "mac": "22:22:22:22:22:22",
+                "raw_hex": "0000080000000000222222222222",
+            })
+
+            # Packet from Node 2 (BLE)
+            central_logger.log_event({
+                "node_id": "sensor-node-02",
+                "transport": "bt4",
+                "timestamp": ts + 3.0,
+                "mac": "22:22:22:22:22:22",
+                "raw_hex": "000a00020000060a012537010000000000D6BE898E0206222222222222",
+            })
+
+            central_logger.close()
+
+            files = sorted(os.listdir(tmp_dir))
+            expected = [
+                "sensor-node-01_ble_20260929.pcap",
+                "sensor-node-01_wifi_20260929.pcap",
+                "sensor-node-02_ble_20260929.pcap",
+                "sensor-node-02_wifi_20260929.pcap",
+            ]
+            self.assertEqual(files, expected, f"Expected 4 distinct files for 2 nodes, found {files}")
 
 
 if __name__ == "__main__":

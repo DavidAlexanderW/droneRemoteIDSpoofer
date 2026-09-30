@@ -149,11 +149,14 @@ Cycle 6: Ch 6 (1000ms) -> Ch 12, Ch 13 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000m
 For Debian, Ubuntu, and Raspberry Pi OS (`x86_64` and `aarch64` / `arm64`), use the automated installer:
 
 ```bash
-# 1. Automated installation (OS packages, Nordic nrfutil + ble-sniffer, udev rules, Python venv)
+# 1. Standard installation (OS packages, Nordic nrfutil + ble-sniffer, udev rules, Python venv):
 ./scanner/install_scanner.sh
 
-# Or install and automatically configure systemd services for 24/7 autonomous monitoring:
-./scanner/install_scanner.sh --with-services --wifi-iface wlan1 --nrf-port /dev/ttyACM0
+# 2. Or install with explicit systemd background services for 24/7 autonomous monitoring:
+#    --with-scanner-service    : Install drone-scanner.service (sensor node)
+#    --with-dashboard-service  : Install drone-dashboard.service (Web UI radar)
+#    --with-hub-service        : Install drone-central-hub.service (central ingestion hub)
+./scanner/install_scanner.sh --with-scanner-service --wifi-iface wlan1 --nrf-port /dev/ttyACM0
 ```
 
 ### Manual Python Package Installation
@@ -243,6 +246,8 @@ sudo journalctl -u drone-dashboard.service -f
 | `--receiver-unlock` | `False` | Remove write-protection from receiver station config file on disk |
 | `--log-jsonl` | `None` | Optional output JSONL replay file path |
 | `--rotate-daily` | `False` | Automatically split JSONL log file daily (`<path>_YYYYMMDD.jsonl`) |
+| `--log-pcap` | `None` | Enable daily PCAP logging with optional output directory or path prefix (default: `pcaps`) |
+| `--pcap-dir` | `pcaps` | Directory to store daily PCAP log files (1 for Wi-Fi, 1 for Bluetooth per node) |
 | `--quiet`, `-q` | `False` | Quiet mode: suppress per-packet terminal banner and print 30s status heartbeat |
 
 ---
@@ -471,6 +476,23 @@ To transition an existing standalone scanner node:
    sudo systemctl restart drone-scanner.service
    ```
 3. The node automatically streams any historical `.jsonl` or spool backlog to the Central Hub, deletes them upon confirmation, and switches to live zero-disk streaming.
+
+### 14.4 Concurrent Dual-Pipeline Streaming (Live JSON Telemetry + Full Unfiltered PCAPs)
+The edge sensor node and Central Ingestion Hub concurrently run two independent, parallel streaming pipelines:
+
+1. **Pipeline 1: Live Real-Time JSON Telemetry (`/stream/node`)**:
+   - Streams pure JSON Remote ID packet envelopes, flight encounter sessions, and ASTM BLE advertisements with zero latency.
+   - Updates the live radar dashboard, executes multi-receiver spatial deduplication, updates SQLite encounter records, and writes cold daily forensic JSONL files (`rid_packets_YYYYMMDD.jsonl`).
+   - Governed by the 3-tier reliability forwarder with RAM buffer and local spooling fallback.
+
+2. **Pipeline 2: Concurrent Full Unfiltered PCAP Stream (`/stream/pcap/{node_id}/{media}`)**:
+   - A dedicated binary WebSocket sidecar concurrently streams **all** raw captured frames (all ambient 802.11 frames on hopping channels and all BLE link-layer packets from the nRF sniffer) without preliminary filtering.
+   - Streamed as standard libpcap 2.4 binary records (16-byte record header + raw packet bytes) batched for line-rate efficiency.
+   - The Central Hub logs directly into daily per-node PCAP files:
+     - Wi-Fi : `<pcap_dir>/<node_id>_wifi_YYYYMMDD.pcap` (DLT 127: Radiotap 802.11)
+     - BLE   : `<pcap_dir>/<node_id>_ble_YYYYMMDD.pcap` (DLT 272: Nordic BLE)
+   - Fully compatible with `tcpdump`, `wireshark`, and `tshark`.
+   - Bounded by a 50MB in-memory ring buffer with oldest-drop backpressure, preventing SD card / flash wear during network disruptions.
 
 ---
 

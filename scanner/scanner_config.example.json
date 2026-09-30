@@ -19,5 +19,7 @@
   "max_ram_queue": 10000,
   "ble_mode": "hop",
   "ble_bt5_dwell_s": 5.0,
-  "ble_bt4_dwell_s": 1.0
+  "ble_bt4_dwell_s": 1.0,
+  "log_pcap": false,
+  "pcap_dir": "pcaps"
 }

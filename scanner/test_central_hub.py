@@ -168,7 +168,7 @@ class TestCentralHub(unittest.TestCase):
         self.assertEqual(enc["packet_count"], 10)
 
         # Verify daily forensic log file exists
-        log_files = os.listdir(self.log_dir)
+        log_files = [f for f in os.listdir(self.log_dir) if f.endswith(".jsonl")]
         self.assertEqual(len(log_files), 1)
         log_path = os.path.join(self.log_dir, log_files[0])
         with open(log_path, "r", encoding="utf-8") as f:

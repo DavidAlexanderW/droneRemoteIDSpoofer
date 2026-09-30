@@ -61,6 +61,11 @@ except ImportError:
     )
     from drone_models import infer_drone_model
 
+try:
+    from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
+except ImportError:
+    from pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -221,6 +226,8 @@ class CentralIngestionHub:
         db_path: str = "rid_detections_central.db",
         log_dir: str = "central_logs",
         timeout_s: float = 300.0,
+        pcap_dir: Optional[str] = None,
+        log_pcap: bool = True,
     ):
         self.db_path = os.path.abspath(db_path)
         self.log_dir = os.path.abspath(log_dir)
@@ -237,9 +244,15 @@ class CentralIngestionHub:
         )
 
         self.replay_logger = CentralDailyReplayLogger(log_dir=self.log_dir)
+        self.pcap_logger = DailyNodePcapLogger(
+            base_dir=pcap_dir or os.path.join(self.log_dir, "pcaps"),
+            rotate_daily=True,
+            quiet=False,
+        ) if log_pcap else None
         self.deduplicator = MultiNodeDeduplicator()
 
         self.active_node_connections: Dict[str, Any] = {}
+        self.active_pcap_connections: Dict[Tuple[str, str], Any] = {}
         self.pending_command_futures: Dict[str, asyncio.Future] = {}
         self.in_flight_position_updates: Dict[str, Dict[str, Any]] = {}
 
@@ -376,6 +389,14 @@ class CentralIngestionHub:
         # Log to cold replay file
         await self.replay_logger.log_packet(envelope, encounter_id=encounter_id)
 
+        # Log to central daily PCAP file per node (Wi-Fi & Bluetooth)
+        if self.pcap_logger:
+            origin_node = envelope.get("node_id") or primary_node
+            transport = str(envelope.get("transport", "")).lower()
+            media = "ble" if ("ble" in transport or "bt" in transport) else "wifi"
+            if (origin_node, media) not in self.active_pcap_connections:
+                self.pcap_logger.log_event(envelope, node_id=origin_node)
+
         self.stats["total_packets_received"] += 1
         return encounter_id
 
@@ -396,6 +417,24 @@ class CentralIngestionHub:
 
         self.stats["total_batches_received"] += 1
         return len(items)
+
+    def close(self):
+        """Flushes and closes all loggers, trackers, and database handles."""
+        if self.pcap_logger:
+            self.pcap_logger.close()
+        if self.replay_logger and self.replay_logger.file_handle:
+            try:
+                self.replay_logger.file_handle.close()
+            except Exception:
+                pass
+            self.replay_logger.file_handle = None
+        if self.encounter_tracker:
+            self.encounter_tracker.finalize_all()
+        if self.db_conn:
+            try:
+                self.db_conn.close()
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -427,6 +466,7 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
             "total_packets_received": hub.stats["total_packets_received"],
             "total_batches_received": hub.stats["total_batches_received"],
             "active_encounters": active_encs,
+            "active_pcap_streams": [f"{n}:{m}" for (n, m) in hub.active_pcap_connections.keys()],
         }
 
     @app.get("/api/nodes")
@@ -594,6 +634,36 @@ def create_central_hub_app(hub: CentralIngestionHub) -> FastAPI:
             except Exception:
                 pass
 
+    @app.websocket("/stream/pcap/{node_id}/{media}")
+    async def websocket_pcap_stream(websocket: WebSocket, node_id: str, media: str):
+        media_key = media.lower().strip()
+        if media_key not in ("wifi", "ble"):
+            await websocket.close(code=1003, reason="Media type must be 'wifi' or 'ble'")
+            return
+
+        await websocket.accept()
+        pcap_key = (node_id, media_key)
+        hub.active_pcap_connections[pcap_key] = websocket
+        client_desc = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "unknown"
+        logger.info(f"[+] Node '{node_id}' connected to binary PCAP stream for {media_key.upper()} from {client_desc}")
+
+        try:
+            while True:
+                chunk = await websocket.receive_bytes()
+                if chunk and hub.pcap_logger:
+                    hub.pcap_logger.write_raw_records(media=media_key, raw_records=chunk, node_id=node_id)
+        except WebSocketDisconnect:
+            logger.info(f"[*] Node '{node_id}' disconnected from binary {media_key.upper()} PCAP stream.")
+        except Exception as e:
+            logger.warning(f"[!] Binary PCAP stream exception for node '{node_id}' ({media_key}): {e}")
+        finally:
+            if hub.active_pcap_connections.get(pcap_key) is websocket:
+                del hub.active_pcap_connections[pcap_key]
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
     return app
 
 
@@ -610,6 +680,8 @@ def main():
     parser.add_argument("--port", type=int, default=8000, help="HTTP/WebSocket port")
     parser.add_argument("--db-file", type=str, default="rid_detections_central.db", help="Path to central SQLite DB")
     parser.add_argument("--log-dir", type=str, default="central_logs", help="Directory for cold forensic JSONL logs")
+    parser.add_argument("--pcap-dir", type=str, default=None, help="Directory for central daily PCAP captures (default: <log-dir>/pcaps)")
+    parser.add_argument("--no-pcap", action="store_true", help="Disable central PCAP logging")
     parser.add_argument("--timeout-s", type=float, default=300.0, help="Flight encounter silence timeout in seconds")
     parser.add_argument("--quiet", action="store_true", help="Suppress verbose console logs")
 
@@ -619,6 +691,8 @@ def main():
         db_path=args.db_file,
         log_dir=args.log_dir,
         timeout_s=args.timeout_s,
+        pcap_dir=args.pcap_dir,
+        log_pcap=not args.no_pcap,
     )
 
     app = create_central_hub_app(hub)
@@ -628,7 +702,11 @@ def main():
     print(f"  • WebSocket Ingest : \033[1;36mws://{args.host}:{args.port}/stream/node\033[0m")
     print(f"  • REST API Endpoint: \033[1;36mhttp://{args.host}:{args.port}/api/nodes\033[0m")
     print(f"  • Central DB File  : \033[1;35m{os.path.abspath(args.db_file)}\033[0m")
-    print(f"  • Forensic Logs Dir: \033[1;35m{os.path.abspath(args.log_dir)}\033[0m\n")
+    print(f"  • Forensic Logs Dir: \033[1;35m{os.path.abspath(args.log_dir)}\033[0m")
+    if hub.pcap_logger:
+        print(f"  • Central PCAPs Dir: \033[1;35m{os.path.abspath(hub.pcap_logger.base_dir)}\033[0m (Daily per-node Wi-Fi & BLE)\n")
+    else:
+        print()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level=log_lvl)
 

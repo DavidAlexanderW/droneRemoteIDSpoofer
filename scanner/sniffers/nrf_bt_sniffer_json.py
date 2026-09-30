@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -17,6 +18,16 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+def build_pcap_record_header(ts: float, pkt_len: int) -> bytes:
+    """Builds a standard 16-byte libpcap packet record header (little-endian)."""
+    ts_sec = int(ts)
+    ts_usec = int(round((ts - ts_sec) * 1_000_000))
+    if ts_usec >= 1_000_000:
+        ts_sec += 1
+        ts_usec -= 1_000_000
+    return struct.pack("<IIII", ts_sec, ts_usec, pkt_len, pkt_len)
+
 
 # Ensure repository root is in sys.path so drone_rid_spoofer is importable from anywhere
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -632,7 +643,8 @@ def run_sniffer(
     bt4_dwell_s: float = 1.0,
     group_by_mac: bool = False,
     stats_format: str = "table",
-    stats_interval: float = 2.0
+    stats_interval: float = 2.0,
+    raw_pcap_port: Optional[int] = None
 ):
     global nrf_proc, hopper_controller, fifo_created_path
 
@@ -694,6 +706,16 @@ def run_sniffer(
     output_mode_desc = f"grouped MAC statistics ({stats_format})" if group_by_mac else "JSON stream"
     
     sys.stderr.write(f"[*] Listening and displaying{mode_desc}{mac_desc} as {output_mode_desc}... (Press Ctrl+C to stop)\n\n")
+
+    raw_pcap_sock: Optional[socket.socket] = None
+    if raw_pcap_port:
+        try:
+            raw_pcap_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw_pcap_sock.connect(("127.0.0.1", raw_pcap_port))
+            sys.stderr.write(f"[*] Connected to local raw BLE PCAP tap on 127.0.0.1:{raw_pcap_port}\n")
+        except Exception as e:
+            sys.stderr.write(f"[-] Could not connect to raw PCAP tap port {raw_pcap_port}: {e}\n")
+            raw_pcap_sock = None
 
     f = None
     try:
@@ -772,6 +794,22 @@ def run_sniffer(
                         ts = now_ts
 
                 active_mode = hopper_controller.current_mode if hopper_controller else None
+
+                # Forward raw BLE packet (DLT 272) to binary PCAP streamer tap before filtering
+                if raw_pcap_sock:
+                    try:
+                        rec_hdr = build_pcap_record_header(ts, len(data))
+                        raw_pcap_sock.sendall(rec_hdr + data)
+                    except Exception:
+                        try:
+                            raw_pcap_sock.close()
+                            raw_pcap_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            raw_pcap_sock.connect(("127.0.0.1", raw_pcap_port))
+                            rec_hdr = build_pcap_record_header(ts, len(data))
+                            raw_pcap_sock.sendall(rec_hdr + data)
+                        except Exception:
+                            pass
+
                 process_packet(
                     data, ts,
                     pretty=pretty,
@@ -884,6 +922,12 @@ def main():
         default=2.0,
         help="Refresh interval in seconds for live table display when using --group-by-mac in a terminal"
     )
+    parser.add_argument(
+        "--raw-pcap-port",
+        type=int,
+        default=None,
+        help="Optional local TCP port on 127.0.0.1 to stream raw unfiltered BLE PCAP records"
+    )
 
     args = parser.parse_args()
 
@@ -919,7 +963,8 @@ def main():
         bt4_dwell_s=args.bt4_dwell,
         group_by_mac=args.group_by_mac,
         stats_format=args.stats_format,
-        stats_interval=args.stats_interval
+        stats_interval=args.stats_interval,
+        raw_pcap_port=args.raw_pcap_port
     )
 
 

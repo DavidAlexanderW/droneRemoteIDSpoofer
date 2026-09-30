@@ -278,7 +278,9 @@ class TestDashboardAPI(unittest.TestCase):
         data = resp.json()
         self.assertEqual(data["encounter_id"], "enc_test_001")
         self.assertEqual(data["packet_count"], 2)
+        self.assertEqual(data["node_id"], "sensor-node-01")
         pkt0 = data["packets"][0]
+        self.assertEqual(pkt0["node_id"], "sensor-node-01")
         self.assertEqual(pkt0["transport"], "bt5")
         self.assertEqual(pkt0["rate_desc"], "1.0 Mbps (LE 1M GFSK)")
         self.assertEqual(pkt0["modulation"], "GFSK")
