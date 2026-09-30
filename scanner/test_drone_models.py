@@ -9,16 +9,13 @@ import sys
 import tempfile
 import unittest
 
-# Ensure repo and scanner paths in sys.path
-scanner_dir = os.path.abspath(os.path.dirname(__file__))
-repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+# Ensure repo root is in sys.path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
-if scanner_dir not in sys.path:
-    sys.path.insert(0, scanner_dir)
 
-from drone_models import infer_drone_model, CTA_MANUFACTURERS, MODEL_PREFIX_MAP
-from combined_rid_listener import EncounterTracker
+from scanner.drone_models import infer_drone_model, CTA_MANUFACTURERS, MODEL_PREFIX_MAP
+from scanner.combined_rid_listener import EncounterTracker
 
 
 class TestDroneModelInference(unittest.TestCase):

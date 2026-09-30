@@ -28,43 +28,24 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# Ensure repo root and scanner dir in sys.path
-scanner_dir = os.path.abspath(os.path.dirname(__file__))
-repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+# Ensure repository root is in sys.path for direct script execution
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
-if scanner_dir not in sys.path:
-    sys.path.insert(0, scanner_dir)
 
-try:
-    from scanner.db import (
-        get_db_connection,
-        get_node_sync_watermark,
-        get_receiver_nodes,
-        init_encounters_db,
-        touch_receiver_node_heartbeat,
-        update_node_sync_watermark,
-        upsert_receiver_node,
-        update_receiver_node_position,
-    )
-    from scanner.drone_models import infer_drone_model
-except ImportError:
-    from db import (
-        get_db_connection,
-        get_node_sync_watermark,
-        get_receiver_nodes,
-        init_encounters_db,
-        touch_receiver_node_heartbeat,
-        update_node_sync_watermark,
-        upsert_receiver_node,
-        update_receiver_node_position,
-    )
-    from drone_models import infer_drone_model
-
-try:
-    from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
-except ImportError:
-    from pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
+from scanner.db import (
+    get_db_connection,
+    get_node_sync_watermark,
+    get_receiver_nodes,
+    init_encounters_db,
+    touch_receiver_node_heartbeat,
+    update_node_sync_watermark,
+    upsert_receiver_node,
+    update_receiver_node_position,
+)
+from scanner.drone_models import infer_drone_model
+from scanner.parser import decode_astm_message
+from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -364,13 +345,6 @@ class CentralIngestionHub:
         if not envelope.get("messages") and envelope.get("messages_b64"):
             try:
                 import base64
-                try:
-                    from scanner.parser import decode_astm_message
-                except ImportError:
-                    try:
-                        from drone_rid_spoofer.parser import decode_astm_message
-                    except ImportError:
-                        from parser import decode_astm_message
                 raw_blocks = [base64.b64decode(b) for b in envelope["messages_b64"]]
                 envelope["messages"] = [decode_astm_message(b) for b in raw_blocks if decode_astm_message(b)]
             except Exception:

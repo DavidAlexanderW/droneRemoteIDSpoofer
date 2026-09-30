@@ -24,31 +24,18 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-# Ensure repository root in sys.path for parser imports
-_scanner_dir = os.path.abspath(os.path.dirname(__file__))
-_repo_root = os.path.abspath(os.path.join(_scanner_dir, ".."))
+# Ensure repository root is in sys.path for direct script execution
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
-if _scanner_dir not in sys.path:
-    sys.path.insert(0, _scanner_dir)
 
-try:
-    from scanner.parser import decode_astm_message, parse_astm_payload
-except ImportError:
-    try:
-        from drone_rid_spoofer.parser import decode_astm_message, parse_astm_payload
-    except ImportError:
-        from parser import decode_astm_message, parse_astm_payload
+from scanner.parser import decode_astm_message, parse_astm_payload
+from scanner.scanner_config import save_scanner_config, get_default_config_path
 
 try:
     import websockets
 except ImportError:
     websockets = None
-
-try:
-    from scanner.scanner_config import save_scanner_config, get_default_config_path
-except ImportError:
-    from scanner_config import save_scanner_config, get_default_config_path
 
 logger = logging.getLogger("DroneRIDForwarder")
 
@@ -600,10 +587,7 @@ class CentralStreamForwarder:
 def main():
     import argparse
 
-    try:
-        from scanner.scanner_config import load_scanner_config
-    except ImportError:
-        from scanner_config import load_scanner_config
+    from scanner.scanner_config import load_scanner_config
 
     cfg = load_scanner_config()
     default_node_id = cfg.get("node_id", "sensor-node-01")

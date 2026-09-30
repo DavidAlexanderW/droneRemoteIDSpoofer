@@ -29,18 +29,12 @@ def build_pcap_record_header(ts: float, pkt_len: int) -> bytes:
     return struct.pack("<IIII", ts_sec, ts_usec, pkt_len, pkt_len)
 
 
-# Ensure repository root is in sys.path so drone_rid_spoofer is importable from anywhere
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# Ensure repository root is in sys.path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-try:
-    from scanner.parser import ASTM_F3411_SpecParser
-except ImportError:
-    try:
-        from drone_rid_spoofer.parser import ASTM_F3411_SpecParser
-    except ImportError:
-        from parser import ASTM_F3411_SpecParser
+from scanner.parser import ASTM_F3411_SpecParser
 
 REMOTE_ID_UUID_BYTES = b"\xfa\xff"       # 16-bit UUID 0xFFFA in little-endian
 BLE_ADV_ACCESS_ADDR = b"\xd6\xbe\x89\x8e" # Little-endian 0x8E89BED6

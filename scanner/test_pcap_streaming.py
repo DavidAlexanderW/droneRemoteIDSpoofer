@@ -19,13 +19,10 @@ import tempfile
 import time
 import unittest
 
-# Ensure repo root and scanner dir in sys.path
-_scanner_dir = os.path.abspath(os.path.dirname(__file__))
-_repo_root = os.path.abspath(os.path.join(_scanner_dir, ".."))
+# Ensure repo root is in sys.path
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
-if _scanner_dir not in sys.path:
-    sys.path.insert(0, _scanner_dir)
 
 from fastapi.testclient import TestClient
 

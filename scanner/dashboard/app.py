@@ -25,61 +25,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-# Add repo root and scanner dir to sys.path so modules can be imported
+# Ensure repository root is in sys.path for direct script execution
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if scanner_dir not in sys.path:
-    sys.path.insert(0, scanner_dir)
-
-try:
-    from scanner.db import (
-        get_db_connection as db_get_connection,
-        reconcile_stale_encounters,
-        get_receiver_nodes,
-        update_receiver_node_position,
-    )
-    from scanner.drone_models import infer_drone_model, register_learned_drone_model
-except ImportError:
-    from db import (
-        get_db_connection as db_get_connection,
-        reconcile_stale_encounters,
-        get_receiver_nodes,
-        update_receiver_node_position,
-    )
-    from drone_models import infer_drone_model, register_learned_drone_model
-
-try:
-    from scanner.dashboard.dashboard_config import (
-        load_dashboard_config,
-        save_dashboard_config,
-        get_default_dashboard_config_path,
-    )
-except ImportError:
-    try:
-        from dashboard.dashboard_config import (
-            load_dashboard_config,
-            save_dashboard_config,
-            get_default_dashboard_config_path,
-        )
-    except ImportError:
-        from dashboard_config import (
-            load_dashboard_config,
-            save_dashboard_config,
-            get_default_dashboard_config_path,
-        )
-
-try:
-    from scanner.parser import decode_astm_message
-except ImportError:
-    from parser import decode_astm_message
-
-try:
-    from scanner.scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
-except ImportError:
-    from scanner_config import load_scanner_config, save_scanner_config, get_default_config_path as get_scanner_config_path
+from scanner.db import (
+    get_db_connection as db_get_connection,
+    reconcile_stale_encounters,
+    get_receiver_nodes,
+    update_receiver_node_position,
+)
+from scanner.drone_models import infer_drone_model, register_learned_drone_model
+from scanner.dashboard.dashboard_config import (
+    load_dashboard_config,
+    save_dashboard_config,
+    get_default_dashboard_config_path,
+)
+from scanner.parser import decode_astm_message
+from scanner.scanner_config import (
+    load_scanner_config,
+    save_scanner_config,
+    get_default_config_path as get_scanner_config_path,
+)
 
 app = FastAPI(
     title="Tactical Drone Remote ID Airspace Monitor",

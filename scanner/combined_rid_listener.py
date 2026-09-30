@@ -119,10 +119,7 @@ from scanner.parser import (
     sanitize_ascii_string,
 )
 
-try:
-    from scanner.pcap_streamer import BinaryPcapStreamer
-except ImportError:
-    BinaryPcapStreamer = None
+from scanner.pcap_streamer import BinaryPcapStreamer
 
 __all__ = [
     "SharedChannelState",

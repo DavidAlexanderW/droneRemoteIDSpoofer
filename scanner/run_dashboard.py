@@ -96,30 +96,15 @@ def main():
     if args.hub_url:
         os.environ["RID_HUB_HTTP_URL"] = args.hub_url
 
-    # Add scanner directory to sys.path
-    scanner_dir = os.path.abspath(os.path.dirname(__file__))
-    if scanner_dir not in sys.path:
-        sys.path.insert(0, scanner_dir)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
 
-    try:
-        from scanner.dashboard.dashboard_config import (
-            load_dashboard_config,
-            save_dashboard_config,
-            get_default_dashboard_config_path,
-        )
-    except ImportError:
-        try:
-            from dashboard.dashboard_config import (
-                load_dashboard_config,
-                save_dashboard_config,
-                get_default_dashboard_config_path,
-            )
-        except ImportError:
-            from dashboard_config import (
-                load_dashboard_config,
-                save_dashboard_config,
-                get_default_dashboard_config_path,
-            )
+    from scanner.dashboard.dashboard_config import (
+        load_dashboard_config,
+        save_dashboard_config,
+        get_default_dashboard_config_path,
+    )
 
     # Load and optionally override dashboard configuration from disk
     chosen_cfg_path = args.dashboard_config
@@ -186,12 +171,7 @@ def main():
     print("Press Ctrl+C to terminate the dashboard server.")
     print()
 
-    # Determine uvicorn import string based on environment
-    try:
-        import scanner.dashboard.app  # noqa: F401
-        app_target = "scanner.dashboard.app:app"
-    except ImportError:
-        app_target = "dashboard.app:app"
+    app_target = "scanner.dashboard.app:app"
 
     uvicorn.run(
         app_target,

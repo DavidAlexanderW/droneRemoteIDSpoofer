@@ -13,18 +13,12 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-# Ensure repo and scanner paths in sys.path
-scanner_dir = os.path.abspath(os.path.dirname(__file__))
-repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+# Ensure repository root is in sys.path for direct script execution
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
-if scanner_dir not in sys.path:
-    sys.path.insert(0, scanner_dir)
 
-try:
-    from scanner.drone_models import infer_drone_model
-except ImportError:
-    from drone_models import infer_drone_model
+from scanner.drone_models import infer_drone_model
 
 
 # Canonical table schema columns (name, SQLite type)

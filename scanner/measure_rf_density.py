@@ -30,38 +30,22 @@ from typing import Dict, Any, Optional, List, Tuple
 # ASTM OUI & APP Code
 ASTM_OUI = b"\xFA\x0B\xBC"
 
-# Import hopper and channel state from combined_rid_listener
-scanner_dir = os.path.abspath(os.path.dirname(__file__))
-repo_root = os.path.abspath(os.path.join(scanner_dir, ".."))
+# Import hopper and channel state from scanner.combined_rid_listener
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
-if scanner_dir not in sys.path:
-    sys.path.insert(0, scanner_dir)
 
-try:
-    from scanner.combined_rid_listener import (
-        SharedChannelState,
-        WifiChannelHopperThread,
-        extract_radiotap_phy_info,
-        get_freq_for_channel,
-        get_channel_for_freq,
-        SOCIAL_CHANNEL_2G,
-        SOCIAL_CHANNEL_5G,
-        NON_SOCIAL_CHANNELS_2G,
-        NON_SOCIAL_CHANNELS_5G,
-    )
-except ImportError:
-    from combined_rid_listener import (
-        SharedChannelState,
-        WifiChannelHopperThread,
-        extract_radiotap_phy_info,
-        get_freq_for_channel,
-        get_channel_for_freq,
-        SOCIAL_CHANNEL_2G,
-        SOCIAL_CHANNEL_5G,
-        NON_SOCIAL_CHANNELS_2G,
-        NON_SOCIAL_CHANNELS_5G,
-    )
+from scanner.combined_rid_listener import (
+    SharedChannelState,
+    WifiChannelHopperThread,
+    extract_radiotap_phy_info,
+    get_freq_for_channel,
+    get_channel_for_freq,
+    SOCIAL_CHANNEL_2G,
+    SOCIAL_CHANNEL_5G,
+    NON_SOCIAL_CHANNELS_2G,
+    NON_SOCIAL_CHANNELS_5G,
+)
 
 
 class WifiDensityMeter(threading.Thread):

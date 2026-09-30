@@ -50,12 +50,13 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {rem_mins:02d}m"
 
 
-try:
-    from scanner.db import get_db_connection as db_get_connection, reconcile_stale_encounters
-    from scanner.drone_models import infer_drone_model
-except ImportError:
-    from db import get_db_connection as db_get_connection, reconcile_stale_encounters
-    from drone_models import infer_drone_model
+# Ensure repository root is in sys.path for direct script execution
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from scanner.db import get_db_connection as db_get_connection, reconcile_stale_encounters
+from scanner.drone_models import infer_drone_model
 
 
 def get_db_connection(db_path: str) -> sqlite3.Connection:
