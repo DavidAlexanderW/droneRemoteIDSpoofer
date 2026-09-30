@@ -63,6 +63,27 @@ def normalize_ws_base_url(url_str: str) -> str:
     return f"{scheme}://{netloc}"
 
 
+def is_ws_closed(ws: Any) -> bool:
+    """Checks whether a WebSocket connection is closed or closing across websockets versions."""
+    if ws is None:
+        return True
+    if getattr(ws, "close_code", None) is not None:
+        return True
+    if hasattr(ws, "state"):
+        try:
+            from websockets.protocol import State
+            if ws.state != State.OPEN:
+                return True
+        except Exception:
+            if getattr(ws, "state", None) != 1:
+                return True
+    if getattr(ws, "closed", False):
+        return True
+    if hasattr(ws, "open") and not ws.open:
+        return True
+    return False
+
+
 class BinaryPcapStreamer:
     """
     Background worker that manages concurrent binary WebSocket PCAP streams
@@ -104,6 +125,8 @@ class BinaryPcapStreamer:
         self.worker_thread: Optional[threading.Thread] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
+        self.wifi_ws: Optional[Any] = None
+        self.ble_ws: Optional[Any] = None
         self.wifi_connected = False
         self.ble_connected = False
 
@@ -201,15 +224,22 @@ class BinaryPcapStreamer:
                     max_size=16 * 1024 * 1024,
                 ) as ws:
                     if media == "wifi":
+                        self.wifi_ws = ws
                         self.wifi_connected = True
                     else:
+                        self.ble_ws = ws
                         self.ble_connected = True
                     backoff = 1.0
 
                     logger.info(f"[+] Connected to Central Hub binary PCAP stream for {media.upper()}: {ws_url}")
 
                     while self.running:
-                        # Drain batch from queue
+                        # 1. Proactively detect if connection was closed remotely while idle
+                        if is_ws_closed(ws):
+                            code = getattr(ws, "close_code", None)
+                            raise ConnectionResetError(f"{media.upper()} WebSocket closed remotely (code={code})")
+
+                        # 2. Drain batch from queue
                         batch = self._drain_batch(media, pkt_queue)
                         if batch:
                             await ws.send(batch)
@@ -218,14 +248,40 @@ class BinaryPcapStreamer:
                             else:
                                 self.stats["ble_bytes_sent"] += len(batch)
                         else:
-                            await asyncio.sleep(self.batch_interval_s)
+                            # 3. Wait for packets or detect remote socket closure immediately
+                            if hasattr(ws, "wait_closed"):
+                                try:
+                                    await asyncio.wait_for(ws.wait_closed(), timeout=self.batch_interval_s)
+                                    code = getattr(ws, "close_code", None)
+                                    raise ConnectionResetError(f"{media.upper()} WebSocket closed remotely (code={code})")
+                                except (asyncio.TimeoutError, TimeoutError):
+                                    pass
+                            else:
+                                await asyncio.sleep(self.batch_interval_s)
 
             except Exception as e:
                 was_connected = self.wifi_connected if media == "wifi" else self.ble_connected
                 if media == "wifi":
                     self.wifi_connected = False
+                    self.wifi_ws = None
                 else:
                     self.ble_connected = False
+                    self.ble_ws = None
+
+                # When a stream loses connection to the Hub, signal the sibling stream
+                # so it does not linger on a dead connection while idle
+                sibling_media = "ble" if media == "wifi" else "wifi"
+                sibling_ws = self.ble_ws if media == "wifi" else self.wifi_ws
+                if sibling_ws and not is_ws_closed(sibling_ws):
+                    try:
+                        logger.debug(f"[*] Hub disconnected on {media.upper()}: signaling {sibling_media.upper()} stream to reconnect.")
+                        await sibling_ws.close()
+                    except Exception:
+                        pass
+                if media == "wifi":
+                    self.ble_connected = False
+                else:
+                    self.wifi_connected = False
 
                 if self.running:
                     attempts = (
@@ -342,6 +398,18 @@ class BinaryPcapStreamer:
             return
 
         self.running = False
+        self.wifi_connected = False
+        self.ble_connected = False
+        if self.loop and self.loop.is_running():
+            for ws_obj in (self.wifi_ws, self.ble_ws):
+                if ws_obj and not is_ws_closed(ws_obj):
+                    try:
+                        asyncio.run_coroutine_threadsafe(ws_obj.close(), self.loop)
+                    except Exception:
+                        pass
+        self.wifi_ws = None
+        self.ble_ws = None
+
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=timeout)
 

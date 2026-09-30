@@ -85,10 +85,13 @@ class BleNrfSnifferThread(threading.Thread):
             except socket.timeout:
                 continue
             except Exception:
-                break
+                if not self.running:
+                    break
+                time.sleep(0.1)
+                continue
 
             conn.settimeout(1.0)
-            while self.running and (self.proc and self.proc.poll() is None):
+            while self.running:
                 try:
                     chunk = conn.recv(65536)
                     if not chunk:
@@ -107,6 +110,12 @@ class BleNrfSnifferThread(threading.Thread):
     def stop(self):
         self.running = False
         self.stop_process()
+        if self.pcap_server_sock:
+            try:
+                self.pcap_server_sock.close()
+            except Exception:
+                pass
+            self.pcap_server_sock = None
 
     def run(self):
         self.running = True
@@ -264,7 +273,7 @@ class BleNrfSnifferThread(threading.Thread):
 
                         serial_no = None
                         for msg in parsed_msgs:
-                            if isinstance(msg, dict) and msg.get("type") == "Basic ID" and msg.get("id"):
+                            if isinstance(msg, dict) and msg.get("type") == "Basic ID" and msg.get("id") and msg.get("is_known_version", True):
                                 serial_no = msg["id"]
                                 break
 
@@ -326,6 +335,12 @@ class BleNrfSnifferThread(threading.Thread):
             time.sleep(2.0)
 
         self.running = False
+        if self.pcap_server_sock:
+            try:
+                self.pcap_server_sock.close()
+            except Exception:
+                pass
+            self.pcap_server_sock = None
         logger.info("[*] BLE nRF Sniffer worker stopped.")
 
     def stop_process(self):
@@ -341,13 +356,6 @@ class BleNrfSnifferThread(threading.Thread):
                 except Exception:
                     pass
             self.proc = None
-
-        if self.pcap_server_sock:
-            try:
-                self.pcap_server_sock.close()
-            except Exception:
-                pass
-            self.pcap_server_sock = None
 
 
 # ============================================================================
@@ -406,7 +414,7 @@ def handle_payload(mac: str, rssi: int, service_data_payload: bytes):
         if parsed_data:
             for entry in parsed_data:
                 print(f"    - {entry}")
-                if entry.get("type") == "Basic ID" and entry.get("id"):
+                if entry.get("type") == "Basic ID" and entry.get("id") and entry.get("is_known_version", True):
                     serial = entry["id"]
                     MAC_TO_SERIAL[mac] = serial
         else:

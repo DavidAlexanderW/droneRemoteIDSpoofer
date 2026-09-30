@@ -109,6 +109,8 @@ class EncounterTracker:
         for m in msgs_to_process:
             if not isinstance(m, dict):
                 continue
+            if m.get("is_known_version") is False or (m.get("protocol_version") is not None and m.get("protocol_version") not in (0, 1, 2)):
+                continue
             m_type = m.get("type")
             if m_type == "Basic ID":
                 b_id = m.get("id")
@@ -361,6 +363,10 @@ class EncounterTracker:
 
             # Parse message telemetry fields
             for msg in msgs_to_process:
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("is_known_version") is False or (msg.get("protocol_version") is not None and msg.get("protocol_version") not in (0, 1, 2)):
+                    continue
                 m_type = msg.get("type")
                 if m_type == "Location":
                     lat = msg.get("lat")

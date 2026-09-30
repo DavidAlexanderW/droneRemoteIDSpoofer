@@ -145,13 +145,16 @@ export class DeepPacketInspectorController {
       // Build message block tags
       const blockTags = (pkt.decoded_messages || []).map((msg, idx) => {
         const type = msg.type || 'ASTM Block';
+        const isKnown = msg.is_known_version !== false && (msg.protocol_version == null || (msg.protocol_version >= 0 && msg.protocol_version <= 2));
         const isZeroed = Boolean(
-          msg.is_zeroed ||
-          (msg.msg_type === 3 && (!msg.description || msg.description.trim() === '')) ||
-          (msg.msg_type === 5 && (!msg.operator_id || msg.operator_id.trim() === '') && (!msg.id || msg.id.trim() === '')) ||
-          (msg.msg_type === 0 && (!msg.id || msg.id.trim() === '') && (!msg.ua_type || msg.ua_type === 0)) ||
-          (msg.msg_type === 1 && msg.lat == null && msg.lon == null && msg.height_m == null && msg.alt == null && (!msg.status || msg.status === 0)) ||
-          (msg.msg_type === 4 && msg.pilot_lat == null && msg.pilot_lon == null && !msg.classification_type && (!msg.operator_location_type || msg.operator_location_type === 0))
+          isKnown && (
+            msg.is_zeroed ||
+            (msg.msg_type === 3 && (!msg.description || msg.description.trim() === '')) ||
+            (msg.msg_type === 5 && (!msg.operator_id || msg.operator_id.trim() === '') && (!msg.id || msg.id.trim() === '')) ||
+            (msg.msg_type === 0 && (!msg.id || msg.id.trim() === '') && (!msg.ua_type || msg.ua_type === 0)) ||
+            (msg.msg_type === 1 && msg.lat == null && msg.lon == null && msg.height_m == null && msg.alt == null && (!msg.status || msg.status === 0)) ||
+            (msg.msg_type === 4 && msg.pilot_lat == null && msg.pilot_lon == null && !msg.classification_type && (!msg.operator_location_type || msg.operator_location_type === 0))
+          )
         );
 
         let cls = 'basic-id';
@@ -161,12 +164,18 @@ export class DeepPacketInspectorController {
         else if (type.includes('System')) cls = 'system';
         else if (type.includes('Auth')) cls = 'auth';
 
-        if (isZeroed) {
+        if (!isKnown) {
+          cls += ' unknown-version';
+        } else if (isZeroed) {
           cls += ' zeroed';
         }
 
         let extra = '';
-        if (isZeroed) {
+        if (!isKnown) {
+          const vStr = msg.protocol_version != null ? `v${msg.protocol_version}` : 'v?';
+          const rawHexShort = msg.raw_payload_hex ? ` (${msg.raw_payload_hex.substring(0, 8)}...)` : '';
+          extra = ` <span class="unknown-badge">⍰ ${vStr} UNKNOWN</span>${rawHexShort}`;
+        } else if (isZeroed) {
           extra = ` <span class="zero-badge">⊘ ZEROED</span>`;
         } else if (type.includes('Basic ID') || msg.msg_type === 0) {
           const uaType = msg.ua_type_name ? ` (${msg.ua_type_name})` : '';

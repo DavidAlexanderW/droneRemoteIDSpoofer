@@ -408,7 +408,7 @@ def main():
         has_wifi = not args.no_wifi
         has_ble = not args.no_ble
 
-        if BinaryPcapStreamer is not None and (has_wifi or has_ble):
+        if has_wifi or has_ble:
             pcap_streamer = BinaryPcapStreamer(
                 hub_url=args.hub_url,
                 node_id=args.node_id,
@@ -425,8 +425,6 @@ def main():
             logger.info(
                 f"[*] Operational Mode: CONCURRENT BINARY PCAP STREAMING ({' + '.join(channels)}) -> Hub: {pcap_streamer.base_ws_url}"
             )
-        elif BinaryPcapStreamer is None:
-            logger.warning("[!] BinaryPcapStreamer module not available. Binary PCAP streaming disabled.")
     else:
         pcap_streamer = None
         logger.info(

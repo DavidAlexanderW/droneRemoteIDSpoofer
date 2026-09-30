@@ -359,6 +359,12 @@ class UnifiedTelemetryLogger:
             proto_name = msg.get("proto_version_name", "")
             ver_tag = f" {C_GRAY}[{proto_name}]{C_RESET}" if proto_name else ""
 
+            if msg.get("is_known_version") is False:
+                raw_p = msg.get("raw_payload_hex", "")
+                raw_preview = f" {raw_p[:16]}..." if raw_p else ""
+                print(f"   {C_GRAY}❓ {m_type} {ver_tag} -> (Unknown version payload unsupported:{raw_preview}){C_RESET}")
+                continue
+
             if m_type == "Location":
                 lat = msg.get("lat")
                 lon = msg.get("lon")

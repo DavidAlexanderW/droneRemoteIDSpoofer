@@ -565,6 +565,8 @@ def compute_conformance_blocks(row: Any, traj: List[Any], packets: Optional[List
     if packets:
         for pkt in packets:
             for dm in pkt.get("decoded_messages", []):
+                if dm.get("is_known_version") is False or (dm.get("protocol_version") is not None and dm.get("protocol_version") not in (0, 1, 2)):
+                    continue
                 mtype = dm.get("msg_type")
                 is_z = bool(dm.get("is_zeroed", False))
                 if mtype is not None:

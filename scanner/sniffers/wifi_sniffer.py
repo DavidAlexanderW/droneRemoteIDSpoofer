@@ -378,7 +378,7 @@ class WifiSnifferThread(threading.Thread):
 
                 serial_no = None
                 for msg in parsed_messages:
-                    if msg.get("type") == "Basic ID" and msg.get("id"):
+                    if msg.get("type") == "Basic ID" and msg.get("id") and msg.get("is_known_version", True):
                         serial_no = msg["id"]
                         break
 

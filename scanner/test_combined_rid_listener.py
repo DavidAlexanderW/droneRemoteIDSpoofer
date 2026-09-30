@@ -1183,6 +1183,112 @@ class TestCombinedRIDListener(unittest.TestCase):
             if os.path.exists(tmp_db):
                 os.remove(tmp_db)
 
+    def test_unknown_version_messages_not_parsed_as_known(self):
+        """Verify that messages with unknown protocol versions (e.g. v3, v4) are NOT parsed into known fields."""
+        # 1. Location message with unknown proto_ver = 3 (header 0x13)
+        fake_loc_payload = bytes([0x13]) + b'\xAA\xBB\xCC\xDD' * 6
+        decoded_loc = decode_astm_message(fake_loc_payload)
+        self.assertIsNotNone(decoded_loc)
+        self.assertEqual(decoded_loc["msg_type"], 0x1)
+        self.assertEqual(decoded_loc["type"], "Location")
+        self.assertEqual(decoded_loc["protocol_version"], 3)
+        self.assertFalse(decoded_loc["is_known_version"])
+        self.assertIn("Unknown Version", decoded_loc["proto_version_name"])
+        self.assertIn("raw_payload_hex", decoded_loc)
+        self.assertEqual(decoded_loc["raw_payload_hex"], fake_loc_payload[1:].hex().upper())
+        # Ensure no bogus location fields were decoded
+        self.assertNotIn("lat", decoded_loc)
+        self.assertNotIn("lon", decoded_loc)
+        self.assertNotIn("speed_mps", decoded_loc)
+        self.assertNotIn("direction_deg", decoded_loc)
+        self.assertNotIn("geodetic_altitude_m", decoded_loc)
+
+        # 2. Basic ID message with unknown proto_ver = 4 (header 0x04)
+        fake_basic_payload = bytes([0x04]) + b'\x11\x22\x33\x44' * 6
+        decoded_basic = decode_astm_message(fake_basic_payload)
+        self.assertIsNotNone(decoded_basic)
+        self.assertEqual(decoded_basic["msg_type"], 0x0)
+        self.assertEqual(decoded_basic["type"], "Basic ID")
+        self.assertEqual(decoded_basic["protocol_version"], 4)
+        self.assertFalse(decoded_basic["is_known_version"])
+        self.assertNotIn("id", decoded_basic)
+        self.assertNotIn("ua_type", decoded_basic)
+
+    def test_message_pack_multiple_same_types_unknown_and_known_versions(self):
+        """Verify that when a pack has multiple messages of the same type with known and unknown versions,
+        only the known version is used to decode the serial and position, while both appear in packet inspection."""
+        # Known Basic ID (v2)
+        serial_raw = b"KNOWN_DRONE_1234\x00\x00\x00\x00"
+        known_basic = bytes([0x02, 0x12]) + serial_raw[:20] + b'\x00\x00\x00'
+        self.assertEqual(len(known_basic), 25)
+
+        # Unknown Basic ID (v3) with garbage payload
+        unknown_basic = bytes([0x03]) + b'\xFF\xEE\xDD\xCC' * 6
+        self.assertEqual(len(unknown_basic), 25)
+
+        # Known Location (v2): lat=47.3769 (473769000), lon=8.5417 (85417000), alt=450m (2900 raw), speed=10m/s (40 raw), dir=180
+        known_loc = struct.pack(
+            '<BBBBBiiHHH6s',
+            0x12, 0x00, 180, 40, 0,
+            473769000, 85417000,
+            2900, 2900, 2100,
+            b'\x00' * 6
+        )
+        self.assertEqual(len(known_loc), 25)
+
+        # Unknown Location (v5) with arbitrary unknown format bytes
+        unknown_loc = bytes([0x15]) + b'\xDE\xAD\xBE\xEF' * 6
+        self.assertEqual(len(unknown_loc), 25)
+
+        # Build pack with: [unknown_basic, known_basic, unknown_loc, known_loc]
+        # Pack header: 0xF2 (MsgPack v2), single msg size 25 (0x19), count 4
+        pack_payload = bytes([0xF2, 0x19, 0x04]) + unknown_basic + known_basic + unknown_loc + known_loc
+
+        parsed, raw_b64 = parse_astm_payload(pack_payload)
+        self.assertEqual(len(parsed), 4)
+        self.assertEqual(len(raw_b64), 4)
+
+        # Verify inspection list contains all 4
+        self.assertFalse(parsed[0]["is_known_version"])  # unknown_basic
+        self.assertTrue(parsed[1]["is_known_version"])   # known_basic
+        self.assertEqual(parsed[1]["id"], "KNOWN_DRONE_1234")
+        self.assertFalse(parsed[2]["is_known_version"])  # unknown_loc
+        self.assertTrue(parsed[3]["is_known_version"])   # known_loc
+        self.assertAlmostEqual(parsed[3]["lat"], 47.3769, places=4)
+        self.assertAlmostEqual(parsed[3]["lon"], 8.5417, places=4)
+
+        # Now test EncounterTracker with this packet
+        tmp_db = f"/tmp/test_multi_ver_{int(time.time()*1000)}.db"
+        try:
+            tracker = EncounterTracker(db_path=tmp_db, timeout_s=300.0)
+            pkt = {
+                "mac": "AA:BB:CC:11:22:33",
+                "timestamp": time.time(),
+                "transport": "bt5",
+                "channel": 37,
+                "rssi_dbm": -65,
+                "messages": parsed,
+                "messages_b64": raw_b64,
+            }
+            eid = tracker.update_with_packet(pkt)
+            self.assertIsNotNone(eid)
+            enc = tracker.active_encounters.get("AA:BB:CC:11:22:33")
+            self.assertIsNotNone(enc)
+            # Serial must be from the known version
+            self.assertEqual(enc.get("serial_number"), "KNOWN_DRONE_1234")
+            # Trajectory must have the fix from the known version location
+            self.assertEqual(len(enc.get("trajectory", [])), 1)
+            fix = enc["trajectory"][0]
+            self.assertAlmostEqual(fix[0], 47.3769, places=4)
+            self.assertAlmostEqual(fix[1], 8.5417, places=4)
+            self.assertAlmostEqual(fix[2], 450.0, places=1)
+            self.assertAlmostEqual(fix[3], 10.0, places=1)
+            self.assertEqual(fix[4], 180)
+            tracker.finalize_all()
+        finally:
+            if os.path.exists(tmp_db):
+                os.remove(tmp_db)
+
 
 if __name__ == "__main__":
     unittest.main()

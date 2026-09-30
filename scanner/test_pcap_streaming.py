@@ -300,6 +300,34 @@ class TestPcapStreaming(unittest.TestCase):
         self.assertEqual(wifi_sz, 24 + 16 + len(raw_wifi))
         self.assertEqual(ble_sz, 24 + 16 + len(raw_ble))
 
+    def test_is_ws_closed_and_lifecycle(self):
+        """Verifies is_ws_closed helper detects all closing/closed connection states."""
+        from scanner.pcap_streamer import is_ws_closed
+        from websockets.protocol import State
+
+        self.assertTrue(is_ws_closed(None))
+
+        class MockWs:
+            def __init__(self, state=State.OPEN, close_code=None, closed=False):
+                self.state = state
+                self.close_code = close_code
+                self.closed = closed
+
+        open_ws = MockWs(state=State.OPEN, close_code=None, closed=False)
+        self.assertFalse(is_ws_closed(open_ws))
+
+        closed_code_ws = MockWs(state=State.OPEN, close_code=1000)
+        self.assertTrue(is_ws_closed(closed_code_ws))
+
+        closing_state_ws = MockWs(state=State.CLOSING, close_code=None)
+        self.assertTrue(is_ws_closed(closing_state_ws))
+
+        closed_state_ws = MockWs(state=State.CLOSED, close_code=1006)
+        self.assertTrue(is_ws_closed(closed_state_ws))
+
+        closed_flag_ws = MockWs(state=State.OPEN, close_code=None, closed=True)
+        self.assertTrue(is_ws_closed(closed_flag_ws))
+
 
 if __name__ == "__main__":
     unittest.main()

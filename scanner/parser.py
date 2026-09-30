@@ -199,15 +199,22 @@ def decode_astm_message(block: bytes) -> Optional[Dict[str, Any]]:
         return None
 
     is_zeroed = (len(block) >= 25 and block[1:25] == b'\x00' * 24)
+    is_known_version = proto_ver in PROTO_VERSION_NAMES
 
     result: Dict[str, Any] = {
         "msg_type": msg_type,
         "type": MSG_TYPE_NAMES.get(msg_type, f"Unknown ({msg_type})"),
         "protocol_version": proto_ver,
-        "proto_version_name": PROTO_VERSION_NAMES.get(proto_ver, f"Version {proto_ver}"),
+        "proto_version_name": PROTO_VERSION_NAMES.get(proto_ver, f"Unknown Version (v{proto_ver})"),
+        "is_known_version": is_known_version,
         "raw_hex": block[:25].hex().upper(),
         "is_zeroed": is_zeroed,
     }
+
+    if not is_known_version:
+        result["raw_payload_hex"] = block[1:25].hex().upper()
+        result["unparsed_reason"] = f"Unknown protocol version {proto_ver}; payload layout unsupported"
+        return result
 
     try:
         if msg_type == 0x0:  # Basic ID (Type 0)
