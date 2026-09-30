@@ -46,6 +46,7 @@ from scanner.db import (
 from scanner.drone_models import infer_drone_model
 from scanner.parser import decode_astm_message
 from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
+from scanner.timestamp_utils import resolve_reception_timestamp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -150,15 +151,7 @@ class MultiNodeDeduplicator:
         mac = envelope.get("mac", "UNKNOWN")
         serial = envelope.get("serial_number") or envelope.get("serial")
         entity_id = serial or mac
-        ts = envelope.get("timestamp") or envelope.get("timestamp_epoch")
-        if ts is None and envelope.get("timestamp_iso"):
-            try:
-                dt = datetime.fromisoformat(envelope["timestamp_iso"].replace("Z", "+00:00"))
-                ts = dt.timestamp()
-            except Exception:
-                ts = now
-        if ts is None:
-            ts = now
+        ts = resolve_reception_timestamp(envelope, fallback_now=now)
         counter = envelope.get("counter", 0)
         transport = envelope.get("transport", "")
         node_id = envelope.get("node_id", "default_node")
@@ -323,18 +316,7 @@ class CentralIngestionHub:
     async def ingest_packet(self, envelope: Dict[str, Any]) -> Optional[str]:
         """Ingests a single packet envelope through deduplication, encounter tracker, and replay log."""
         now_ts = time.time()
-        min_valid = 1700000000.0
-        max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
-
-        ts = envelope.get("reception_timestamp") or envelope.get("timestamp") or envelope.get("timestamp_epoch")
-        if ts is None and envelope.get("timestamp_iso"):
-            try:
-                dt = datetime.fromisoformat(envelope["timestamp_iso"].replace("Z", "+00:00"))
-                ts = dt.timestamp()
-            except Exception:
-                ts = now_ts
-        if ts is None or ts < min_valid or ts > max_valid:
-            ts = now_ts
+        ts = resolve_reception_timestamp(envelope, fallback_now=now_ts)
         envelope["timestamp"] = ts
         envelope["reception_timestamp"] = ts
         envelope["timestamp_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
@@ -357,8 +339,8 @@ class CentralIngestionHub:
         envelope["node_id"] = primary_node
         envelope["node_rssi_map"] = node_rssi_map
 
-        # Update encounter tracker
-        encounter_id = self.encounter_tracker.update_with_packet(envelope)
+        # Update encounter tracker asynchronously off the event loop
+        encounter_id = await self.encounter_tracker.update_with_packet_async(envelope)
 
         # Log to cold replay file
         await self.replay_logger.log_packet(envelope, encounter_id=encounter_id)

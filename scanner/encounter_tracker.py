@@ -7,6 +7,7 @@ Merges sequential packets by both Serial number and MAC address.
 Maintains running aggregates for RF and flight telemetry to optimize memory.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -515,6 +516,21 @@ class EncounterTracker:
                     enc["is_active"] = 0
                     self._persist_encounter(enc)
             self.active_encounters.clear()
+
+    async def update_with_packet_async(self, packet: Dict[str, Any]) -> str:
+        """
+        Asynchronously updates or creates an active encounter.
+        Offloads thread lock acquisition and SQLite persistence to an executor thread
+        to prevent blocking the asyncio event loop.
+        """
+        return await asyncio.to_thread(self.update_with_packet, packet)
+
+    async def finalize_all_async(self) -> None:
+        """
+        Asynchronously finalizes all active encounters on shutdown.
+        Offloads thread lock acquisition and SQLite persistence to an executor thread.
+        """
+        await asyncio.to_thread(self.finalize_all)
 
     def _persist_encounter(self, enc: Dict[str, Any]):
         if not self.db_path:
