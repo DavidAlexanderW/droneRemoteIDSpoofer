@@ -284,7 +284,6 @@ class BleNrfSnifferThread(threading.Thread):
 
                         event: Dict[str, Any] = {
                             "timestamp": ts,
-                            "reception_timestamp": ts,
                             "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                             "transport": transport,
                             "interface": "nRF52840-UART",

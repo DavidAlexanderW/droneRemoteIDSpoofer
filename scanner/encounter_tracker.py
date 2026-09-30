@@ -80,7 +80,7 @@ class EncounterTracker:
     def update_with_packet(self, packet: Dict[str, Any]) -> str:
         """Update or create an active encounter from an incoming packet. Returns encounter_id."""
         mac = packet.get("mac", "UNKNOWN")
-        serial = packet.get("serial_number") or packet.get("serial")
+        serial = packet.get("serial_number") if packet.get("serial_number") is not None else packet.get("serial")
         node_id = packet.get("node_id") or packet.get("primary_node_id") or self.default_node_id
 
         # Resolve messages upfront: decode messages_b64 if messages list is empty

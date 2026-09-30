@@ -755,8 +755,8 @@ def get_encounter_packets(encounter_id: str):
                                     "mcs_index": rec.get("mcs_index"),
                                     "guard_interval": rec.get("guard_interval"),
                                     "mac": rec.get("mac"),
-                                    "serial": rec.get("serial"),
-                                    "counter": rec.get("counter", 0),
+                                    "serial": rec.get("serial_number") if rec.get("serial_number") is not None else rec.get("serial"),
+                                    "counter": rec.get("counter") if rec.get("counter") is not None else rec.get("msg_counter", 0),
                                     "messages_b64": rec.get("messages_b64", []),
                                     "decoded_messages": decoded_blocks,
                                 })

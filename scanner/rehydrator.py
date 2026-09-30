@@ -146,7 +146,7 @@ def rehydrate_db_from_jsonl(
 
         ts = _resolve_ts(p)
         mac = p.get("mac", "UNKNOWN")
-        serial = p.get("serial_number") or p.get("serial")
+        serial = p.get("serial_number") if p.get("serial_number") is not None else p.get("serial")
         pkt_node_id = p.get("node_id") or node_id
 
         pkt_rssi = p.get("rssi_dbm")

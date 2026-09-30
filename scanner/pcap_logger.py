@@ -94,7 +94,8 @@ def reconstruct_astm_payload(event: Dict[str, Any]) -> bytes:
         return b"".join(payload_parts)
 
     # Fallback to minimal 25-byte Basic ID block
-    serial = (event.get("serial_number") or event.get("serial") or "DRONE_RID_001").encode("ascii")
+    s_val = event.get("serial_number") if event.get("serial_number") is not None else event.get("serial")
+    serial = (s_val or "DRONE_RID_001").encode("ascii")
     # Byte 0: 0x00 (Basic ID), Byte 1: 0x10 (ID Type 1, UA Type 0)
     return b"\x00\x10" + serial[:20].ljust(23, b"\x00")
 

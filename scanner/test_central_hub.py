@@ -567,6 +567,51 @@ class TestCentralHub(unittest.TestCase):
         finally:
             shutil.rmtree(temp_log_dir, ignore_errors=True)
 
+    def test_canonical_envelope_and_zero_values(self):
+        """Verifies canonical envelope normalization, reception_timestamp popping, and that zero values (0 dBm, counter 0) are strictly preserved."""
+        loop = asyncio.new_event_loop()
+        try:
+            raw_env = {
+                "reception_timestamp": 1788800000.0,
+                "node_id": "sensor-zero-node",
+                "transport": "wifi",
+                "mac": "11:22:33:44:55:00",
+                "serial": "DRONE-ZERO-VAL",
+                "counter": 0,
+                "msg_counter": 42,
+                "rssi_dbm": 0,
+                "rssi": -85,
+                "messages": [],
+            }
+            eid = loop.run_until_complete(self.hub.ingest_packet(raw_env))
+            self.assertIsNotNone(eid)
+
+            # Ensure canonical keys normalized and zero values preserved
+            self.assertEqual(raw_env.get("counter"), 0)
+            self.assertEqual(raw_env.get("rssi_dbm"), 0)
+            self.assertEqual(raw_env.get("serial_number"), "DRONE-ZERO-VAL")
+            self.assertNotIn("reception_timestamp", raw_env)
+            self.assertEqual(raw_env.get("timestamp"), 1788800000.0)
+            self.assertIn("timestamp_iso", raw_env)
+
+            # Verify deduplicator preserves 0 dBm in node_rssi_map
+            self.assertEqual(raw_env.get("node_rssi_map"), {"sensor-zero-node": 0})
+
+            # Verify Replay Logger output contains both canonical & backward-compatible keys and preserved zeroes
+            self.hub.replay_logger.flush()
+            log_files = [f for f in os.listdir(self.log_dir) if f.endswith(".jsonl")]
+            self.assertTrue(len(log_files) >= 1)
+            with open(os.path.join(self.log_dir, log_files[0]), "r", encoding="utf-8") as f:
+                records = [json.loads(line) for line in f if line.strip()]
+            zero_rec = next(r for r in records if r.get("mac") == "11:22:33:44:55:00")
+            self.assertEqual(zero_rec.get("counter"), 0)
+            self.assertEqual(zero_rec.get("rssi_dbm"), 0)
+            self.assertEqual(zero_rec.get("serial_number"), "DRONE-ZERO-VAL")
+            self.assertEqual(zero_rec.get("serial"), "DRONE-ZERO-VAL")
+            self.assertNotIn("reception_timestamp", zero_rec)
+        finally:
+            loop.close()
+
 
 if __name__ == "__main__":
     unittest.main()

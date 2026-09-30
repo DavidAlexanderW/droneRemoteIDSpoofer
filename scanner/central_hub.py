@@ -104,6 +104,9 @@ class CentralDailyReplayLogger:
     async def log_packet(self, packet_envelope: Dict[str, Any], encounter_id: Optional[str] = None):
         """Asynchronously writes a standardized packet record to the central daily JSONL."""
         ts = resolve_reception_timestamp(packet_envelope)
+        serial_val = packet_envelope.get("serial_number") if packet_envelope.get("serial_number") is not None else packet_envelope.get("serial")
+        rssi_val = packet_envelope.get("rssi_dbm") if packet_envelope.get("rssi_dbm") is not None else packet_envelope.get("rssi")
+        counter_val = packet_envelope.get("counter") if packet_envelope.get("counter") is not None else packet_envelope.get("msg_counter", 0)
 
         record = {
             "timestamp": ts,
@@ -112,10 +115,11 @@ class CentralDailyReplayLogger:
             "node_meta": packet_envelope.get("node_meta", {}),
             "transport": packet_envelope.get("transport", "unknown"),
             "channel": packet_envelope.get("channel"),
-            "rssi_dbm": packet_envelope.get("rssi_dbm"),
+            "rssi_dbm": rssi_val,
             "mac": packet_envelope.get("mac", "UNKNOWN"),
-            "serial": packet_envelope.get("serial_number") or packet_envelope.get("serial"),
-            "counter": packet_envelope.get("counter", 0),
+            "serial_number": serial_val,
+            "serial": serial_val,
+            "counter": counter_val if counter_val is not None else 0,
             "messages_b64": packet_envelope.get("messages_b64", []),
             "messages": packet_envelope.get("messages", []),
             "rate_mbps": packet_envelope.get("rate_mbps"),
@@ -174,13 +178,13 @@ class MultiNodeDeduplicator:
             self._cleanup(now)
 
         mac = envelope.get("mac", "UNKNOWN")
-        serial = envelope.get("serial_number") or envelope.get("serial")
+        serial = envelope.get("serial_number") if envelope.get("serial_number") is not None else envelope.get("serial")
         entity_id = serial or mac
         ts = resolve_reception_timestamp(envelope, fallback_now=now)
-        counter = envelope.get("counter", 0)
+        counter = envelope.get("counter") if envelope.get("counter") is not None else envelope.get("msg_counter", 0)
         transport = envelope.get("transport", "")
         node_id = envelope.get("node_id", "default_node")
-        rssi = envelope.get("rssi_dbm")
+        rssi = envelope.get("rssi_dbm") if envelope.get("rssi_dbm") is not None else envelope.get("rssi")
 
         # Quantize timestamp to 0.5s for loose temporal grouping
         rounded_ts = round(ts * 2.0) / 2.0
@@ -343,11 +347,15 @@ class CentralIngestionHub:
         now_ts = time.time()
         ts = resolve_reception_timestamp(envelope, fallback_now=now_ts)
         envelope["timestamp"] = ts
-        envelope["reception_timestamp"] = ts
         envelope["timestamp_iso"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
+        envelope.pop("reception_timestamp", None)
 
-        if not envelope.get("serial_number") and envelope.get("serial"):
+        if envelope.get("serial_number") is None and envelope.get("serial") is not None:
             envelope["serial_number"] = envelope["serial"]
+        if envelope.get("counter") is None and envelope.get("msg_counter") is not None:
+            envelope["counter"] = envelope["msg_counter"]
+        if envelope.get("rssi_dbm") is None and envelope.get("rssi") is not None:
+            envelope["rssi_dbm"] = envelope["rssi"]
 
         if not envelope.get("messages") and envelope.get("messages_b64"):
             try:

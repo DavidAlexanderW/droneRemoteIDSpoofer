@@ -1135,6 +1135,54 @@ class TestCombinedRIDListener(unittest.TestCase):
             ]
             self.assertEqual(files, expected, f"Expected 4 distinct files for 2 nodes, found {files}")
 
+    def test_encounter_tracker_zero_values_and_canonical_envelope(self):
+        """Verifies that counter=0 and rssi_dbm=0 are preserved and not clobbered by falsy checks."""
+        tmp_db = tempfile.mktemp(prefix="test_zero_enc_", suffix=".db")
+        try:
+            tracker = EncounterTracker(db_path=tmp_db, persist_interval_s=0.0)
+            pkt = {
+                "timestamp": 1788800000.0,
+                "transport": "wifi",
+                "channel": 6,
+                "mac": "00:11:22:33:44:55",
+                "serial_number": "ZERO-VAL-DRONE-01",
+                "counter": 0,
+                "msg_counter": 128,
+                "rssi_dbm": 0,
+                "rssi": -90,
+                "messages": [
+                    {
+                        "type": "Basic ID",
+                        "id": "ZERO-VAL-DRONE-01",
+                        "id_type": 1,
+                    },
+                    {
+                        "type": "Location",
+                        "lat": 47.3769,
+                        "lon": 8.5417,
+                        "geodetic_altitude_m": 450.0,
+                        "speed_mps": 5.0,
+                        "direction_deg": 180.0,
+                    }
+                ],
+            }
+            eid = tracker.update_with_packet(pkt)
+            self.assertIsNotNone(eid)
+            enc = tracker.active_encounters.get("00:11:22:33:44:55")
+            self.assertIsNotNone(enc)
+            self.assertEqual(enc.get("counter"), 0)
+            self.assertEqual(enc.get("last_rssi"), 0)
+            self.assertEqual(enc.get("serial_number"), "ZERO-VAL-DRONE-01")
+            self.assertTrue(len(enc.get("trajectory", [])) >= 1)
+            first_pt = enc["trajectory"][0]
+            # pt is [lat, lon, alt, spd, heading, round(ts, 2), h_m, h_type, p_alt, v_spd, pt_rssi, pt_counter]
+            self.assertEqual(first_pt[10], 0, "Point RSSI should strictly be 0, not None or fallback")
+            self.assertEqual(first_pt[11], 0, "Point counter should strictly be 0, not None or fallback")
+            tracker.finalize_all()
+        finally:
+            if os.path.exists(tmp_db):
+                os.remove(tmp_db)
+
 
 if __name__ == "__main__":
     unittest.main()

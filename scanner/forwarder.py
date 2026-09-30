@@ -31,6 +31,7 @@ if _repo_root not in sys.path:
 
 from scanner.parser import decode_astm_message, parse_astm_payload
 from scanner.scanner_config import save_scanner_config, get_default_config_path
+from scanner.timestamp_utils import resolve_reception_timestamp
 
 try:
     import websockets
@@ -165,6 +166,7 @@ class CentralStreamForwarder:
             return
 
         clean_event = {k: v for k, v in packet_event.items() if k != "raw_bytes"}
+        clean_event.pop("reception_timestamp", None)
         envelope = {
             "version": "1.0",
             "node_id": self.node_id,
@@ -474,27 +476,7 @@ class CentralStreamForwarder:
                 total_lines += 1
                 try:
                     pkt = json.loads(line_str)
-                    now_ts = time.time()
-                    min_valid = 1700000000.0
-                    max_valid = 2000000000.0  # May 18, 2033 UTC (catches uncalibrated hardware tick overflows like 2061)
-
-                    ts = pkt.get("reception_timestamp") or pkt.get("timestamp") or pkt.get("timestamp_epoch")
-                    if ts is None:
-                        iso_str = pkt.get("timestamp_iso")
-                        if iso_str:
-                            try:
-                                dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-                                ts = dt.timestamp()
-                            except Exception:
-                                ts = None
-                    if ts is None or ts < min_valid or ts > max_valid:
-                        recovered = None
-                        for m in (pkt.get("messages") or []):
-                            sys_ep = m.get("system_timestamp_epoch")
-                            if sys_ep and min_valid <= sys_ep <= max_valid:
-                                recovered = float(sys_ep)
-                                break
-                        ts = recovered if recovered is not None else now_ts
+                    ts = resolve_reception_timestamp(pkt, fallback_now=time.time())
 
                     # Spool files obey watermark; historical archive backlog files sync in full (unless older than watermark and not forced)
                     should_sync = False
@@ -504,9 +486,13 @@ class CentralStreamForwarder:
                         should_sync = self.force_resync or (last_synced_epoch <= 0.0) or (ts > last_synced_epoch)
 
                     if should_sync:
-                        # Normalize serial number key
-                        if not pkt.get("serial_number") and pkt.get("serial"):
+                        # Normalize canonical keys without falsy fallthrough
+                        if pkt.get("serial_number") is None and pkt.get("serial") is not None:
                             pkt["serial_number"] = pkt["serial"]
+                        if pkt.get("counter") is None and pkt.get("msg_counter") is not None:
+                            pkt["counter"] = pkt["msg_counter"]
+                        if pkt.get("rssi_dbm") is None and pkt.get("rssi") is not None:
+                            pkt["rssi_dbm"] = pkt["rssi"]
 
                         # If messages list is missing but raw messages_b64 is present, decode it
                         if not pkt.get("messages") and pkt.get("messages_b64"):
@@ -527,9 +513,9 @@ class CentralStreamForwarder:
                             "node_meta": self.node_meta,
                             **pkt,
                             "timestamp": ts,
-                            "reception_timestamp": ts,
                             "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                         }
+                        envelope.pop("reception_timestamp", None)
                         batch_items.append(envelope)
 
                         if len(batch_items) >= self.batch_size:
