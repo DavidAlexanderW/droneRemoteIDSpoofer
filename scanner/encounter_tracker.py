@@ -409,19 +409,9 @@ class EncounterTracker:
 
                     if lat is not None and lon is not None:
                         # Append 12-element trajectory fix [lat, lon, alt_msl, speed, heading, ts, height_m, height_type, pressure_alt_m, vert_spd, rssi, counter]
-                        # Downsample trajectory if stationary or dense (<1s dt and <~1m movement)
-                        last_pt = enc["trajectory"][-1] if enc["trajectory"] else None
-                        should_record = False
-                        if last_pt is None:
-                            should_record = True
-                        else:
-                            dt_pt = ts - last_pt[5]
-                            if dt_pt >= 1.0 or abs(lat - last_pt[0]) > 0.00001 or abs(lon - last_pt[1]) > 0.00001:
-                                should_record = True
-                        if should_record:
-                            pt_rssi = rssi if rssi is not None else enc.get("last_rssi")
-                            pt_counter = counter if counter is not None else enc.get("counter")
-                            enc["trajectory"].append([lat, lon, alt, spd, heading, round(ts, 2), h_m, h_type, p_alt, v_spd, pt_rssi, pt_counter])
+                        pt_rssi = rssi if rssi is not None else enc.get("last_rssi")
+                        pt_counter = counter if counter is not None else enc.get("counter")
+                        enc["trajectory"].append([lat, lon, alt, spd, heading, round(ts, 2), h_m, h_type, p_alt, v_spd, pt_rssi, pt_counter])
 
                 elif m_type == "Basic ID":
                     b_id = msg.get("id")
