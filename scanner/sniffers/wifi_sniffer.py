@@ -46,6 +46,19 @@ from scanner.parser import (
 )
 from scanner.radiotap import extract_radiotap_phy_info
 
+try:
+    from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt
+    from scapy.utils import wrpcap
+    from scapy.all import sniff
+    SCAPY_AVAILABLE = True
+except ImportError:
+    Dot11 = None
+    Dot11Beacon = None
+    Dot11Elt = None
+    wrpcap = None
+    sniff = None
+    SCAPY_AVAILABLE = False
+
 logger = logging.getLogger("CombinedRIDListener.WifiSniffer")
 
 
@@ -427,15 +440,33 @@ class WifiSnifferThread(threading.Thread):
 # Standalone Scapy Sniffer CLI Implementation
 # ============================================================================
 
-START_TIME = None
-REPLAY_FILE = None
-PCAP_FILE = None
-MAC_TO_SERIAL: Dict[str, str] = {}
+class WiFiSnifferSession:
+    """Encapsulates standalone Wi-Fi sniffer runtime state without mutating global module variables."""
+
+    def __init__(self, replay_out: Optional[str] = None, pcap_out: Optional[str] = None):
+        self.replay_path = replay_out
+        self.replay_file = open(replay_out, "w") if replay_out else None
+        self.pcap_file = pcap_out
+        self.start_time: Optional[float] = None
+        self.mac_to_serial: Dict[str, str] = {}
+
+    def close(self):
+        if self.replay_file:
+            try:
+                self.replay_file.close()
+            except Exception:
+                pass
+            self.replay_file = None
 
 
-def process_packet(pkt):
-    from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt
-    from scapy.utils import wrpcap
+_default_sniffer_session = WiFiSnifferSession()
+
+
+def process_packet(pkt, session: Optional[WiFiSnifferSession] = None):
+    if not SCAPY_AVAILABLE or Dot11 is None:
+        return
+
+    sess = session or _default_sniffer_session
 
     if not pkt.haslayer(Dot11):
         return
@@ -595,17 +626,16 @@ def _handle_astm_payload(
                     print(f"    - {entry}")
                     if entry.get("type") == "Basic ID" and entry.get("id"):
                         serial = entry["id"]
-                        MAC_TO_SERIAL[mac_addr] = serial
+                        sess.mac_to_serial[mac_addr] = serial
             else:
                 print("    - (Parser returned no data)")
 
-            if REPLAY_FILE is not None and msgs_b64:
-                global START_TIME
-                if START_TIME is None:
-                    START_TIME = float(pkt.time)
+            if sess.replay_file is not None and msgs_b64:
+                if sess.start_time is None:
+                    sess.start_time = float(pkt.time)
 
                 event = {
-                    "time_offset_ms": int((float(pkt.time) - START_TIME) * 1000),
+                    "time_offset_ms": int((float(pkt.time) - sess.start_time) * 1000),
                     "transport": transport,
                     "counter": counter,
                     "messages_b64": msgs_b64,
@@ -616,8 +646,8 @@ def _handle_astm_payload(
                 }
                 if serial:
                     event["serial"] = serial
-                elif mac_addr in MAC_TO_SERIAL:
-                    event["serial"] = MAC_TO_SERIAL[mac_addr]
+                elif mac_addr in sess.mac_to_serial:
+                    event["serial"] = sess.mac_to_serial[mac_addr]
 
                 if ssid_val:
                     event["ssid"] = ssid_val
@@ -632,8 +662,8 @@ def _handle_astm_payload(
                 if esr_val:
                     event["esr_b64"] = base64.b64encode(esr_val).decode("ascii")
 
-                REPLAY_FILE.write(json.dumps(event) + "\n")
-                REPLAY_FILE.flush()
+                sess.replay_file.write(json.dumps(event) + "\n")
+                sess.replay_file.flush()
 
             print("-" * 50)
 
@@ -644,7 +674,9 @@ def _handle_astm_payload(
 
 
 def main():
-    from scapy.all import sniff, wrpcap
+    if not SCAPY_AVAILABLE:
+        print("[!] Error: Scapy is not installed. Run 'pip install scapy' to use the standalone Wi-Fi sniffer CLI.")
+        sys.exit(1)
 
     parser = argparse.ArgumentParser(description="Drone Remote ID Wi-Fi Sniffer")
     parser.add_argument("--interface", default="wlan1", help="Wi-Fi Interface (default: wlan1)")
@@ -657,23 +689,19 @@ def main():
     if os.geteuid() != 0:
         print("[!] Warning: You usually need root privileges (sudo) to sniff Wi-Fi and configure monitor mode.")
 
-    global REPLAY_FILE, PCAP_FILE
-
+    session = WiFiSnifferSession(replay_out=args.replay_out, pcap_out=args.pcap_out)
     if args.replay_out:
-        REPLAY_FILE = open(args.replay_out, "w")
         print(f"[*] Replay events will be saved to {args.replay_out}")
 
     if args.pcap_out:
-        PCAP_FILE = args.pcap_out
-        wrpcap(PCAP_FILE, [])
+        wrpcap(args.pcap_out, [])
         print(f"[*] Raw PCAP data will be saved to {args.pcap_out}")
 
     def cleanup(signum, frame):
         print("\n[*] Stopping capture...")
         if not args.no_setup:
-            teardown_monitor_mode(args.interface)
-        if REPLAY_FILE:
-            REPLAY_FILE.close()
+            restore_managed_mode(args.interface)
+        session.close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, cleanup)

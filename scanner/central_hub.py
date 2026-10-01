@@ -238,6 +238,7 @@ class CentralIngestionHub:
 
         # Initialize database schema
         self.db_conn = get_db_connection(self.db_path, timeout_s=self.timeout_s)
+        init_encounters_db(self.db_conn, timeout_s=self.timeout_s)
 
         from scanner.combined_rid_listener import EncounterTracker
         self.encounter_tracker = EncounterTracker(
@@ -671,9 +672,15 @@ def main():
     parser.add_argument("--pcap-dir", type=str, default=None, help="Directory for central daily PCAP captures (default: <log-dir>/pcaps)")
     parser.add_argument("--no-pcap", action="store_true", help="Disable central PCAP logging")
     parser.add_argument("--timeout-s", type=float, default=300.0, help="Flight encounter silence timeout in seconds")
+    parser.add_argument("--rehydrate", action="store_true", help="Rehydrate central database from cold JSONL logs in log-dir before starting hub")
     parser.add_argument("--quiet", action="store_true", help="Suppress verbose console logs")
 
     args = parser.parse_args()
+
+    if args.rehydrate:
+        print(f"[*] Rehydrating central database from forensic logs in '{args.log_dir}'...")
+        from scanner.rehydrator import rehydrate_database
+        rehydrate_database(db_path=args.db_file, log_dir=args.log_dir)
 
     hub = CentralIngestionHub(
         db_path=args.db_file,

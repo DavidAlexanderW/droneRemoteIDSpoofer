@@ -21,10 +21,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from scanner.parser import decode_astm_message, parse_astm_payload
 
 from scanner.db import (
-    haversine_m,
     init_encounters_db,
     is_better_operator_id,
     is_better_serial,
+    is_fuzzy_mac_match,
     is_fuzzy_operator_match,
     is_fuzzy_serial_match,
     sanitize_operator_id,
@@ -169,25 +169,29 @@ class EncounterTracker:
                 for active_enc in list(self.active_encounters.values()):
                     op_act = sanitize_operator_id(active_enc.get("operator_id"))
                     if op_act and (op_new == op_act or is_fuzzy_operator_match(op_new, op_act)):
+                        s_act = sanitize_serial(active_enc.get("serial_number"))
+                        # Guard against merging distinct drones sharing operator ID
+                        if s_new and s_act and len(s_new) >= 14 and len(s_act) >= 14 and not is_fuzzy_serial_match(s_new, s_act):
+                            continue
                         enc = active_enc
                         break
 
             # 3. Exact MAC Match
             if not enc and mac and mac != "UNKNOWN" and mac in self.active_encounters:
-                enc = self.active_encounters[mac]
+                candidate_enc = self.active_encounters[mac]
+                s_act = sanitize_serial(candidate_enc.get("serial_number"))
+                if not (s_new and s_act and len(s_new) >= 14 and len(s_act) >= 14 and not is_fuzzy_serial_match(s_new, s_act)):
+                    enc = candidate_enc
 
-            # 4. BLE Spatial Proximity Match (within 500m or realistic drone speed)
-            if not enc and transport in ("bt4", "bt5") and pkt_lat is not None and pkt_lon is not None:
+            # 4. Fuzzy MAC Match (accounting for BLE RF single-nibble corruption)
+            if not enc and mac and mac != "UNKNOWN":
                 for active_enc in list(self.active_encounters.values()):
-                    if ("bt" in (active_enc.get("transports") or [])) and active_enc.get("trajectory"):
-                        last_pt = active_enc["trajectory"][-1]
-                        dist = haversine_m(pkt_lat, pkt_lon, last_pt[0], last_pt[1])
-                        dt = abs(ts - active_enc["last_seen"])
-                        if dt <= self.timeout_s and (dist <= 500.0 or dist <= max(1.0, dt) * 35.0):
-                            s_act = sanitize_serial(active_enc.get("serial_number"))
-                            if not s_new or not s_act or is_fuzzy_serial_match(s_new, s_act):
-                                enc = active_enc
-                                break
+                    act_mac = active_enc.get("mac")
+                    if act_mac and act_mac != "UNKNOWN" and is_fuzzy_mac_match(mac, act_mac):
+                        s_act = sanitize_serial(active_enc.get("serial_number"))
+                        if not (s_new and s_act and len(s_new) >= 14 and len(s_act) >= 14 and not is_fuzzy_serial_match(s_new, s_act)):
+                            enc = active_enc
+                            break
 
             if enc:
                 is_timeout = (ts - enc["last_seen"] > self.timeout_s)

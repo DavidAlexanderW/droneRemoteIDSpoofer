@@ -412,6 +412,122 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
             row = conn.execute("SELECT is_active FROM encounters WHERE encounter_id = 'ENC-STALE-001'").fetchone()
             self.assertEqual(row[0], 0)
 
+    def test_no_spatial_proximity_merging(self):
+        """Verifies that two distinct drones flying close together (50m) are NEVER merged without matching entity."""
+        from scanner.db import merge_sequential_encounters, init_encounters_db
+
+        with sqlite3.connect(self.db_path) as conn:
+            init_encounters_db(conn)
+            # Drone 1
+            conn.execute("""
+                INSERT INTO encounters (
+                    encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports, channels,
+                    trajectory_json
+                ) VALUES (
+                    'ENC-DRONE-A', '60:60:1F:00:00:01', '1581F45678901234',
+                    1789980000.0, '2026-09-21T08:40:00+00:00',
+                    1789980010.0, '2026-09-21T08:40:10+00:00',
+                    10.0, 5, 'bt5', 'BLE Ch 37',
+                    '[[47.37000, 8.54000, 450.0, 5.0, 90.0, 1789980000.0]]'
+                );
+            """)
+            # Drone 2: 50 meters away, 5 seconds later, completely different serial & MAC
+            conn.execute("""
+                INSERT INTO encounters (
+                    encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports, channels,
+                    trajectory_json
+                ) VALUES (
+                    'ENC-DRONE-B', '70:70:2F:99:99:99', '1595B11A20400103',
+                    1789980015.0, '2026-09-21T08:40:15+00:00',
+                    1789980025.0, '2026-09-21T08:40:25+00:00',
+                    10.0, 5, 'bt5', 'BLE Ch 38',
+                    '[[47.37040, 8.54040, 452.0, 5.0, 90.0, 1789980015.0]]'
+                );
+            """)
+            conn.commit()
+
+            merged = merge_sequential_encounters(conn, timeout_s=300.0)
+            self.assertEqual(merged, 0, "Distinct drones near each other spatially must NEVER be merged")
+
+            rows = conn.execute("SELECT encounter_id FROM encounters;").fetchall()
+            self.assertEqual(len(rows), 2)
+
+    def test_fuzzy_mac_merging(self):
+        """Verifies that an encounter with a single-nibble RF corruption in the MAC address merges successfully."""
+        from scanner.db import merge_sequential_encounters, init_encounters_db
+
+        with sqlite3.connect(self.db_path) as conn:
+            init_encounters_db(conn)
+            # Packet 1 on clean MAC
+            conn.execute("""
+                INSERT INTO encounters (
+                    encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports, channels
+                ) VALUES (
+                    'ENC-MAC-1', '60:60:1F:AA:BB:01', '1595B11A20400103',
+                    1789980000.0, '2026-09-21T08:40:00+00:00',
+                    1789980010.0, '2026-09-21T08:40:10+00:00',
+                    10.0, 5, 'bt5', 'BLE Ch 37'
+                );
+            """)
+            # Packet 2 on MAC with single bit flip (01 -> 00)
+            conn.execute("""
+                INSERT INTO encounters (
+                    encounter_id, mac, serial_number, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports, channels
+                ) VALUES (
+                    'ENC-MAC-2', '60:60:1F:AA:BB:00', '1595B11A20400103',
+                    1789980015.0, '2026-09-21T08:40:15+00:00',
+                    1789980025.0, '2026-09-21T08:40:25+00:00',
+                    10.0, 6, 'bt5', 'BLE Ch 38'
+                );
+            """)
+            conn.commit()
+
+            merged = merge_sequential_encounters(conn, timeout_s=300.0)
+            self.assertEqual(merged, 1)
+
+            rows = conn.execute("SELECT packet_count, first_seen, last_seen FROM encounters;").fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0], 11)  # 5 + 6
+
+    def test_conflicting_canonical_serials_never_merged(self):
+        """Verifies that two encounters with distinct 16-char serials never merge even with shared operator ID."""
+        from scanner.db import merge_sequential_encounters, init_encounters_db
+
+        with sqlite3.connect(self.db_path) as conn:
+            init_encounters_db(conn)
+            conn.execute("""
+                INSERT INTO encounters (
+                    encounter_id, mac, serial_number, operator_id, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports, channels
+                ) VALUES (
+                    'ENC-SER-1', '60:60:1F:00:00:01', '1581F45678901234', 'CHEhyolaf9zzbdz0',
+                    1789980000.0, '2026-09-21T08:40:00+00:00',
+                    1789980010.0, '2026-09-21T08:40:10+00:00',
+                    10.0, 5, 'bt5', 'BLE Ch 37'
+                );
+            """)
+            conn.execute("""
+                INSERT INTO encounters (
+                    encounter_id, mac, serial_number, operator_id, first_seen, first_seen_iso,
+                    last_seen, last_seen_iso, duration_s, packet_count, transports, channels
+                ) VALUES (
+                    'ENC-SER-2', '60:60:1F:00:00:01', '1595B11A20400103', 'CHEhyolaf9zzbdz0',
+                    1789980015.0, '2026-09-21T08:40:15+00:00',
+                    1789980025.0, '2026-09-21T08:40:25+00:00',
+                    10.0, 5, 'bt5', 'BLE Ch 38'
+                );
+            """)
+            conn.commit()
+
+            merged = merge_sequential_encounters(conn, timeout_s=300.0)
+            self.assertEqual(merged, 0, "Conflicting canonical serials must NEVER be merged")
+            rows = conn.execute("SELECT encounter_id FROM encounters;").fetchall()
+            self.assertEqual(len(rows), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

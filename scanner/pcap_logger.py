@@ -22,6 +22,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, IO
 
+from scanner.timestamp_utils import is_valid_timestamp
+
 logger = logging.getLogger("DailyPcapLogger")
 
 # Standard libpcap Data Link Types (DLT / Linktype)
@@ -363,7 +365,7 @@ class DailyNodePcapLogger:
         if ts is None:
             try:
                 ts_sec = struct.unpack_from("<I", raw_records, 0)[0]
-                if 1700000000 <= ts_sec <= 2000000000:
+                if is_valid_timestamp(ts_sec):
                     ts = float(ts_sec)
                 else:
                     ts = time.time()

@@ -145,11 +145,20 @@ def main():
         if db_path is None:
             db_path = os.path.abspath("rid_detections.db")
 
-    # Pass configuration to FastAPI app via environment variables
+    # Pass configuration to FastAPI app via app.state and environment variables
     os.environ["RID_DB_PATH"] = db_path
     os.environ["RID_JSONL_PATH"] = os.path.abspath(args.log_jsonl)
     os.environ["RID_TIMEOUT_S"] = str(args.timeout)
     os.environ["RID_DASHBOARD_CONFIG_PATH"] = config_path
+
+    try:
+        from scanner.dashboard.app import app
+        app.state.db_path = db_path
+        app.state.jsonl_path = os.path.abspath(args.log_jsonl)
+        app.state.timeout_s = float(args.timeout)
+        app.state.dashboard_config_path = config_path
+    except Exception:
+        pass
 
     title = dash_config.get("title", "Tactical Drone Remote ID Radar")
     c_lat = dash_config.get("center_latitude", 47.3769)

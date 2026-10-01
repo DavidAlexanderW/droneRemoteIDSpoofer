@@ -35,6 +35,7 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 from scanner.parser import ASTM_F3411_SpecParser
+from scanner.timestamp_utils import is_valid_timestamp
 
 REMOTE_ID_UUID_BYTES = b"\xfa\xff"       # 16-bit UUID 0xFFFA in little-endian
 BLE_ADV_ACCESS_ADDR = b"\xd6\xbe\x89\x8e" # Little-endian 0x8E89BED6
@@ -784,7 +785,7 @@ def run_sniffer(
                 else:
                     # Static PCAP replay: use PCAP ts if valid epoch, otherwise fall back to host arrival time
                     ts = ts_sec + (ts_usec / 1e6)
-                    if ts < 1700000000.0 or ts > (now_ts + 86400.0):
+                    if not is_valid_timestamp(ts, ref_now=now_ts, max_skew_s=86400.0):
                         ts = now_ts
 
                 active_mode = hopper_controller.current_mode if hopper_controller else None

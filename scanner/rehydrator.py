@@ -195,3 +195,31 @@ def rehydrate_db_from_jsonl(
     rehydrated_count = len(touched_encounters)
     logger.info(f"[+] Rehydration complete: {rehydrated_count} encounter(s) updated in {db_path}")
     return rehydrated_count
+
+
+rehydrate_database = rehydrate_db_from_jsonl
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Drone Remote ID Database Rehydrator from JSONL logs",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--db-file", type=str, default="rid_detections.db", help="Path to SQLite DB")
+    parser.add_argument("--log-dir", type=str, default=None, help="Directory containing JSONL log files")
+    parser.add_argument("--node-id", type=str, default=None, help="Fallback sensor node ID")
+    parser.add_argument("--central", action="store_true", help="Shortcut for central hub preset (--db-file rid_detections_central.db --log-dir central_logs)")
+
+    args = parser.parse_args()
+
+    target_db = "rid_detections_central.db" if args.central else args.db_file
+    target_dir = "central_logs" if args.central else args.log_dir
+
+    print(f"[*] Starting rehydration: DB={target_db}, log_dir={target_dir}")
+    count = rehydrate_db_from_jsonl(db_path=target_db, log_dir=target_dir, node_id=args.node_id)
+    print(f"[+] Rehydration completed: {count} encounters processed.")
+
+
+if __name__ == "__main__":
+    main()

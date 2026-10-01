@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +33,7 @@ if repo_root not in sys.path:
 
 from scanner.db import (
     get_db_connection as db_get_connection,
+    init_encounters_db,
     reconcile_stale_encounters,
     get_receiver_nodes,
     update_receiver_node_position,
@@ -49,10 +51,24 @@ from scanner.scanner_config import (
     get_default_config_path as get_scanner_config_path,
 )
 
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    """Ensures database schema and migrations are initialized once on server start."""
+    try:
+        db_path = get_db_path()
+        conn = db_get_connection(db_path)
+        init_encounters_db(conn, timeout_s=get_timeout_s())
+        conn.close()
+    except Exception as e:
+        print(f"[*] Dashboard startup DB notice: {e}")
+    yield
+
+
 app = FastAPI(
     title="Tactical Drone Remote ID Airspace Monitor",
     description="Real-time ASTM F3411 Drone Remote ID monitoring, radar mapping, and telemetry analysis API",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS for local development and embedded clients
@@ -74,8 +90,12 @@ async def add_no_cache_headers(request: Request, call_next):
         response.headers["Expires"] = "0"
     return response
 
-# Database, Log, and Config Paths (Configurable dynamically via environment or run_dashboard.py)
+
+# Database, Log, and Config Paths (Configurable dynamically via app.state, environment, or run_dashboard.py)
 def get_db_path() -> str:
+    state_path = getattr(app.state, "db_path", None)
+    if state_path:
+        return state_path
     env_path = os.environ.get("RID_DB_PATH")
     if env_path:
         return env_path
@@ -94,6 +114,9 @@ def get_db_path() -> str:
 
 
 def get_jsonl_path() -> str:
+    state_path = getattr(app.state, "jsonl_path", None)
+    if state_path:
+        return state_path
     env_path = os.environ.get("RID_JSONL_PATH")
     if env_path:
         return env_path
@@ -107,10 +130,16 @@ def get_jsonl_path() -> str:
 
 
 def get_timeout_s() -> float:
+    state_timeout = getattr(app.state, "timeout_s", None)
+    if state_timeout is not None:
+        return float(state_timeout)
     return float(os.environ.get("RID_TIMEOUT_S", "300.0"))
 
 
 def get_dashboard_config_path() -> str:
+    state_cfg = getattr(app.state, "dashboard_config_path", None)
+    if state_cfg:
+        return os.path.abspath(state_cfg)
     env_path = os.environ.get("RID_DASHBOARD_CONFIG_PATH") or os.environ.get("RID_SCANNER_CONFIG_PATH")
     if env_path:
         return os.path.abspath(env_path)

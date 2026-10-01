@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -611,6 +612,36 @@ class TestCentralHub(unittest.TestCase):
             self.assertNotIn("reception_timestamp", zero_rec)
         finally:
             loop.close()
+
+    def test_rehydrator_central_hub_integration(self):
+        """Verifies that rehydrate_database retroactively parses central JSONL logs into SQLite encounters."""
+        from scanner.rehydrator import rehydrate_database
+
+        log_file = os.path.join(self.log_dir, "rid_packets_test_central.jsonl")
+        test_pkt = {
+            "timestamp": 1788800000.0,
+            "node_id": "sensor-central-01",
+            "transport": "wifi",
+            "mac": "60:60:1F:EE:FF:01",
+            "serial_number": "REHYDRATE_CENTRAL_01",
+            "counter": 1,
+            "rssi_dbm": -70,
+            "messages": [
+                {"type": "Basic ID", "id": "REHYDRATE_CENTRAL_01", "id_type": 1},
+                {"type": "Location", "lat": 47.3769, "lon": 8.5417, "geodetic_altitude_m": 450.0},
+            ]
+        }
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps(test_pkt) + "\n")
+
+        count = rehydrate_database(db_path=self.db_path, log_dir=self.log_dir)
+        self.assertGreaterEqual(count, 1)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM encounters WHERE serial_number = 'REHYDRATE_CENTRAL_01'").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["mac"], "60:60:1F:EE:FF:01")
 
 
 if __name__ == "__main__":
