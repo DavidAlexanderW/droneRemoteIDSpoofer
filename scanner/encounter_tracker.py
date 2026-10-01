@@ -24,9 +24,6 @@ from scanner.db import (
     init_encounters_db,
     is_better_operator_id,
     is_better_serial,
-    is_fuzzy_mac_match,
-    is_fuzzy_operator_match,
-    is_fuzzy_serial_match,
     sanitize_operator_id,
     sanitize_serial,
 )
@@ -156,48 +153,24 @@ class EncounterTracker:
             s_new = sanitize_serial(serial)
             op_new = sanitize_operator_id(operator_id)
 
-            # 1. Exact or Fuzzy Serial Match
-            if s_new:
-                for active_enc in list(self.active_encounters.values()):
+            # Match active encounter strictly by exact MAC
+            if mac and mac != "UNKNOWN" and mac in self.active_encounters:
+                enc = self.active_encounters[mac]
+            elif s_new:
+                # Fallback only when MAC is missing/UNKNOWN
+                for active_enc in self.active_encounters.values():
                     s_act = sanitize_serial(active_enc.get("serial_number"))
-                    if s_act and (s_new == s_act or is_fuzzy_serial_match(s_new, s_act)):
+                    if s_act and s_new == s_act:
                         enc = active_enc
                         break
-
-            # 2. Exact or Fuzzy Operator ID Match
-            if not enc and op_new:
-                for active_enc in list(self.active_encounters.values()):
-                    op_act = sanitize_operator_id(active_enc.get("operator_id"))
-                    if op_act and (op_new == op_act or is_fuzzy_operator_match(op_new, op_act)):
-                        s_act = sanitize_serial(active_enc.get("serial_number"))
-                        # Guard against merging distinct drones sharing operator ID
-                        if s_new and s_act and len(s_new) >= 14 and len(s_act) >= 14 and not is_fuzzy_serial_match(s_new, s_act):
-                            continue
-                        enc = active_enc
-                        break
-
-            # 3. Exact MAC Match
-            if not enc and mac and mac != "UNKNOWN" and mac in self.active_encounters:
-                candidate_enc = self.active_encounters[mac]
-                s_act = sanitize_serial(candidate_enc.get("serial_number"))
-                if not (s_new and s_act and len(s_new) >= 14 and len(s_act) >= 14 and not is_fuzzy_serial_match(s_new, s_act)):
-                    enc = candidate_enc
-
-            # 4. Fuzzy MAC Match (accounting for BLE RF single-nibble corruption)
-            if not enc and mac and mac != "UNKNOWN":
-                for active_enc in list(self.active_encounters.values()):
-                    act_mac = active_enc.get("mac")
-                    if act_mac and act_mac != "UNKNOWN" and is_fuzzy_mac_match(mac, act_mac):
-                        s_act = sanitize_serial(active_enc.get("serial_number"))
-                        if not (s_new and s_act and len(s_new) >= 14 and len(s_act) >= 14 and not is_fuzzy_serial_match(s_new, s_act)):
-                            enc = active_enc
-                            break
 
             if enc:
                 is_timeout = (ts - enc["last_seen"] > self.timeout_s)
                 # Only treat as major backward time jump if delta > 60s
                 is_backward_jump = (enc["first_seen"] - ts > 60.0)
-                if is_timeout or is_backward_jump:
+                pkt_eid = packet.get("encounter_id")
+                is_id_mismatch = bool(pkt_eid and enc.get("encounter_id") and pkt_eid != enc.get("encounter_id"))
+                if is_timeout or is_backward_jump or is_id_mismatch:
                     # Finalize old encounter
                     enc["is_active"] = 0
                     self._persist_encounter(enc)
@@ -256,77 +229,8 @@ class EncounterTracker:
                 }
                 primary_key = mac if (mac and mac != "UNKNOWN") else encounter_id
                 self.active_encounters[primary_key] = enc
-
-            # If MAC is valid, ensure active_encounters indexes this MAC
-            if mac and mac != "UNKNOWN":
-                if mac in self.active_encounters and self.active_encounters[mac] is not enc:
-                    # Merge previous active encounter tracking this MAC into enc
-                    other_enc = self.active_encounters[mac]
-                    enc["packet_count"] += other_enc.get("packet_count", 0)
-                    enc["first_seen"] = min(enc["first_seen"], other_enc["first_seen"])
-                    enc["last_seen"] = max(enc["last_seen"], other_enc["last_seen"])
-                    enc["duration_s"] = round(enc["last_seen"] - enc["first_seen"], 2)
-                    enc["transports"].update(other_enc.get("transports", set()))
-                    enc["channels"].update(other_enc.get("channels", set()))
-                    enc["wifi_rates"].update(other_enc.get("wifi_rates", set()))
-
-                    # Merge PHY rate counts
-                    if "rate_counts" in other_enc and other_enc["rate_counts"]:
-                        if "rate_counts" not in enc:
-                            enc["rate_counts"] = {}
-                        for desc, info in other_enc["rate_counts"].items():
-                            if desc not in enc["rate_counts"]:
-                                enc["rate_counts"][desc] = dict(info)
-                            else:
-                                enc["rate_counts"][desc]["count"] += info.get("count", 0)
-
-                    # Merge running aggregates
-                    if other_enc.get("min_rssi") is not None:
-                        enc["min_rssi"] = min(enc["min_rssi"], other_enc["min_rssi"]) if enc["min_rssi"] is not None else other_enc["min_rssi"]
-                    if other_enc.get("max_rssi") is not None:
-                        enc["max_rssi"] = max(enc["max_rssi"], other_enc["max_rssi"]) if enc["max_rssi"] is not None else other_enc["max_rssi"]
-                    enc["rssi_sum"] += other_enc.get("rssi_sum", 0.0)
-                    enc["rssi_count"] += other_enc.get("rssi_count", 0)
-                    if other_enc.get("last_rssi") is not None:
-                        enc["last_rssi"] = other_enc["last_rssi"]
-
-                    if other_enc.get("min_alt") is not None:
-                        enc["min_alt"] = min(enc["min_alt"], other_enc["min_alt"]) if enc["min_alt"] is not None else other_enc["min_alt"]
-                    if other_enc.get("max_alt") is not None:
-                        enc["max_alt"] = max(enc["max_alt"], other_enc["max_alt"]) if enc["max_alt"] is not None else other_enc["max_alt"]
-
-                    if other_enc.get("min_height") is not None:
-                        enc["min_height"] = min(enc["min_height"], other_enc["min_height"]) if enc["min_height"] is not None else other_enc["min_height"]
-                    if other_enc.get("max_height") is not None:
-                        enc["max_height"] = max(enc["max_height"], other_enc["max_height"]) if enc["max_height"] is not None else other_enc["max_height"]
-
-                    if other_enc.get("min_pressure_alt") is not None:
-                        enc["min_pressure_alt"] = min(enc["min_pressure_alt"], other_enc["min_pressure_alt"]) if enc["min_pressure_alt"] is not None else other_enc["min_pressure_alt"]
-                    if other_enc.get("max_pressure_alt") is not None:
-                        enc["max_pressure_alt"] = max(enc["max_pressure_alt"], other_enc["max_pressure_alt"]) if enc["max_pressure_alt"] is not None else other_enc["max_pressure_alt"]
-
-                    if other_enc.get("max_speed") is not None:
-                        enc["max_speed"] = max(enc["max_speed"], other_enc["max_speed"]) if enc["max_speed"] is not None else other_enc["max_speed"]
-                    if other_enc.get("max_vert_speed") is not None:
-                        enc["max_vert_speed"] = max(enc["max_vert_speed"], other_enc["max_vert_speed"]) if enc["max_vert_speed"] is not None else other_enc["max_vert_speed"]
-
-                    enc["trajectory"].extend(other_enc.get("trajectory", []))
-                    self._remove_active(other_enc)
-                    if self.db_path:
-                        conn_del = None
-                        try:
-                            conn_del = sqlite3.connect(self.db_path, timeout=30.0)
-                            conn_del.execute("DELETE FROM encounters WHERE encounter_id = ?;", (other_enc["encounter_id"],))
-                            conn_del.commit()
-                        except Exception:
-                            pass
-                        finally:
-                            if conn_del:
-                                try:
-                                    conn_del.close()
-                                except Exception:
-                                    pass
-                self.active_encounters[mac] = enc
+                if mac and mac != "UNKNOWN":
+                    self.active_encounters[mac] = enc
 
             if serial and is_better_serial(serial, enc.get("serial_number")):
                 enc["serial_number"] = sanitize_serial(serial) or serial

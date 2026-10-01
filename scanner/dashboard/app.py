@@ -45,6 +45,7 @@ from scanner.dashboard.dashboard_config import (
     get_default_dashboard_config_path,
 )
 from scanner.parser import decode_astm_message
+from scanner.timestamp_utils import resolve_reception_timestamp
 from scanner.scanner_config import (
     load_scanner_config,
     save_scanner_config,
@@ -573,23 +574,28 @@ def get_encounter_sample_packets(
                             continue
                         try:
                             rec = json.loads(line)
-                            # Match by serial/MAC + time window (resilient to encounter merging)
+                            rec_eid = rec.get("encounter_id")
                             rec_serial = rec.get("serial") or rec.get("serial_number")
                             rec_mac = rec.get("mac")
-                            rec_ts = rec.get("timestamp")
+                            rec_ts = resolve_reception_timestamp(rec)
+
                             matches = False
-                            if enc_serial and rec_serial and rec_serial == enc_serial:
+                            if rec_eid and rec_eid == encounter_id:
                                 matches = True
-                            elif enc_mac and enc_mac != "UNKNOWN" and rec_mac and rec_mac == enc_mac:
+                            elif enc_mac and enc_mac != "UNKNOWN" and rec_mac and rec_mac != "UNKNOWN":
+                                if rec_mac.strip().upper() == enc_mac.strip().upper():
+                                    matches = True
+                            elif enc_serial and rec_serial and rec_serial.strip().upper() == enc_serial.strip().upper():
                                 matches = True
-                            if not matches and rec.get("encounter_id") == encounter_id:
-                                matches = True
-                            if matches and rec_ts is not None and enc_first_seen is not None and enc_last_seen is not None:
+
+                            # If matched by MAC/serial rather than exact encounter_id, verify time window
+                            if matches and rec_eid != encounter_id and rec_ts > 0 and enc_first_seen is not None and enc_last_seen is not None:
                                 try:
                                     if not (enc_first_seen - 2.0 <= float(rec_ts) <= enc_last_seen + 2.0):
                                         matches = False
                                 except (ValueError, TypeError):
                                     pass
+
                             if matches:
                                 decoded_blocks = []
                                 if decode_astm_message:
@@ -788,6 +794,7 @@ def get_encounter_packets(encounter_id: str):
     log_candidates = get_all_jsonl_log_candidates()
 
     found_in_jsonl = False
+    seen_packet_keys = set()
     for path in log_candidates:
         if path and os.path.exists(path):
             try:
@@ -798,24 +805,39 @@ def get_encounter_packets(encounter_id: str):
                             continue
                         try:
                             rec = json.loads(line)
-                            # Match by serial/MAC + time window (resilient to encounter merging)
+                            rec_eid = rec.get("encounter_id")
                             rec_serial = rec.get("serial") or rec.get("serial_number")
                             rec_mac = rec.get("mac")
-                            rec_ts = rec.get("timestamp")
+                            rec_ts = resolve_reception_timestamp(rec)
+
                             matches = False
-                            if enc_serial and rec_serial and rec_serial == enc_serial:
+                            if rec_eid and rec_eid == encounter_id:
                                 matches = True
-                            elif enc_mac and enc_mac != "UNKNOWN" and rec_mac and rec_mac == enc_mac:
+                            elif enc_mac and enc_mac != "UNKNOWN" and rec_mac and rec_mac != "UNKNOWN":
+                                if rec_mac.strip().upper() == enc_mac.strip().upper():
+                                    matches = True
+                            elif enc_serial and rec_serial and rec_serial.strip().upper() == enc_serial.strip().upper():
                                 matches = True
-                            if not matches and rec.get("encounter_id") == encounter_id:
-                                matches = True
-                            if matches and rec_ts is not None and enc_first_seen is not None and enc_last_seen is not None:
+
+                            # If matched by MAC/serial rather than exact encounter_id, verify time window
+                            if matches and rec_eid != encounter_id and rec_ts > 0 and enc_first_seen is not None and enc_last_seen is not None:
                                 try:
                                     if not (enc_first_seen - 2.0 <= float(rec_ts) <= enc_last_seen + 2.0):
                                         matches = False
                                 except (ValueError, TypeError):
                                     pass
+
                             if matches:
+                                # Deduplicate identical packets logged across files/nodes
+                                pkt_key = (
+                                    rec_mac.strip().upper() if rec_mac else "",
+                                    round(rec_ts, 3) if rec_ts else 0.0,
+                                    rec.get("counter") if rec.get("counter") is not None else rec.get("msg_counter", 0),
+                                )
+                                if pkt_key in seen_packet_keys:
+                                    continue
+                                seen_packet_keys.add(pkt_key)
+
                                 # Decode base64 message blocks if present
                                 decoded_blocks = []
                                 if decode_astm_message:
@@ -839,13 +861,14 @@ def get_encounter_packets(encounter_id: str):
                                     pkt_rssi = None
 
                                 rec_iso = rec.get("timestamp_iso")
-                                if not rec_iso and rec.get("timestamp"):
+                                if not rec_iso and rec_ts > 0:
                                     try:
-                                        rec_iso = datetime.fromtimestamp(float(rec["timestamp"]), timezone.utc).isoformat()
+                                        rec_iso = datetime.fromtimestamp(rec_ts, timezone.utc).isoformat()
                                     except Exception:
                                         rec_iso = None
 
                                 packets.append({
+                                    "_sort_ts": rec_ts if rec_ts > 0 else 0.0,
                                     "index": len(packets) + 1,
                                     "time_offset_ms": rec.get("time_offset_ms", 0),
                                     "timestamp_iso": rec_iso,
@@ -874,6 +897,12 @@ def get_encounter_packets(encounter_id: str):
                 pass
 
     if found_in_jsonl and packets:
+        # Sort chronologically by physical timestamp
+        packets.sort(key=lambda p: p.get("_sort_ts", 0.0))
+        for idx, p in enumerate(packets):
+            p["index"] = idx + 1
+            p.pop("_sort_ts", None)
+
         # Normalize relative time_offset_ms so the flight encounter starts strictly at 0 ms
         first_raw_offset = packets[0].get("time_offset_ms")
         first_iso = packets[0].get("timestamp_iso")

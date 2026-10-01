@@ -455,7 +455,7 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
             self.assertEqual(len(rows), 2)
 
     def test_fuzzy_mac_merging(self):
-        """Verifies that an encounter with a single-nibble RF corruption in the MAC address merges successfully."""
+        """Verifies that separate encounters with different MAC addresses are preserved discrete (no heuristic merging)."""
         from scanner.db import merge_sequential_encounters, init_encounters_db
 
         with sqlite3.connect(self.db_path) as conn:
@@ -487,11 +487,10 @@ class TestDatabaseAndReplayLogging(unittest.TestCase):
             conn.commit()
 
             merged = merge_sequential_encounters(conn, timeout_s=300.0)
-            self.assertEqual(merged, 1)
+            self.assertEqual(merged, 0)
 
-            rows = conn.execute("SELECT packet_count, first_seen, last_seen FROM encounters;").fetchall()
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0][0], 11)  # 5 + 6
+            rows = conn.execute("SELECT encounter_id, packet_count FROM encounters;").fetchall()
+            self.assertEqual(len(rows), 2)
 
     def test_conflicting_canonical_serials_never_merged(self):
         """Verifies that two encounters with distinct 16-char serials never merge even with shared operator ID."""

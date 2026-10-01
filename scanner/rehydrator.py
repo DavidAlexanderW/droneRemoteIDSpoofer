@@ -15,7 +15,6 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 
-from scanner.db import merge_sequential_encounters
 from scanner.encounter_tracker import EncounterTracker
 from scanner.parser import decode_astm_message, parse_astm_payload
 from scanner.scanner_config import load_scanner_config
@@ -28,6 +27,7 @@ def rehydrate_db_from_jsonl(
     db_path: str = "rid_detections.db",
     log_dir: Optional[str] = None,
     node_id: Optional[str] = None,
+    reset_db: bool = False,
 ) -> int:
     """
     Retroactively parses all raw base64 ASTM messages in JSONL log files (rid_packets_*.jsonl)
@@ -117,6 +117,22 @@ def rehydrate_db_from_jsonl(
     # Sort all packets chronologically so encounters build accurately over time
     all_packets.sort(key=_resolve_ts)
 
+    if reset_db and db_path and os.path.exists(db_path):
+        conn_rst = None
+        try:
+            conn_rst = sqlite3.connect(db_path, timeout=30.0)
+            conn_rst.execute("DELETE FROM encounters;")
+            conn_rst.commit()
+            logger.info(f"[*] Cleared existing encounters in {db_path} prior to rehydration (--reset).")
+        except Exception as e:
+            logger.warning(f"[-] Could not clear encounters prior to rehydration: {e}")
+        finally:
+            if conn_rst:
+                try:
+                    conn_rst.close()
+                except Exception:
+                    pass
+
     try:
         tracker = EncounterTracker(db_path=db_path, persist_interval_s=0.0, default_node_id=node_id)
     except sqlite3.OperationalError as e:
@@ -177,21 +193,6 @@ def rehydrate_db_from_jsonl(
 
     tracker.finalize_all()
 
-    # Consolidate any remaining split encounters across the entire database
-    if merge_sequential_encounters and db_path:
-        conn_m = None
-        try:
-            conn_m = sqlite3.connect(db_path, timeout=30.0)
-            merge_sequential_encounters(conn_m, timeout_s=tracker.timeout_s)
-        except Exception as e:
-            logger.debug(f"Post-rehydration merge exception: {e}")
-        finally:
-            if conn_m:
-                try:
-                    conn_m.close()
-                except Exception:
-                    pass
-
     rehydrated_count = len(touched_encounters)
     logger.info(f"[+] Rehydration complete: {rehydrated_count} encounter(s) updated in {db_path}")
     return rehydrated_count
@@ -210,14 +211,15 @@ def main():
     parser.add_argument("--log-dir", type=str, default=None, help="Directory containing JSONL log files")
     parser.add_argument("--node-id", type=str, default=None, help="Fallback sensor node ID")
     parser.add_argument("--central", action="store_true", help="Shortcut for central hub preset (--db-file rid_detections_central.db --log-dir central_logs)")
+    parser.add_argument("--reset", action="store_true", help="Clear existing encounters in database before rehydrating from JSONL")
 
     args = parser.parse_args()
 
     target_db = "rid_detections_central.db" if args.central else args.db_file
     target_dir = "central_logs" if args.central else args.log_dir
 
-    print(f"[*] Starting rehydration: DB={target_db}, log_dir={target_dir}")
-    count = rehydrate_db_from_jsonl(db_path=target_db, log_dir=target_dir, node_id=args.node_id)
+    print(f"[*] Starting rehydration: DB={target_db}, log_dir={target_dir}, reset={args.reset}")
+    count = rehydrate_db_from_jsonl(db_path=target_db, log_dir=target_dir, node_id=args.node_id, reset_db=args.reset)
     print(f"[+] Rehydration completed: {count} encounters processed.")
 
 
