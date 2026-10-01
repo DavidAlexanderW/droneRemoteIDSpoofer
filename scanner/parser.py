@@ -279,6 +279,8 @@ def decode_astm_message(block: bytes) -> Optional[Dict[str, Any]]:
             b23 = block[23]
             ts_acc = b23 & 0x0F
 
+            chosen_alt = g_alt_m if g_alt_m is not None else p_alt_m
+
             result.update({
                 "status": status,
                 "status_name": STATUS_NAMES.get(status, f"Reserved ({status})"),
@@ -291,7 +293,7 @@ def decode_astm_message(block: bytes) -> Optional[Dict[str, Any]]:
                 "lon": lon,
                 "pressure_altitude_m": round(p_alt_m, 2) if p_alt_m is not None else None,
                 "geodetic_altitude_m": round(g_alt_m, 2) if g_alt_m is not None else None,
-                "alt": round(g_alt_m or p_alt_m or 0.0, 2) if (g_alt_m or p_alt_m) else None,
+                "alt": round(chosen_alt, 2) if chosen_alt is not None else None,
                 "height_m": round(height_m, 2) if height_m is not None else None,
                 "height_type": height_type,
                 "height_type_name": HEIGHT_TYPE_NAMES.get(height_type, "Unknown"),

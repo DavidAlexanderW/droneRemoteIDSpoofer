@@ -365,16 +365,18 @@ def main():
                 backlog_patterns.append(os.path.join(repo_root, "rid_packets*.jsonl"))
                 backlog_patterns.append(os.path.join(repo_root, "capture*.jsonl"))
 
+            worker_holder: List[Any] = [None]
+
             def on_position_updated_cb(lat: float, lon: float, alt: Optional[float] = None):
-                if (
-                    "logger_worker" in locals()
-                    and logger_worker
-                    and logger_worker.encounter_tracker
-                    and logger_worker.encounter_tracker.db_path
-                    and args.node_id
-                ):
+                target_db = None
+                if worker_holder[0] and worker_holder[0].encounter_tracker:
+                    target_db = worker_holder[0].encounter_tracker.db_path
+                elif args.db_file and os.path.exists(args.db_file):
+                    target_db = args.db_file
+
+                if target_db and args.node_id:
                     try:
-                        conn_up = sqlite3.connect(logger_worker.encounter_tracker.db_path, timeout=10.0)
+                        conn_up = sqlite3.connect(target_db, timeout=10.0)
                         update_receiver_node_position(conn_up, args.node_id, lat, lon, alt)
                         conn_up.close()
                     except Exception as e:
@@ -479,6 +481,8 @@ def main():
         log_pcap=log_pcap_to_use,
         pcap_dir=pcap_dir_to_use,
     )
+    if is_hub_mode:
+        worker_holder[0] = logger_worker
 
     threads: List[threading.Thread] = []
     hopper_thread: Optional[WifiChannelHopperThread] = None

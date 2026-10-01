@@ -188,7 +188,9 @@ class WifiChannelHopperThread(threading.Thread):
         success = self._set_channel(target_channel)
         if success:
             self.current_channel = target_channel
-        self.channel_state.finish_switch(target_channel)
+            self.channel_state.finish_switch(target_channel)
+        else:
+            self.channel_state.finish_switch(self.current_channel)
 
         if not self.running:
             return

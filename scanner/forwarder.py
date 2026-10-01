@@ -25,9 +25,12 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 # Ensure repository root is in sys.path for direct script execution
-_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_scanner_dir = os.path.abspath(os.path.dirname(__file__))
+_repo_root = os.path.abspath(os.path.join(_scanner_dir, ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
+if _scanner_dir not in sys.path:
+    sys.path.insert(0, _scanner_dir)
 
 from scanner.parser import decode_astm_message, parse_astm_payload
 from scanner.scanner_config import save_scanner_config, get_default_config_path

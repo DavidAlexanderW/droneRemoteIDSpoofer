@@ -8,6 +8,7 @@ Maintains running aggregates for RF and flight telemetry to optimize memory.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+from scanner.parser import decode_astm_message, parse_astm_payload
 
 from scanner.db import (
     haversine_m,
@@ -86,16 +89,13 @@ class EncounterTracker:
         # Resolve messages upfront: decode messages_b64 if messages list is empty
         msgs_to_process = list(packet.get("messages") or [])
         if not msgs_to_process and packet.get("messages_b64"):
-            import base64
-            from scanner.parser import decode_astm_message, parse_astm_payload
             for b64_str in packet["messages_b64"]:
                 try:
                     raw_b = base64.b64decode(b64_str)
-                    if parse_astm_payload:
-                        parsed, _ = parse_astm_payload(raw_b)
-                        if parsed:
-                            msgs_to_process.extend(parsed)
-                    elif decode_astm_message:
+                    parsed, _ = parse_astm_payload(raw_b)
+                    if parsed:
+                        msgs_to_process.extend(parsed)
+                    else:
                         dm = decode_astm_message(raw_b)
                         if dm:
                             msgs_to_process.append(dm)
@@ -265,6 +265,16 @@ class EncounterTracker:
                     enc["transports"].update(other_enc.get("transports", set()))
                     enc["channels"].update(other_enc.get("channels", set()))
                     enc["wifi_rates"].update(other_enc.get("wifi_rates", set()))
+
+                    # Merge PHY rate counts
+                    if "rate_counts" in other_enc and other_enc["rate_counts"]:
+                        if "rate_counts" not in enc:
+                            enc["rate_counts"] = {}
+                        for desc, info in other_enc["rate_counts"].items():
+                            if desc not in enc["rate_counts"]:
+                                enc["rate_counts"][desc] = dict(info)
+                            else:
+                                enc["rate_counts"][desc]["count"] += info.get("count", 0)
 
                     # Merge running aggregates
                     if other_enc.get("min_rssi") is not None:

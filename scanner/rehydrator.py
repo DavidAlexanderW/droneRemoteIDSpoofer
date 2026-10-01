@@ -131,6 +131,7 @@ def rehydrate_db_from_jsonl(
             return 0
         raise
 
+    touched_encounters = set()
     for p in all_packets:
         decoded_msgs = p.get("messages", [])
         if not decoded_msgs and p.get("messages_b64"):
@@ -170,7 +171,9 @@ def rehydrate_db_from_jsonl(
             "encounter_id": p.get("encounter_id"),
             "messages": decoded_msgs,
         }
-        tracker.update_with_packet(pkt_obj)
+        eid = tracker.update_with_packet(pkt_obj)
+        if eid:
+            touched_encounters.add(eid)
 
     tracker.finalize_all()
 
@@ -189,19 +192,6 @@ def rehydrate_db_from_jsonl(
                 except Exception:
                     pass
 
-    rehydrated_count = 0
-    conn_cnt = None
-    try:
-        conn_cnt = sqlite3.connect(db_path, timeout=30.0)
-        rehydrated_count = conn_cnt.execute("SELECT COUNT(*) FROM encounters;").fetchone()[0]
-    except Exception:
-        pass
-    finally:
-        if conn_cnt:
-            try:
-                conn_cnt.close()
-            except Exception:
-                pass
-
+    rehydrated_count = len(touched_encounters)
     logger.info(f"[+] Rehydration complete: {rehydrated_count} encounter(s) updated in {db_path}")
     return rehydrated_count

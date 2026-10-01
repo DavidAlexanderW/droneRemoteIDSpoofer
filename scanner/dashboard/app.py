@@ -294,46 +294,49 @@ def get_stats():
     """Returns global airspace metrics, dashboard viewport parameters, and transport breakdowns."""
     timeout_s = get_timeout_s()
     conn = get_db_connection()
-    reconcile_stale_encounters(conn, timeout_s)
+    try:
+        reconcile_stale_encounters(conn, timeout_s)
 
-    total_enc = conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0]
-    active_enc = conn.execute("SELECT COUNT(*) FROM encounters WHERE is_active = 1").fetchone()[0]
-    total_pkts = conn.execute("SELECT SUM(packet_count) FROM encounters").fetchone()[0] or 0
-    unique_macs = conn.execute("SELECT COUNT(DISTINCT mac) FROM encounters").fetchone()[0]
-    unique_serials = conn.execute("SELECT COUNT(DISTINCT serial_number) FROM encounters WHERE serial_number IS NOT NULL").fetchone()[0]
-    unique_ops = conn.execute("SELECT COUNT(DISTINCT operator_id) FROM encounters WHERE operator_id IS NOT NULL").fetchone()[0]
+        total_enc = conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0]
+        active_enc = conn.execute("SELECT COUNT(*) FROM encounters WHERE is_active = 1").fetchone()[0]
+        total_pkts = conn.execute("SELECT SUM(packet_count) FROM encounters").fetchone()[0] or 0
+        unique_macs = conn.execute("SELECT COUNT(DISTINCT mac) FROM encounters").fetchone()[0]
+        unique_serials = conn.execute("SELECT COUNT(DISTINCT serial_number) FROM encounters WHERE serial_number IS NOT NULL").fetchone()[0]
+        unique_ops = conn.execute("SELECT COUNT(DISTINCT operator_id) FROM encounters WHERE operator_id IS NOT NULL").fetchone()[0]
 
-    min_time_iso = conn.execute("SELECT MIN(first_seen_iso) FROM encounters").fetchone()[0]
-    max_time_iso = conn.execute("SELECT MAX(last_seen_iso) FROM encounters").fetchone()[0]
+        min_time_iso = conn.execute("SELECT MIN(first_seen_iso) FROM encounters").fetchone()[0]
+        max_time_iso = conn.execute("SELECT MAX(last_seen_iso) FROM encounters").fetchone()[0]
 
-    # Transport breakdown count
-    transports_map = {"bt4": 0, "bt5": 0, "wifi": 0, "nan": 0}
-    rows = conn.execute("SELECT transports, packet_count FROM encounters").fetchall()
-    for r in rows:
-        t_str = r["transports"] or ""
-        pkts = r["packet_count"] or 1
-        for t in t_str.split(","):
-            t = t.strip().lower()
-            if t in transports_map:
-                transports_map[t] += pkts
+        # Transport breakdown count
+        transports_map = {"bt4": 0, "bt5": 0, "wifi": 0, "nan": 0}
+        rows = conn.execute("SELECT transports, packet_count FROM encounters").fetchall()
+        for r in rows:
+            t_str = r["transports"] or ""
+            pkts = r["packet_count"] or 1
+            for t in t_str.split(","):
+                t = t.strip().lower()
+                if t in transports_map:
+                    transports_map[t] += pkts
 
-    dash_config = get_current_dashboard_config()
+        dash_config = get_current_dashboard_config()
 
-    return {
-        "total_encounters": total_enc,
-        "active_encounters": active_enc,
-        "closed_encounters": max(0, total_enc - active_enc),
-        "total_packets": total_pkts,
-        "unique_macs": unique_macs,
-        "unique_serials": unique_serials,
-        "unique_operators": unique_ops,
-        "first_seen_iso": min_time_iso,
-        "last_seen_iso": max_time_iso,
-        "transports_breakdown": transports_map,
-        "dashboard": dash_config,
-        "scanner": dash_config,
-        "server_time_iso": datetime.now(timezone.utc).isoformat(),
-    }
+        return {
+            "total_encounters": total_enc,
+            "active_encounters": active_enc,
+            "closed_encounters": max(0, total_enc - active_enc),
+            "total_packets": total_pkts,
+            "unique_macs": unique_macs,
+            "unique_serials": unique_serials,
+            "unique_operators": unique_ops,
+            "first_seen_iso": min_time_iso,
+            "last_seen_iso": max_time_iso,
+            "transports_breakdown": transports_map,
+            "dashboard": dash_config,
+            "scanner": dash_config,
+            "server_time_iso": datetime.now(timezone.utc).isoformat(),
+        }
+    finally:
+        conn.close()
 
 
 @app.get("/api/encounters")
@@ -350,124 +353,127 @@ def get_encounters(
     """Returns a list of flight encounters with summary telemetry for the left-hand feed."""
     timeout_s = get_timeout_s()
     conn = get_db_connection()
-    reconcile_stale_encounters(conn, timeout_s)
+    try:
+        reconcile_stale_encounters(conn, timeout_s)
 
-    query = "SELECT * FROM encounters WHERE 1=1"
-    params = []
+        query = "SELECT * FROM encounters WHERE 1=1"
+        params = []
 
-    if active_only:
-        query += " AND is_active = 1"
-    if search:
-        query += " AND (mac LIKE ? OR serial_number LIKE ? OR operator_id LIKE ? OR encounter_id LIKE ?)"
-        s = f"%{search}%"
-        params.extend([s, s, s, s])
-    if mac:
-        query += " AND mac LIKE ?"
-        params.append(f"%{mac}%")
-    if serial:
-        query += " AND serial_number LIKE ?"
-        params.append(f"%{serial}%")
-    if operator:
-        query += " AND operator_id LIKE ?"
-        params.append(f"%{operator}%")
-    if node_id:
-        query += " AND node_id LIKE ?"
-        params.append(f"%{node_id}%")
-    if since:
-        try:
-            dt = datetime.fromisoformat(since).timestamp()
-            query += " AND first_seen >= ?"
-            params.append(dt)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid ISO format for 'since'")
+        if active_only:
+            query += " AND is_active = 1"
+        if search:
+            query += " AND (mac LIKE ? OR serial_number LIKE ? OR operator_id LIKE ? OR encounter_id LIKE ?)"
+            s = f"%{search}%"
+            params.extend([s, s, s, s])
+        if mac:
+            query += " AND mac LIKE ?"
+            params.append(f"%{mac}%")
+        if serial:
+            query += " AND serial_number LIKE ?"
+            params.append(f"%{serial}%")
+        if operator:
+            query += " AND operator_id LIKE ?"
+            params.append(f"%{operator}%")
+        if node_id:
+            query += " AND node_id LIKE ?"
+            params.append(f"%{node_id}%")
+        if since:
+            try:
+                dt = datetime.fromisoformat(since).timestamp()
+                query += " AND first_seen >= ?"
+                params.append(dt)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid ISO format for 'since'")
 
-    query += " ORDER BY last_seen DESC LIMIT ?"
-    params.append(limit)
+        query += " ORDER BY last_seen DESC LIMIT ?"
+        params.append(limit)
 
-    rows = conn.execute(query, params).fetchall()
-    now = time.time()
+        rows = conn.execute(query, params).fetchall()
+        now = time.time()
 
-    encounters = []
-    for r in rows:
-        is_active = bool(r["is_active"] and (now - r["last_seen"] <= timeout_s))
-        
-        # Extract latest point from trajectory for real-time map marker positioning
-        traj = json.loads(r["trajectory_json"]) if r["trajectory_json"] else []
-        latest_point = traj[-1] if traj else None # [lat, lon, alt, speed, heading, ts]
+        encounters = []
+        for r in rows:
+            is_active = bool(r["is_active"] and (now - r["last_seen"] <= timeout_s))
+            
+            # Extract latest point from trajectory for real-time map marker positioning
+            traj = json.loads(r["trajectory_json"]) if r["trajectory_json"] else []
+            latest_point = traj[-1] if traj else None # [lat, lon, alt, speed, heading, ts]
 
-        d_make = r["drone_make"] if "drone_make" in r.keys() else None
-        d_model = r["drone_model"] if "drone_model" in r.keys() else None
-        s_num = r["serial_number"]
-        drone_info = infer_drone_model(s_num) if s_num else {}
-        if (not d_make or not d_model or "Unspecified" in (d_model or "")) and drone_info.get("is_inferred"):
-            if drone_info.get("make"):
-                d_make = drone_info.get("make")
-            if drone_info.get("model"):
-                d_model = drone_info.get("model")
-        if d_make:
-            drone_info["make"] = d_make
-        if d_model:
-            drone_info["model"] = d_model
+            d_make = r["drone_make"] if "drone_make" in r.keys() else None
+            d_model = r["drone_model"] if "drone_model" in r.keys() else None
+            s_num = r["serial_number"]
+            drone_info = infer_drone_model(s_num) if s_num else {}
+            if (not d_make or not d_model or "Unspecified" in (d_model or "")) and drone_info.get("is_inferred"):
+                if drone_info.get("make"):
+                    d_make = drone_info.get("make")
+                if drone_info.get("model"):
+                    d_model = drone_info.get("model")
+            if d_make:
+                drone_info["make"] = d_make
+            if d_model:
+                drone_info["model"] = d_model
 
-        encounters.append({
-            "encounter_id": r["encounter_id"],
-            "mac": r["mac"],
-            "serial_number": r["serial_number"],
-            "node_id": r["node_id"] if "node_id" in r.keys() else None,
-            "drone_make": d_make,
-            "drone_model": d_model,
-            "drone_info": drone_info,
-            "operator_id": r["operator_id"],
-            "self_id_desc": r["self_id_desc"],
-            "first_seen": r["first_seen"],
-            "first_seen_iso": r["first_seen_iso"],
-            "last_seen": r["last_seen"],
-            "last_seen_iso": r["last_seen_iso"],
-            "duration_s": r["duration_s"],
-            "packet_count": r["packet_count"],
-            "transports": r["transports"].split(",") if r["transports"] else [],
-            "channels": r["channels"].split(",") if r["channels"] else [],
-            "wifi_rates": r["wifi_rates"].split(", ") if ("wifi_rates" in r.keys() and r["wifi_rates"]) else [],
-            "dominant_rate_mbps": r["dominant_rate_mbps"] if "dominant_rate_mbps" in r.keys() else None,
-            "dominant_modulation": r["dominant_modulation"] if "dominant_modulation" in r.keys() else None,
-            "min_rate_mbps": r["min_rate_mbps"] if "min_rate_mbps" in r.keys() else None,
-            "max_rate_mbps": r["max_rate_mbps"] if "max_rate_mbps" in r.keys() else None,
-            "phy_rate_distribution": json.loads(r["phy_rate_dist_json"]) if ("phy_rate_dist_json" in r.keys() and r["phy_rate_dist_json"]) else {},
-            "min_rssi_dbm": r["min_rssi_dbm"],
-            "max_rssi_dbm": r["max_rssi_dbm"],
-            "avg_rssi_dbm": r["avg_rssi_dbm"],
-            "min_alt_m": r["min_alt_m"],
-            "max_alt_m": r["max_alt_m"],
-            "min_height_m": r["min_height_m"] if "min_height_m" in r.keys() else None,
-            "max_height_m": r["max_height_m"] if "max_height_m" in r.keys() else None,
-            "min_pressure_alt_m": r["min_pressure_alt_m"] if "min_pressure_alt_m" in r.keys() else None,
-            "max_pressure_alt_m": r["max_pressure_alt_m"] if "max_pressure_alt_m" in r.keys() else None,
-            "max_speed_mps": r["max_speed_mps"],
-            "pilot_lat": r["pilot_lat"],
-            "pilot_lon": r["pilot_lon"],
-            "pilot_alt_m": r["pilot_alt_m"],
-            "area_ceil_m": r["area_ceil_m"] if "area_ceil_m" in r.keys() else None,
-            "area_floor_m": r["area_floor_m"] if "area_floor_m" in r.keys() else None,
-            "is_active": is_active,
-            "latest_position": {
-                "lat": latest_point[0],
-                "lon": latest_point[1],
-                "alt_m": latest_point[2],
-                "speed_mps": latest_point[3],
-                "heading_deg": latest_point[4],
-                "timestamp": latest_point[5],
-                "height_m": latest_point[6] if len(latest_point) > 6 else None,
-                "height_type": latest_point[7] if len(latest_point) > 7 else None,
-                "pressure_alt_m": latest_point[8] if len(latest_point) > 8 else None,
-                "vertical_speed_mps": latest_point[9] if len(latest_point) > 9 else None,
-                "rssi_dbm": latest_point[10] if len(latest_point) > 10 else None,
-                "counter": latest_point[11] if len(latest_point) > 11 else None,
-            } if latest_point else None,
-            "trajectory": traj,
-            "trajectory_point_count": len(traj),
-        })
+            encounters.append({
+                "encounter_id": r["encounter_id"],
+                "mac": r["mac"],
+                "serial_number": r["serial_number"],
+                "node_id": r["node_id"] if "node_id" in r.keys() else None,
+                "drone_make": d_make,
+                "drone_model": d_model,
+                "drone_info": drone_info,
+                "operator_id": r["operator_id"],
+                "self_id_desc": r["self_id_desc"],
+                "first_seen": r["first_seen"],
+                "first_seen_iso": r["first_seen_iso"],
+                "last_seen": r["last_seen"],
+                "last_seen_iso": r["last_seen_iso"],
+                "duration_s": r["duration_s"],
+                "packet_count": r["packet_count"],
+                "transports": r["transports"].split(",") if r["transports"] else [],
+                "channels": r["channels"].split(",") if r["channels"] else [],
+                "wifi_rates": r["wifi_rates"].split(", ") if ("wifi_rates" in r.keys() and r["wifi_rates"]) else [],
+                "dominant_rate_mbps": r["dominant_rate_mbps"] if "dominant_rate_mbps" in r.keys() else None,
+                "dominant_modulation": r["dominant_modulation"] if "dominant_modulation" in r.keys() else None,
+                "min_rate_mbps": r["min_rate_mbps"] if "min_rate_mbps" in r.keys() else None,
+                "max_rate_mbps": r["max_rate_mbps"] if "max_rate_mbps" in r.keys() else None,
+                "phy_rate_distribution": json.loads(r["phy_rate_dist_json"]) if ("phy_rate_dist_json" in r.keys() and r["phy_rate_dist_json"]) else {},
+                "min_rssi_dbm": r["min_rssi_dbm"],
+                "max_rssi_dbm": r["max_rssi_dbm"],
+                "avg_rssi_dbm": r["avg_rssi_dbm"],
+                "min_alt_m": r["min_alt_m"],
+                "max_alt_m": r["max_alt_m"],
+                "min_height_m": r["min_height_m"] if "min_height_m" in r.keys() else None,
+                "max_height_m": r["max_height_m"] if "max_height_m" in r.keys() else None,
+                "min_pressure_alt_m": r["min_pressure_alt_m"] if "min_pressure_alt_m" in r.keys() else None,
+                "max_pressure_alt_m": r["max_pressure_alt_m"] if "max_pressure_alt_m" in r.keys() else None,
+                "max_speed_mps": r["max_speed_mps"],
+                "pilot_lat": r["pilot_lat"],
+                "pilot_lon": r["pilot_lon"],
+                "pilot_alt_m": r["pilot_alt_m"],
+                "area_ceil_m": r["area_ceil_m"] if "area_ceil_m" in r.keys() else None,
+                "area_floor_m": r["area_floor_m"] if "area_floor_m" in r.keys() else None,
+                "is_active": is_active,
+                "latest_position": {
+                    "lat": latest_point[0],
+                    "lon": latest_point[1],
+                    "alt_m": latest_point[2],
+                    "speed_mps": latest_point[3],
+                    "heading_deg": latest_point[4],
+                    "timestamp": latest_point[5],
+                    "height_m": latest_point[6] if len(latest_point) > 6 else None,
+                    "height_type": latest_point[7] if len(latest_point) > 7 else None,
+                    "pressure_alt_m": latest_point[8] if len(latest_point) > 8 else None,
+                    "vertical_speed_mps": latest_point[9] if len(latest_point) > 9 else None,
+                    "rssi_dbm": latest_point[10] if len(latest_point) > 10 else None,
+                    "counter": latest_point[11] if len(latest_point) > 11 else None,
+                } if latest_point else None,
+                "trajectory": traj,
+                "trajectory_point_count": len(traj),
+            })
 
-    return {"encounters": encounters, "count": len(encounters)}
+        return {"encounters": encounters, "count": len(encounters)}
+    finally:
+        conn.close()
 
 
 def get_all_jsonl_log_candidates() -> List[str]:
@@ -624,88 +630,91 @@ def compute_conformance_blocks(row: Any, traj: List[Any], packets: Optional[List
 def get_encounter(encounter_id: str):
     """Returns single encounter detailed record by ID."""
     conn = get_db_connection()
-    row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
+    try:
+        row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
 
-    timeout_s = 300.0
-    cfg = get_current_dashboard_config()
-    if cfg and "encounter_timeout_s" in cfg:
-        timeout_s = float(cfg["encounter_timeout_s"])
+        timeout_s = 300.0
+        cfg = get_current_dashboard_config()
+        if cfg and "encounter_timeout_s" in cfg:
+            timeout_s = float(cfg["encounter_timeout_s"])
 
-    traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
-    # traj: list of [lat, lon, alt, speed, heading, ts]
+        traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
+        # traj: list of [lat, lon, alt, speed, heading, ts]
 
-    now = time.time()
-    is_active = bool(row["is_active"] and (now - row["last_seen"] <= timeout_s))
+        now = time.time()
+        is_active = bool(row["is_active"] and (now - row["last_seen"] <= timeout_s))
 
-    d_make = row["drone_make"] if "drone_make" in row.keys() else None
-    d_model = row["drone_model"] if "drone_model" in row.keys() else None
-    s_num = row["serial_number"]
-    drone_info = infer_drone_model(s_num) if s_num else {}
-    if (not d_make or not d_model or "Unspecified" in (d_model or "")) and drone_info.get("is_inferred"):
-        if drone_info.get("make"):
-            d_make = drone_info.get("make")
-        if drone_info.get("model"):
-            d_model = drone_info.get("model")
-    if d_make:
-        drone_info["make"] = d_make
-    if d_model:
-        drone_info["model"] = d_model
+        d_make = row["drone_make"] if "drone_make" in row.keys() else None
+        d_model = row["drone_model"] if "drone_model" in row.keys() else None
+        s_num = row["serial_number"]
+        drone_info = infer_drone_model(s_num) if s_num else {}
+        if (not d_make or not d_model or "Unspecified" in (d_model or "")) and drone_info.get("is_inferred"):
+            if drone_info.get("make"):
+                d_make = drone_info.get("make")
+            if drone_info.get("model"):
+                d_model = drone_info.get("model")
+        if d_make:
+            drone_info["make"] = d_make
+        if d_model:
+            drone_info["model"] = d_model
 
-    sample_pkts = get_encounter_sample_packets(
-        encounter_id,
-        enc_serial=row["serial_number"],
-        enc_mac=row["mac"],
-        enc_first_seen=row["first_seen"],
-        enc_last_seen=row["last_seen"],
-    )
-    conf_blocks = compute_conformance_blocks(row, traj, sample_pkts)
+        sample_pkts = get_encounter_sample_packets(
+            encounter_id,
+            enc_serial=row["serial_number"],
+            enc_mac=row["mac"],
+            enc_first_seen=row["first_seen"],
+            enc_last_seen=row["last_seen"],
+        )
+        conf_blocks = compute_conformance_blocks(row, traj, sample_pkts)
 
-    return {
-        "encounter_id": row["encounter_id"],
-        "mac": row["mac"],
-        "serial_number": row["serial_number"],
-        "node_id": row["node_id"] if "node_id" in row.keys() else None,
-        "drone_make": d_make,
-        "drone_model": d_model,
-        "drone_info": drone_info,
-        "operator_id": row["operator_id"],
-        "self_id_desc": row["self_id_desc"],
-        "first_seen": row["first_seen"],
-        "first_seen_iso": row["first_seen_iso"],
-        "last_seen": row["last_seen"],
-        "last_seen_iso": row["last_seen_iso"],
-        "duration_s": row["duration_s"],
-        "packet_count": row["packet_count"],
-        "transports": row["transports"].split(",") if row["transports"] else [],
-        "channels": row["channels"].split(",") if row["channels"] else [],
-        "wifi_rates": row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else [],
-        "dominant_rate_mbps": row["dominant_rate_mbps"] if "dominant_rate_mbps" in row.keys() else None,
-        "dominant_modulation": row["dominant_modulation"] if "dominant_modulation" in row.keys() else None,
-        "min_rate_mbps": row["min_rate_mbps"] if "min_rate_mbps" in row.keys() else None,
-        "max_rate_mbps": row["max_rate_mbps"] if "max_rate_mbps" in row.keys() else None,
-        "phy_rate_distribution": json.loads(row["phy_rate_dist_json"]) if ("phy_rate_dist_json" in row.keys() and row["phy_rate_dist_json"]) else {},
-        "min_rssi_dbm": row["min_rssi_dbm"],
-        "max_rssi_dbm": row["max_rssi_dbm"],
-        "avg_rssi_dbm": row["avg_rssi_dbm"],
-        "min_alt_m": row["min_alt_m"],
-        "max_alt_m": row["max_alt_m"],
-        "min_height_m": row["min_height_m"] if "min_height_m" in row.keys() else None,
-        "max_height_m": row["max_height_m"] if "max_height_m" in row.keys() else None,
-        "min_pressure_alt_m": row["min_pressure_alt_m"] if "min_pressure_alt_m" in row.keys() else None,
-        "max_pressure_alt_m": row["max_pressure_alt_m"] if "max_pressure_alt_m" in row.keys() else None,
-        "max_speed_mps": row["max_speed_mps"],
-        "pilot_lat": row["pilot_lat"],
-        "pilot_lon": row["pilot_lon"],
-        "pilot_alt_m": row["pilot_alt_m"],
-        "area_ceil_m": row["area_ceil_m"] if "area_ceil_m" in row.keys() else None,
-        "area_floor_m": row["area_floor_m"] if "area_floor_m" in row.keys() else None,
-        "is_active": is_active,
-        "counter": row["counter"] if "counter" in row.keys() else (traj[-1][11] if (traj and len(traj[-1]) > 11) else None),
-        "trajectory": traj,
-        "conformance_blocks": conf_blocks,
-    }
+        return {
+            "encounter_id": row["encounter_id"],
+            "mac": row["mac"],
+            "serial_number": row["serial_number"],
+            "node_id": row["node_id"] if "node_id" in row.keys() else None,
+            "drone_make": d_make,
+            "drone_model": d_model,
+            "drone_info": drone_info,
+            "operator_id": row["operator_id"],
+            "self_id_desc": row["self_id_desc"],
+            "first_seen": row["first_seen"],
+            "first_seen_iso": row["first_seen_iso"],
+            "last_seen": row["last_seen"],
+            "last_seen_iso": row["last_seen_iso"],
+            "duration_s": row["duration_s"],
+            "packet_count": row["packet_count"],
+            "transports": row["transports"].split(",") if row["transports"] else [],
+            "channels": row["channels"].split(",") if row["channels"] else [],
+            "wifi_rates": row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else [],
+            "dominant_rate_mbps": row["dominant_rate_mbps"] if "dominant_rate_mbps" in row.keys() else None,
+            "dominant_modulation": row["dominant_modulation"] if "dominant_modulation" in row.keys() else None,
+            "min_rate_mbps": row["min_rate_mbps"] if "min_rate_mbps" in row.keys() else None,
+            "max_rate_mbps": row["max_rate_mbps"] if "max_rate_mbps" in row.keys() else None,
+            "phy_rate_distribution": json.loads(row["phy_rate_dist_json"]) if ("phy_rate_dist_json" in row.keys() and row["phy_rate_dist_json"]) else {},
+            "min_rssi_dbm": row["min_rssi_dbm"],
+            "max_rssi_dbm": row["max_rssi_dbm"],
+            "avg_rssi_dbm": row["avg_rssi_dbm"],
+            "min_alt_m": row["min_alt_m"],
+            "max_alt_m": row["max_alt_m"],
+            "min_height_m": row["min_height_m"] if "min_height_m" in row.keys() else None,
+            "max_height_m": row["max_height_m"] if "max_height_m" in row.keys() else None,
+            "min_pressure_alt_m": row["min_pressure_alt_m"] if "min_pressure_alt_m" in row.keys() else None,
+            "max_pressure_alt_m": row["max_pressure_alt_m"] if "max_pressure_alt_m" in row.keys() else None,
+            "max_speed_mps": row["max_speed_mps"],
+            "pilot_lat": row["pilot_lat"],
+            "pilot_lon": row["pilot_lon"],
+            "pilot_alt_m": row["pilot_alt_m"],
+            "area_ceil_m": row["area_ceil_m"] if "area_ceil_m" in row.keys() else None,
+            "area_floor_m": row["area_floor_m"] if "area_floor_m" in row.keys() else None,
+            "is_active": is_active,
+            "counter": row["counter"] if "counter" in row.keys() else (traj[-1][11] if (traj and len(traj[-1]) > 11) else None),
+            "trajectory": traj,
+            "conformance_blocks": conf_blocks,
+        }
+    finally:
+        conn.close()
 
 
 # ============================================================================
@@ -724,6 +733,7 @@ def get_encounter_packets(encounter_id: str):
     enc_mac = None
     enc_first_seen = None
     enc_last_seen = None
+    conn_chk = None
     try:
         conn_chk = get_db_connection()
         row_chk = conn_chk.execute(
@@ -739,9 +749,11 @@ def get_encounter_packets(encounter_id: str):
                 enc_first_seen = float(row_chk["first_seen"])
             if row_chk["last_seen"] is not None:
                 enc_last_seen = float(row_chk["last_seen"])
-        conn_chk.close()
     except Exception:
         pass
+    finally:
+        if conn_chk is not None:
+            conn_chk.close()
 
     # 1. Attempt to extract from JSONL log files
     log_candidates = get_all_jsonl_log_candidates()
@@ -855,115 +867,118 @@ def get_encounter_packets(encounter_id: str):
     # 2. If no JSONL log found, synthesize packet records from SQLite encounter metadata and trajectory
     if not packets:
         conn = get_db_connection()
-        row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
-        
-        traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
-        t0 = traj[0][5] if (traj and len(traj[0]) > 5 and traj[0][5] is not None) else (row["first_seen"] or time.time())
-        r_rates = row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else []
-        r_desc = r_rates[0] if r_rates else None
+        try:
+            row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Encounter '{encounter_id}' not found")
+            
+            traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
+            t0 = traj[0][5] if (traj and len(traj[0]) > 5 and traj[0][5] is not None) else (row["first_seen"] or time.time())
+            r_rates = row["wifi_rates"].split(", ") if ("wifi_rates" in row.keys() and row["wifi_rates"]) else []
+            r_desc = r_rates[0] if r_rates else None
 
-        def build_synth_blocks(lat=None, lon=None, alt=None, spd=None, dir_deg=None, h_m=None, h_t=None, p_alt=None, v_spd=None):
-            blocks = []
-            if row["serial_number"]:
-                blocks.append({
-                    "msg_type": 0,
-                    "type": "Basic ID",
-                    "id": row["serial_number"],
-                    "id_type_name": "Serial Number (ANSI/CTA-2063-A)",
-                    "ua_type_name": "Helicopter / Multirotor",
-                })
-            if lat is not None or lon is not None or alt is not None or h_m is not None:
-                blocks.append({
-                    "msg_type": 1,
-                    "type": "Location",
-                    "lat": lat,
-                    "lon": lon,
-                    "alt": alt,
-                    "geodetic_altitude_m": alt,
-                    "speed_mps": spd,
-                    "direction_deg": dir_deg,
-                    "height_m": h_m,
-                    "height_type": h_t,
-                    "pressure_altitude_m": p_alt,
-                    "vertical_speed_mps": v_spd,
-                    "status_name": "Airborne" if (alt or h_m or spd) else "Ground",
-                })
-            if row["pilot_lat"] is not None and row["pilot_lon"] is not None:
-                blocks.append({
-                    "msg_type": 4,
-                    "type": "System",
-                    "pilot_lat": row["pilot_lat"],
-                    "pilot_lon": row["pilot_lon"],
-                    "pilot_alt_m": row["pilot_alt_m"],
-                    "operator_location_type_name": "Live GNSS (Dynamic Pilot / GCS)",
-                    "classification_type_name": "European Union (EU)",
-                })
-            if row["operator_id"]:
-                blocks.append({
-                    "msg_type": 5,
-                    "type": "Operator ID",
-                    "operator_id": row["operator_id"],
-                    "id": row["operator_id"],
-                })
-            if row["self_id_desc"]:
-                blocks.append({
-                    "msg_type": 3,
-                    "type": "Self-ID",
-                    "description": row["self_id_desc"],
-                })
-            return blocks
+            def build_synth_blocks(lat=None, lon=None, alt=None, spd=None, dir_deg=None, h_m=None, h_t=None, p_alt=None, v_spd=None):
+                blocks = []
+                if row["serial_number"]:
+                    blocks.append({
+                        "msg_type": 0,
+                        "type": "Basic ID",
+                        "id": row["serial_number"],
+                        "id_type_name": "Serial Number (ANSI/CTA-2063-A)",
+                        "ua_type_name": "Helicopter / Multirotor",
+                    })
+                if lat is not None or lon is not None or alt is not None or h_m is not None:
+                    blocks.append({
+                        "msg_type": 1,
+                        "type": "Location",
+                        "lat": lat,
+                        "lon": lon,
+                        "alt": alt,
+                        "geodetic_altitude_m": alt,
+                        "speed_mps": spd,
+                        "direction_deg": dir_deg,
+                        "height_m": h_m,
+                        "height_type": h_t,
+                        "pressure_altitude_m": p_alt,
+                        "vertical_speed_mps": v_spd,
+                        "status_name": "Airborne" if (alt or h_m or spd) else "Ground",
+                    })
+                if row["pilot_lat"] is not None and row["pilot_lon"] is not None:
+                    blocks.append({
+                        "msg_type": 4,
+                        "type": "System",
+                        "pilot_lat": row["pilot_lat"],
+                        "pilot_lon": row["pilot_lon"],
+                        "pilot_alt_m": row["pilot_alt_m"],
+                        "operator_location_type_name": "Live GNSS (Dynamic Pilot / GCS)",
+                        "classification_type_name": "European Union (EU)",
+                    })
+                if row["operator_id"]:
+                    blocks.append({
+                        "msg_type": 5,
+                        "type": "Operator ID",
+                        "operator_id": row["operator_id"],
+                        "id": row["operator_id"],
+                    })
+                if row["self_id_desc"]:
+                    blocks.append({
+                        "msg_type": 3,
+                        "type": "Self-ID",
+                        "description": row["self_id_desc"],
+                    })
+                return blocks
 
-        if traj:
-            for idx, pt in enumerate(traj):
-                # pt: [lat, lon, alt, speed, heading, ts, h_m, h_t, p_alt, v_spd, rssi, counter]
-                ts = pt[5] if (len(pt) > 5 and pt[5] is not None) else t0
-                delta_ms = max(0, int(round((ts - t0) * 1000)))
-                h_m = pt[6] if len(pt) > 6 else None
-                h_t = pt[7] if len(pt) > 7 else None
-                p_alt = pt[8] if len(pt) > 8 else None
-                v_spd = pt[9] if len(pt) > 9 else None
-                pt_rssi = pt[10] if (len(pt) > 10 and pt[10] is not None) else row["avg_rssi_dbm"]
-                pt_counter = pt[11] if (len(pt) > 11 and pt[11] is not None) else (row["counter"] if ("counter" in row.keys() and row["counter"] is not None) else idx)
+            if traj:
+                for idx, pt in enumerate(traj):
+                    # pt: [lat, lon, alt, speed, heading, ts, h_m, h_t, p_alt, v_spd, rssi, counter]
+                    ts = pt[5] if (len(pt) > 5 and pt[5] is not None) else t0
+                    delta_ms = max(0, int(round((ts - t0) * 1000)))
+                    h_m = pt[6] if len(pt) > 6 else None
+                    h_t = pt[7] if len(pt) > 7 else None
+                    p_alt = pt[8] if len(pt) > 8 else None
+                    v_spd = pt[9] if len(pt) > 9 else None
+                    pt_rssi = pt[10] if (len(pt) > 10 and pt[10] is not None) else row["avg_rssi_dbm"]
+                    pt_counter = pt[11] if (len(pt) > 11 and pt[11] is not None) else (row["counter"] if ("counter" in row.keys() and row["counter"] is not None) else idx)
+                    packets.append({
+                        "index": idx + 1,
+                        "time_offset_ms": delta_ms,
+                        "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                        "node_id": row["node_id"] if ("node_id" in row.keys()) else enc_node_id,
+                        "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
+                        "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
+                        "rssi_dbm": pt_rssi,
+                        "rate_desc": r_desc,
+                        "mac": row["mac"],
+                        "serial": row["serial_number"],
+                        "counter": pt_counter,
+                        "messages_b64": [],
+                        "decoded_messages": build_synth_blocks(pt[0], pt[1], pt[2], pt[3], pt[4], h_m, h_t, p_alt, v_spd),
+                    })
+            else:
+                # Single synthesized summary packet when trajectory points are not stored
+                pt_counter = row["counter"] if ("counter" in row.keys() and row["counter"] is not None) else 0
                 packets.append({
-                    "index": idx + 1,
-                    "time_offset_ms": delta_ms,
-                    "timestamp_iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                    "index": 1,
+                    "time_offset_ms": 0,
+                    "timestamp_iso": row["first_seen_iso"] or datetime.fromtimestamp(t0, timezone.utc).isoformat(),
                     "node_id": row["node_id"] if ("node_id" in row.keys()) else enc_node_id,
                     "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
                     "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
-                    "rssi_dbm": pt_rssi,
+                    "rssi_dbm": row["avg_rssi_dbm"],
                     "rate_desc": r_desc,
                     "mac": row["mac"],
                     "serial": row["serial_number"],
                     "counter": pt_counter,
                     "messages_b64": [],
-                    "decoded_messages": build_synth_blocks(pt[0], pt[1], pt[2], pt[3], pt[4], h_m, h_t, p_alt, v_spd),
+                    "decoded_messages": build_synth_blocks(
+                        lat=None, lon=None,
+                        alt=row["max_alt_m"],
+                        spd=row["max_speed_mps"],
+                        h_m=row["max_height_m"],
+                    ),
                 })
-        else:
-            # Single synthesized summary packet when trajectory points are not stored
-            pt_counter = row["counter"] if ("counter" in row.keys() and row["counter"] is not None) else 0
-            packets.append({
-                "index": 1,
-                "time_offset_ms": 0,
-                "timestamp_iso": row["first_seen_iso"] or datetime.fromtimestamp(t0, timezone.utc).isoformat(),
-                "node_id": row["node_id"] if ("node_id" in row.keys()) else enc_node_id,
-                "transport": row["transports"].split(",")[0] if row["transports"] else "unknown",
-                "channel": row["channels"].split(",")[0] if row["channels"] else "N/A",
-                "rssi_dbm": row["avg_rssi_dbm"],
-                "rate_desc": r_desc,
-                "mac": row["mac"],
-                "serial": row["serial_number"],
-                "counter": pt_counter,
-                "messages_b64": [],
-                "decoded_messages": build_synth_blocks(
-                    lat=None, lon=None,
-                    alt=row["max_alt_m"],
-                    spd=row["max_speed_mps"],
-                    h_m=row["max_height_m"],
-                ),
-            })
+        finally:
+            conn.close()
 
     return {
         "encounter_id": encounter_id,
@@ -981,121 +996,127 @@ def get_encounter_packets(encounter_id: str):
 def export_geojson(encounter_id: str):
     """Exports flight trajectory as an RFC 7946 compliant GeoJSON FeatureCollection."""
     conn = get_db_connection()
-    row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Encounter not found")
+    try:
+        row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Encounter not found")
 
-    traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
-    coordinates = [[pt[1], pt[0], pt[2] or 0.0] for pt in traj] # [lon, lat, alt]
+        traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
+        coordinates = [[pt[1], pt[0], pt[2] or 0.0] for pt in traj] # [lon, lat, alt]
 
-    features = []
+        features = []
 
-    # 1. LineString feature for complete flight trajectory
-    if len(coordinates) >= 2:
-        features.append({
-            "type": "Feature",
+        # 1. LineString feature for complete flight trajectory
+        if len(coordinates) >= 2:
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "name": f"Flight Track {encounter_id}",
+                    "mac": row["mac"],
+                    "serial_number": row["serial_number"],
+                    "drone_make": row["drone_make"] if "drone_make" in row.keys() else None,
+                    "drone_model": row["drone_model"] if "drone_model" in row.keys() else None,
+                    "operator_id": row["operator_id"],
+                    "duration_s": row["duration_s"],
+                    "max_altitude_m": row["max_alt_m"],
+                    "max_speed_mps": row["max_speed_mps"],
+                    "transports": row["transports"],
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coordinates
+                }
+            })
+
+        # 2. Point features for every discrete recorded packet fix
+        for idx, pt in enumerate(traj):
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "point_index": idx + 1,
+                    "timestamp_epoch": pt[5] if len(pt) > 5 else None,
+                    "altitude_m": pt[2],
+                    "speed_mps": pt[3],
+                    "heading_deg": pt[4],
+                    "rssi_dbm": pt[10] if len(pt) > 10 else None,
+                    "msg_counter": pt[11] if len(pt) > 11 else None,
+                },
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [pt[1], pt[0], pt[2] or 0.0]
+                }
+            })
+
+        # 3. Pilot / Home Point feature if present
+        if row["pilot_lat"] is not None and row["pilot_lon"] is not None:
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "name": "Pilot / GCS Home Location",
+                    "altitude_m": row["pilot_alt_m"],
+                },
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [row["pilot_lon"], row["pilot_lat"], row["pilot_alt_m"] or 0.0]
+                }
+            })
+
+        geojson_doc = {
+            "type": "FeatureCollection",
             "properties": {
-                "name": f"Flight Track {encounter_id}",
+                "encounter_id": encounter_id,
                 "mac": row["mac"],
                 "serial_number": row["serial_number"],
-                "drone_make": row["drone_make"] if "drone_make" in row.keys() else None,
-                "drone_model": row["drone_model"] if "drone_model" in row.keys() else None,
                 "operator_id": row["operator_id"],
-                "duration_s": row["duration_s"],
-                "max_altitude_m": row["max_alt_m"],
-                "max_speed_mps": row["max_speed_mps"],
-                "transports": row["transports"],
+                "generated_iso": datetime.now(timezone.utc).isoformat(),
             },
-            "geometry": {
-                "type": "LineString",
-                "coordinates": coordinates
-            }
-        })
+            "features": features
+        }
 
-    # 2. Point features for every discrete recorded packet fix
-    for idx, pt in enumerate(traj):
-        features.append({
-            "type": "Feature",
-            "properties": {
-                "point_index": idx + 1,
-                "timestamp_epoch": pt[5] if len(pt) > 5 else None,
-                "altitude_m": pt[2],
-                "speed_mps": pt[3],
-                "heading_deg": pt[4],
-                "rssi_dbm": pt[10] if len(pt) > 10 else None,
-                "msg_counter": pt[11] if len(pt) > 11 else None,
-            },
-            "geometry": {
-                "type": "Point",
-                "coordinates": [pt[1], pt[0], pt[2] or 0.0]
-            }
-        })
-
-    # 3. Pilot / Home Point feature if present
-    if row["pilot_lat"] is not None and row["pilot_lon"] is not None:
-        features.append({
-            "type": "Feature",
-            "properties": {
-                "name": "Pilot / GCS Home Location",
-                "altitude_m": row["pilot_alt_m"],
-            },
-            "geometry": {
-                "type": "Point",
-                "coordinates": [row["pilot_lon"], row["pilot_lat"], row["pilot_alt_m"] or 0.0]
-            }
-        })
-
-    geojson_doc = {
-        "type": "FeatureCollection",
-        "properties": {
-            "encounter_id": encounter_id,
-            "mac": row["mac"],
-            "serial_number": row["serial_number"],
-            "operator_id": row["operator_id"],
-            "generated_iso": datetime.now(timezone.utc).isoformat(),
-        },
-        "features": features
-    }
-
-    return Response(
-        content=json.dumps(geojson_doc, indent=2),
-        media_type="application/geo+json",
-        headers={"Content-Disposition": f"attachment; filename={encounter_id}.geojson"}
-    )
+        return Response(
+            content=json.dumps(geojson_doc, indent=2),
+            media_type="application/geo+json",
+            headers={"Content-Disposition": f"attachment; filename={encounter_id}.geojson"}
+        )
+    finally:
+        conn.close()
 
 
 @app.get("/api/export/{encounter_id}/csv")
 def export_csv(encounter_id: str):
     """Exports flight trajectory coordinates and telemetry points as tabular CSV."""
     conn = get_db_connection()
-    row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Encounter not found")
+    try:
+        row = conn.execute("SELECT * FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Encounter not found")
 
-    traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
-    output = io.StringIO()
-    writer = csv.writer(output, lineterminator="\n")
-    writer.writerow([
-        "index", "timestamp_epoch", "latitude", "longitude",
-        "geodetic_altitude_m", "pressure_altitude_m", "height_m", "height_type",
-        "vertical_speed_mps", "speed_mps", "heading_deg", "rssi_dbm", "msg_counter"
-    ])
+        traj = json.loads(row["trajectory_json"]) if row["trajectory_json"] else []
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow([
+            "index", "timestamp_epoch", "latitude", "longitude",
+            "geodetic_altitude_m", "pressure_altitude_m", "height_m", "height_type",
+            "vertical_speed_mps", "speed_mps", "heading_deg", "rssi_dbm", "msg_counter"
+        ])
 
-    for idx, pt in enumerate(traj):
-        ts = pt[5] if len(pt) > 5 else ""
-        h_m = pt[6] if len(pt) > 6 and pt[6] is not None else ""
-        h_type = pt[7] if len(pt) > 7 and pt[7] is not None else ""
-        p_alt = pt[8] if len(pt) > 8 and pt[8] is not None else ""
-        v_spd = pt[9] if len(pt) > 9 and pt[9] is not None else ""
-        rssi = pt[10] if len(pt) > 10 and pt[10] is not None else (row["avg_rssi_dbm"] if "avg_rssi_dbm" in row.keys() else "")
-        counter = pt[11] if len(pt) > 11 and pt[11] is not None else ""
-        writer.writerow([idx + 1, ts, pt[0], pt[1], pt[2], p_alt, h_m, h_type, v_spd, pt[3], pt[4], rssi, counter])
+        for idx, pt in enumerate(traj):
+            ts = pt[5] if len(pt) > 5 else ""
+            h_m = pt[6] if len(pt) > 6 and pt[6] is not None else ""
+            h_type = pt[7] if len(pt) > 7 and pt[7] is not None else ""
+            p_alt = pt[8] if len(pt) > 8 and pt[8] is not None else ""
+            v_spd = pt[9] if len(pt) > 9 and pt[9] is not None else ""
+            rssi = pt[10] if len(pt) > 10 and pt[10] is not None else (row["avg_rssi_dbm"] if "avg_rssi_dbm" in row.keys() else "")
+            counter = pt[11] if len(pt) > 11 and pt[11] is not None else ""
+            writer.writerow([idx + 1, ts, pt[0], pt[1], pt[2], p_alt, h_m, h_type, v_spd, pt[3], pt[4], rssi, counter])
 
-    return Response(
-        content=output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={encounter_id}.csv"}
-    )
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={encounter_id}.csv"}
+        )
+    finally:
+        conn.close()
 
 
 # ============================================================================
@@ -1109,10 +1130,10 @@ async def websocket_live_stream(websocket: WebSocket):
     to connected tactical map clients.
     """
     await websocket.accept()
+    conn = get_db_connection()
     try:
         while True:
             timeout_s = get_timeout_s()
-            conn = get_db_connection()
             reconcile_stale_encounters(conn, timeout_s)
 
             # Query active flights
@@ -1178,6 +1199,8 @@ async def websocket_live_stream(websocket: WebSocket):
         pass
     except Exception:
         pass
+    finally:
+        conn.close()
 
 
 # ============================================================================
@@ -1245,6 +1268,7 @@ def query_faa_doc_registry(serial: str = Query(..., description="Drone Serial Nu
                 full_model = f"{faa_model} ({faa_series})" if faa_series and faa_series != faa_model else (faa_model or faa_series)
 
                 # Persist verified official make & model to encounters SQLite database
+                db_conn = None
                 try:
                     db_conn = get_db_connection()
                     # 1. Update exact matching serials
@@ -1262,6 +1286,9 @@ def query_faa_doc_registry(serial: str = Query(..., description="Drone Serial Nu
                     db_conn.commit()
                 except Exception:
                     pass
+                finally:
+                    if db_conn is not None:
+                        db_conn.close()
 
                 # Persist newly verified drone model to learned drone models database on disk
                 try:
