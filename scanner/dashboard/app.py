@@ -516,7 +516,14 @@ def get_all_jsonl_log_candidates() -> List[str]:
     return candidates
 
 
-def get_encounter_sample_packets(encounter_id: str, max_packets: int = 15) -> List[Dict[str, Any]]:
+def get_encounter_sample_packets(
+    encounter_id: str,
+    max_packets: int = 15,
+    enc_serial: Optional[str] = None,
+    enc_mac: Optional[str] = None,
+    enc_first_seen: Optional[float] = None,
+    enc_last_seen: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     """Quickly extracts up to max_packets decoded packets for the encounter to determine exact block transmission status."""
     packets = []
     log_candidates = get_all_jsonl_log_candidates()
@@ -531,7 +538,24 @@ def get_encounter_sample_packets(encounter_id: str, max_packets: int = 15) -> Li
                             continue
                         try:
                             rec = json.loads(line)
-                            if rec.get("encounter_id") == encounter_id:
+                            # Match by serial/MAC + time window (resilient to encounter merging)
+                            rec_serial = rec.get("serial") or rec.get("serial_number")
+                            rec_mac = rec.get("mac")
+                            rec_ts = rec.get("timestamp")
+                            matches = False
+                            if enc_serial and rec_serial and rec_serial == enc_serial:
+                                matches = True
+                            elif enc_mac and enc_mac != "UNKNOWN" and rec_mac and rec_mac == enc_mac:
+                                matches = True
+                            if not matches and rec.get("encounter_id") == encounter_id:
+                                matches = True
+                            if matches and rec_ts is not None and enc_first_seen is not None and enc_last_seen is not None:
+                                try:
+                                    if not (enc_first_seen - 2.0 <= float(rec_ts) <= enc_last_seen + 2.0):
+                                        matches = False
+                                except (ValueError, TypeError):
+                                    pass
+                            if matches:
                                 decoded_blocks = []
                                 if decode_astm_message:
                                     for b64_str in rec.get("messages_b64", []):
@@ -552,6 +576,7 @@ def get_encounter_sample_packets(encounter_id: str, max_packets: int = 15) -> Li
             except Exception:
                 continue
     return packets
+
 
 
 def compute_conformance_blocks(row: Any, traj: List[Any], packets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
@@ -628,7 +653,13 @@ def get_encounter(encounter_id: str):
     if d_model:
         drone_info["model"] = d_model
 
-    sample_pkts = get_encounter_sample_packets(encounter_id)
+    sample_pkts = get_encounter_sample_packets(
+        encounter_id,
+        enc_serial=row["serial_number"],
+        enc_mac=row["mac"],
+        enc_first_seen=row["first_seen"],
+        enc_last_seen=row["last_seen"],
+    )
     conf_blocks = compute_conformance_blocks(row, traj, sample_pkts)
 
     return {
@@ -689,11 +720,25 @@ def get_encounter_packets(encounter_id: str):
     """
     packets = []
     enc_node_id = None
+    enc_serial = None
+    enc_mac = None
+    enc_first_seen = None
+    enc_last_seen = None
     try:
         conn_chk = get_db_connection()
-        row_chk = conn_chk.execute("SELECT node_id FROM encounters WHERE encounter_id = ?", (encounter_id,)).fetchone()
-        if row_chk and row_chk["node_id"]:
-            enc_node_id = row_chk["node_id"]
+        row_chk = conn_chk.execute(
+            "SELECT node_id, serial_number, mac, first_seen, last_seen FROM encounters WHERE encounter_id = ?",
+            (encounter_id,)
+        ).fetchone()
+        if row_chk:
+            if row_chk["node_id"]:
+                enc_node_id = row_chk["node_id"]
+            enc_serial = row_chk["serial_number"]
+            enc_mac = row_chk["mac"]
+            if row_chk["first_seen"] is not None:
+                enc_first_seen = float(row_chk["first_seen"])
+            if row_chk["last_seen"] is not None:
+                enc_last_seen = float(row_chk["last_seen"])
         conn_chk.close()
     except Exception:
         pass
@@ -712,7 +757,24 @@ def get_encounter_packets(encounter_id: str):
                             continue
                         try:
                             rec = json.loads(line)
-                            if rec.get("encounter_id") == encounter_id:
+                            # Match by serial/MAC + time window (resilient to encounter merging)
+                            rec_serial = rec.get("serial") or rec.get("serial_number")
+                            rec_mac = rec.get("mac")
+                            rec_ts = rec.get("timestamp")
+                            matches = False
+                            if enc_serial and rec_serial and rec_serial == enc_serial:
+                                matches = True
+                            elif enc_mac and enc_mac != "UNKNOWN" and rec_mac and rec_mac == enc_mac:
+                                matches = True
+                            if not matches and rec.get("encounter_id") == encounter_id:
+                                matches = True
+                            if matches and rec_ts is not None and enc_first_seen is not None and enc_last_seen is not None:
+                                try:
+                                    if not (enc_first_seen - 2.0 <= float(rec_ts) <= enc_last_seen + 2.0):
+                                        matches = False
+                                except (ValueError, TypeError):
+                                    pass
+                            if matches:
                                 # Decode base64 message blocks if present
                                 decoded_blocks = []
                                 if decode_astm_message:
