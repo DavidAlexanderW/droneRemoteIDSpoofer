@@ -896,6 +896,98 @@ class TestCombinedRIDListener(unittest.TestCase):
 
             os.unlink(tmp.name)
 
+    def test_cli_flags_override_config_file_and_defaults(self):
+        """Verify that explicit CLI flags strictly override both config file settings and defaults."""
+        import scanner.combined_rid_listener as crl
+
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as tmp:
+            custom_cfg = {
+                "node_id": "cfg-node-42",
+                "hub_ws_url": "ws://config-hub:8000/stream/node",
+                "wifi_iface": "wlan1",
+                "nrf_port": "/dev/ttyACM1",
+                "coded": False,
+                "ble_mode": "legacy",
+                "ble_bt5_dwell_s": 8.0,
+            }
+            json.dump(custom_cfg, tmp)
+            tmp.flush()
+
+            # 1. Test Config Overrides Defaults when CLI is empty
+            args_cfg_only, _ = crl.parse_arguments(["--scanner-config", tmp.name])
+            self.assertEqual(args_cfg_only.node_id, "cfg-node-42")
+            self.assertEqual(args_cfg_only.hub_url, "ws://config-hub:8000/stream/node")
+            self.assertEqual(args_cfg_only.wifi_iface, "wlan1")
+            self.assertEqual(args_cfg_only.nrf_port, "/dev/ttyACM1")
+            self.assertFalse(args_cfg_only.coded)
+            self.assertEqual(args_cfg_only.ble_mode, "legacy")
+            self.assertEqual(args_cfg_only.ble_bt5_dwell, 8.0)
+
+            # 2. Test Explicit CLI Flags Override Config
+            args_cli_override, _ = crl.parse_arguments([
+                "--scanner-config", tmp.name,
+                "--node-id", "cli-node-override",
+                "--hub-url", "ws://cli-hub:9999/stream/node",
+                "--wifi-iface", "wlan9",
+                "--coded",
+                "--ble-mode", "extended",
+            ])
+            self.assertEqual(args_cli_override.node_id, "cli-node-override")
+            self.assertEqual(args_cli_override.hub_url, "ws://cli-hub:9999/stream/node")
+            self.assertEqual(args_cli_override.wifi_iface, "wlan9")
+            self.assertTrue(args_cli_override.coded)
+            self.assertEqual(args_cli_override.ble_mode, "extended")
+
+            os.unlink(tmp.name)
+
+    def test_no_side_effects_on_missing_config_file(self):
+        """Verify that loading a non-existent config file does not create or write to disk."""
+        from scanner.scanner_config import load_scanner_config
+        from scanner.dashboard.dashboard_config import load_dashboard_config
+
+        fake_scanner_path = f"/tmp/test_nonexistent_scanner_cfg_{int(time.time() * 1000)}.json"
+        fake_dash_path = f"/tmp/test_nonexistent_dash_cfg_{int(time.time() * 1000)}.json"
+
+        try:
+            cfg = load_scanner_config(fake_scanner_path, create_if_missing=False)
+            self.assertIsInstance(cfg, dict)
+            self.assertEqual(cfg["node_id"], "sensor-node-01")
+            self.assertFalse(os.path.exists(fake_scanner_path), "load_scanner_config must not create files on disk")
+
+            dcfg = load_dashboard_config(fake_dash_path, create_if_missing=False)
+            self.assertIsInstance(dcfg, dict)
+            self.assertFalse(os.path.exists(fake_dash_path), "load_dashboard_config must not create files on disk")
+        finally:
+            if os.path.exists(fake_scanner_path):
+                os.unlink(fake_scanner_path)
+            if os.path.exists(fake_dash_path):
+                os.unlink(fake_dash_path)
+
+    def test_no_nrf_and_no_ble_flag_handling(self):
+        """Verify that --no-nrf and --no-ble flags and enable_nrf config cleanly toggle no_ble."""
+        import scanner.combined_rid_listener as crl
+
+        # CLI flag --no-nrf
+        args_no_nrf, _ = crl.parse_arguments(["--no-nrf"])
+        self.assertTrue(args_no_nrf.no_ble)
+
+        # CLI flag --no-ble
+        args_no_ble, _ = crl.parse_arguments(["--no-ble"])
+        self.assertTrue(args_no_ble.no_ble)
+
+        # Default behavior (neither flag passed)
+        args_default, _ = crl.parse_arguments([])
+        self.assertFalse(args_default.no_ble)
+
+        # Config file with enable_nrf: False
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as tmp:
+            json.dump({"enable_nrf": False}, tmp)
+            tmp.flush()
+
+            args_from_cfg, _ = crl.parse_arguments(["--scanner-config", tmp.name])
+            self.assertTrue(args_from_cfg.no_ble)
+            os.unlink(tmp.name)
+
     def test_pcap_global_and_record_headers(self):
         """Verify standard 24-byte PCAP global header and 16-byte record header construction."""
         from scanner.pcap_logger import (

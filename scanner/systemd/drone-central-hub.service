@@ -7,7 +7,7 @@
 #
 # Installation Instructions:
 # 1. Copy or link this service file to /etc/systemd/system/:
-#      sudo cp scanner/drone-central-hub.service /etc/systemd/system/
+#      sudo cp scanner/systemd/drone-central-hub.service /etc/systemd/system/
 #
 # 2. Adjust User, WorkingDirectory and ExecStart paths if needed.
 #

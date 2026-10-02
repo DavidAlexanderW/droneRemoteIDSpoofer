@@ -61,10 +61,11 @@ def get_default_dashboard_config_path() -> str:
     return dash_cfg
 
 
-def load_dashboard_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+def load_dashboard_config(config_path: Optional[str] = None, create_if_missing: bool = False) -> Dict[str, Any]:
     """
     Loads dashboard configuration from JSON file on disk.
-    If the file does not exist, writes the default configuration to disk.
+    If create_if_missing is True and the file does not exist, writes the default configuration to disk.
+    Otherwise, returns an in-memory copy of DEFAULT_DASHBOARD_CONFIG without disk writes.
     If the file exists but contains invalid JSON, raises ValueError and NEVER overwrites it.
     """
     path = os.path.abspath(config_path) if config_path else get_default_dashboard_config_path()
@@ -93,10 +94,11 @@ def load_dashboard_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
         return config
 
-    # Create default config on disk only if file does not exist
+    # If file does not exist
     config = dict(DEFAULT_DASHBOARD_CONFIG)
-    config["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
-    save_dashboard_config(config, path)
+    if create_if_missing:
+        config["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
+        save_dashboard_config(config, path)
     return config
 
 

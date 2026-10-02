@@ -27,9 +27,23 @@ DEFAULT_SCANNER_CONFIG = {
     "hub_ws_url": None,  # e.g., "ws://central-hub.local:8000/stream/node"
     "spool_dir": "spool",
     "max_ram_queue": 10000,
+    "wifi_iface": None,
+    "nrf_port": None,
+    "enable_wifi": True,
+    "enable_nrf": True,
+    "coded": True,
     "ble_mode": "hop",
     "ble_bt5_dwell_s": 5.0,
     "ble_bt4_dwell_s": 1.0,
+    "social_dwell_ms": 1000,
+    "non_social_dwell_ms": 200,
+    "non_social_dwell_5g_ms": 250,
+    "non_social_ratio": 1,
+    "drain_retention_ms": 5.0,
+    "db_file": "rid_detections.db",
+    "log_jsonl": None,
+    "log_pcap": None,
+    "pcap_dir": None,
     "updated_at_iso": None,
 }
 
@@ -62,10 +76,11 @@ def get_default_config_path() -> str:
     return scanner_cfg
 
 
-def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+def load_scanner_config(config_path: Optional[str] = None, create_if_missing: bool = False) -> Dict[str, Any]:
     """
     Loads scanner configuration from JSON file on disk.
-    If the file does not exist, writes the default configuration to disk.
+    If create_if_missing is True and the file does not exist, writes the default configuration to disk.
+    Otherwise, returns an in-memory copy of DEFAULT_SCANNER_CONFIG without disk writes.
     If the file exists but contains invalid JSON, raises ValueError and NEVER overwrites it.
     """
     path = os.path.abspath(config_path) if config_path else get_default_config_path()
@@ -89,23 +104,114 @@ def load_scanner_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         config["show_range_rings"] = bool(config.get("show_range_rings", True))
         config["enabled"] = bool(config.get("enabled", True))
         config["locked"] = bool(config.get("locked", False))
-        hub_url = config.get("hub_ws_url")
+        hub_url = config.get("hub_ws_url") or config.get("hub_url")
         config["hub_ws_url"] = str(hub_url).strip() if hub_url else None
         config["spool_dir"] = str(config.get("spool_dir", DEFAULT_SCANNER_CONFIG["spool_dir"]))
         config["max_ram_queue"] = int(config.get("max_ram_queue", DEFAULT_SCANNER_CONFIG["max_ram_queue"]))
+        config["wifi_iface"] = config.get("wifi_iface") or config.get("wifi_interface")
+        config["nrf_port"] = config.get("nrf_port")
+        config["enable_wifi"] = bool(config.get("enable_wifi", True))
+        config["enable_nrf"] = bool(config.get("enable_nrf", config.get("enable_ble", True)))
+        config["coded"] = bool(config.get("coded", DEFAULT_SCANNER_CONFIG["coded"]))
         config["ble_mode"] = str(config.get("ble_mode", DEFAULT_SCANNER_CONFIG["ble_mode"])).lower()
         config["ble_bt5_dwell_s"] = float(config.get("ble_bt5_dwell_s", DEFAULT_SCANNER_CONFIG["ble_bt5_dwell_s"]))
         config["ble_bt4_dwell_s"] = float(config.get("ble_bt4_dwell_s", DEFAULT_SCANNER_CONFIG["ble_bt4_dwell_s"]))
+        config["social_dwell_ms"] = int(config.get("social_dwell_ms", DEFAULT_SCANNER_CONFIG["social_dwell_ms"]))
+        config["non_social_dwell_ms"] = int(config.get("non_social_dwell_ms", DEFAULT_SCANNER_CONFIG["non_social_dwell_ms"]))
+        config["non_social_dwell_5g_ms"] = int(config.get("non_social_dwell_5g_ms", DEFAULT_SCANNER_CONFIG["non_social_dwell_5g_ms"]))
+        config["non_social_ratio"] = int(config.get("non_social_ratio", DEFAULT_SCANNER_CONFIG["non_social_ratio"]))
+        config["drain_retention_ms"] = float(config.get("drain_retention_ms", DEFAULT_SCANNER_CONFIG["drain_retention_ms"]))
+        config["db_file"] = config.get("db_file", DEFAULT_SCANNER_CONFIG["db_file"])
+        config["log_jsonl"] = config.get("log_jsonl")
+        config["log_pcap"] = config.get("log_pcap")
+        config["pcap_dir"] = config.get("pcap_dir") or config.get("log_pcap_dir")
         if not isinstance(config.get("range_rings_m"), list):
             config["range_rings_m"] = DEFAULT_SCANNER_CONFIG["range_rings_m"]
         
         return config
 
-    # Create default config on disk only if file does not exist
+    # If file does not exist
     config = dict(DEFAULT_SCANNER_CONFIG)
-    config["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
-    save_scanner_config(config, path)
+    if create_if_missing:
+        config["updated_at_iso"] = datetime.now(timezone.utc).isoformat()
+        save_scanner_config(config, path)
     return config
+
+
+def get_cli_defaults_from_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Loads configuration from disk without side-effects and normalizes keys
+    into argparse destination attribute names for use with parser.set_defaults(**defaults).
+    """
+    path = os.path.abspath(config_path) if config_path else get_default_config_path()
+    if not os.path.exists(path):
+        return {}
+
+    cfg = load_scanner_config(path, create_if_missing=False)
+    defaults: Dict[str, Any] = {}
+
+    # Hardware & Subsystem Toggles
+    if cfg.get("enable_nrf") is False or cfg.get("enable_ble") is False:
+        defaults["no_ble"] = True
+    if cfg.get("enable_wifi") is False:
+        defaults["no_wifi"] = True
+    if "coded" in cfg and cfg["coded"] is not None:
+        defaults["coded"] = bool(cfg["coded"])
+    
+    wifi_iface = cfg.get("wifi_iface") or cfg.get("wifi_interface")
+    if wifi_iface:
+        defaults["wifi_iface"] = str(wifi_iface).strip()
+    if cfg.get("nrf_port"):
+        defaults["nrf_port"] = str(cfg["nrf_port"]).strip()
+
+    # Streaming & Identity
+    hub_url = cfg.get("hub_ws_url") or cfg.get("hub_url")
+    if hub_url:
+        defaults["hub_url"] = str(hub_url).strip()
+    if cfg.get("node_id"):
+        defaults["node_id"] = str(cfg["node_id"]).strip()
+    if cfg.get("spool_dir"):
+        defaults["spool_dir"] = str(cfg["spool_dir"]).strip()
+    if "max_ram_queue" in cfg and cfg["max_ram_queue"] is not None:
+        defaults["max_ram_queue"] = int(cfg["max_ram_queue"])
+
+    # BLE Parameters
+    if cfg.get("ble_mode"):
+        defaults["ble_mode"] = str(cfg["ble_mode"]).lower().strip()
+    if "ble_bt5_dwell_s" in cfg and cfg["ble_bt5_dwell_s"] is not None:
+        defaults["ble_bt5_dwell"] = float(cfg["ble_bt5_dwell_s"])
+    elif "bt5_dwell" in cfg and cfg["bt5_dwell"] is not None:
+        defaults["ble_bt5_dwell"] = float(cfg["bt5_dwell"])
+
+    if "ble_bt4_dwell_s" in cfg and cfg["ble_bt4_dwell_s"] is not None:
+        defaults["ble_bt4_dwell"] = float(cfg["ble_bt4_dwell_s"])
+    elif "bt4_dwell" in cfg and cfg["bt4_dwell"] is not None:
+        defaults["ble_bt4_dwell"] = float(cfg["bt4_dwell"])
+
+    # Wi-Fi Hopping Parameters
+    if "social_dwell_ms" in cfg and cfg["social_dwell_ms"] is not None:
+        defaults["social_dwell_ms"] = int(cfg["social_dwell_ms"])
+    if "non_social_dwell_ms" in cfg and cfg["non_social_dwell_ms"] is not None:
+        defaults["non_social_dwell_ms"] = int(cfg["non_social_dwell_ms"])
+    if "non_social_dwell_5g_ms" in cfg and cfg["non_social_dwell_5g_ms"] is not None:
+        defaults["non_social_dwell_5g_ms"] = int(cfg["non_social_dwell_5g_ms"])
+    if "non_social_ratio" in cfg and cfg["non_social_ratio"] is not None:
+        defaults["non_social_ratio"] = int(cfg["non_social_ratio"])
+    if "drain_retention_ms" in cfg and cfg["drain_retention_ms"] is not None:
+        defaults["drain_retention_ms"] = float(cfg["drain_retention_ms"])
+
+    # Storage & Logging
+    if cfg.get("db_file"):
+        defaults["db_file"] = str(cfg["db_file"]).strip()
+    if cfg.get("log_jsonl"):
+        defaults["log_jsonl"] = str(cfg["log_jsonl"]).strip()
+    if cfg.get("log_pcap"):
+        defaults["log_pcap"] = str(cfg["log_pcap"]).strip()
+    pcap_dir = cfg.get("pcap_dir") or cfg.get("log_pcap_dir")
+    if pcap_dir:
+        defaults["pcap_dir"] = str(pcap_dir).strip()
+
+    return defaults
 
 
 def save_scanner_config(config_data: Dict[str, Any], config_path: Optional[str] = None) -> Dict[str, Any]:

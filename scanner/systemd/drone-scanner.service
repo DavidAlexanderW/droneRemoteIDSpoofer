@@ -4,7 +4,7 @@
 #
 # Installation Instructions:
 # 1. Copy or link this service file to /etc/systemd/system/:
-#      sudo cp scanner/drone-scanner.service /etc/systemd/system/
+#      sudo cp scanner/systemd/drone-scanner.service /etc/systemd/system/
 #
 # 2. (Optional) Adjust the WorkingDirectory and ExecStart paths below if the
 #    repo is located at a different path on the target machine (e.g. /home/user/droneRemoteIDSpoofer).
@@ -28,23 +28,15 @@ Wants=time-sync.target
 Type=simple
 User=root
 WorkingDirectory=/home/user/droneRemoteIDSpoofer
-# Option A: Centralized Streaming Mode (reads node_id and hub_ws_url from scanner_config.json)
+# Option A: Centralized Streaming Mode (reads node_id, interfaces, and hub_ws_url from scanner_config.json)
 ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-scanner \
-    --wifi-iface wlan0 \
-    --ble-mode extended \
-    --coded \
     --scanner-config /home/user/droneRemoteIDSpoofer/scanner/scanner_config.json \
     --quiet
 
 # Option B: Standalone Local Mode (writes to local SQLite and daily JSONL logs)
 # ExecStart=/home/user/droneRemoteIDSpoofer/.venv/bin/drone-scanner \
-#     --wifi-iface wlan0 \
-#     --ble-mode extended \
-#     --coded \
 #     --scanner-config /home/user/droneRemoteIDSpoofer/scanner/scanner_config.json \
-#     --db-file /home/user/droneRemoteIDSpoofer/rid_detections.db \
-#     --log-jsonl /home/user/droneRemoteIDSpoofer/rid_packets.jsonl \
-#     --rotate-daily \
+#     --standalone \
 #     --quiet
 
 # Auto-restart on hardware disconnect or transient error

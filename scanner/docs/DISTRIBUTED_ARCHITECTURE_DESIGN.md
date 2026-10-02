@@ -25,7 +25,7 @@ The distributed architecture scales the Drone Remote ID system from independent,
 +-----------------------------------------------------------------------------------+
 |                            DISTRIBUTED SENSOR TOPOLOGY                            |
 |                                                                                   |
-|  [Node A: ETZ Rooftop]        [Node B: HG Tower]           [Node C: Mobile Unit]  |
+|  [Node A: Fixed Site 1]        [Node B: Fixed Site 2]       [Node C: Mobile Unit]  |
 |   • Wi-Fi + BLE Sniffers       • Wi-Fi + BLE Sniffers       • Wi-Fi + BLE Sniffers|
 |   • Local Disk Buffer          • Local Disk Buffer          • Local Disk Buffer   |
 |   • Async Streamer             • Async Streamer             • Async Streamer      |
@@ -71,22 +71,26 @@ The distributed architecture scales the Drone Remote ID system from independent,
 droneRemoteIDSpoofer/
 ├── scanner/
 │   ├── combined_rid_listener.py       # [EDGE SENSOR] Hardware sniffer + Local Logger + Forwarder
-│   ├── channel_hopper_scanner.py      # [EDGE SENSOR] Dual-band Wi-Fi hopping engine
 │   ├── sniffers/                      # [EDGE SENSOR] Low-level nRF UART and Wi-Fi drivers
 │   │
-│   ├── central_hub.py                 # [NEW] [CENTRAL HUB] Headless stream receiver & sensor fusion
+│   ├── central_hub.py                 # [CENTRAL HUB] Headless stream receiver & sensor fusion
 │   ├── query_rid_db.py                # [CLI TOOL] Database query & trajectory export utility
 │   │
-│   └── dashboard/                     # [CENTRAL WEB DASHBOARD]
-│       ├── app.py                     # Central FastAPI REST & WebSocket server
-│       ├── static/
-│       │   ├── js/
-│       │   │   ├── map.js             # Multi-node radar map & range rings
-│       │   │   ├── inspector.js       # Multi-receiver RSSI matrix & FAA DOC
-│       │   │   ├── scrubber.js        # Timeline flight replay
-│       │   │   └── packet_modal.js    # Deep ASTM packet dissector
-│       │   ├── css/style.css
-│       │   └── index.html
+│   ├── dashboard/                     # [CENTRAL WEB DASHBOARD]
+│   │   ├── app.py                     # Central FastAPI REST & WebSocket server
+│   │   ├── static/
+│   │   │   ├── js/
+│   │   │   │   ├── map.js             # Multi-node radar map & range rings
+│   │   │   │   ├── inspector.js       # Multi-receiver RSSI matrix & FAA DOC
+│   │   │   │   ├── scrubber.js        # Timeline flight replay
+│   │   │   │   └── packet_modal.js    # Deep ASTM packet dissector
+│   │   │   ├── css/style.css
+│   │   │   └── index.html
+│   │
+│   ├── docs/                          # Architecture, deployment, & academic documentation
+│   ├── systemd/                       # Production Linux systemd service units
+│   ├── tests/                         # Unit and integration test suites
+│   └── tools/                         # RF density profiler & diagnostic tools
 ```
 
 ---
@@ -99,11 +103,11 @@ Every packet forwarded across the network encapsulates the physical RF reception
 ```json
 {
   "version": "1.0",
-  "node_id": "etz-sensor-node-01",
+  "node_id": "sensor-node-01",
   "node_meta": {
-    "name": "ETZ Sensor Node (Rooftop)",
-    "latitude": 47.377417,
-    "longitude": 8.552832,
+    "name": "Fixed Sensor Node 1",
+    "latitude": 47.3769,
+    "longitude": 8.5417,
     "altitude_m": 450.0
   },
   "reception": {
@@ -183,8 +187,8 @@ Index 6 : height_m (m relative)
 Index 7 : height_type (0=ATO, 1=AGL)
 Index 8 : pressure_alt_m (m baro)
 Index 9 : vertical_speed_mps (m/s)
-Index 10: primary_node_id (string, e.g. "etz-sensor-node-01")
-Index 11: node_rssi_map (JSON string or dict, e.g. {"etz-01": -68, "hg-tower": -84})
+Index 10: primary_node_id (string, e.g. "sensor-node-01")
+Index 11: node_rssi_map (JSON string or dict, e.g. {"node-01": -68, "node-02": -84})
 ```
 
 ---
@@ -241,7 +245,7 @@ sequenceDiagram
     participant CentralDB as Central DB & Replay JSONL
 
     Note over Forwarder, Hub: 1. Connection Restored & Handshake
-    Forwarder->>Hub: WS Connect: /stream/node?node_id=etz-01
+    Forwarder->>Hub: WS Connect: /stream/node?node_id=node-01
     Hub-->>Forwarder: Handshake ACK: {"status": "ready", "ack_enabled": true}
 
     Note over Forwarder, Hub: 2. High-Speed Disk Spool Drain & Immediate Purge
@@ -315,7 +319,7 @@ Multi-node central ingestion enables **Physical Layer RF Cross-Verification** to
                  Signal Path   /   \   Signal Path
                  (-55 dBm)    /     \  (-92 dBm)
                              /       \
-                 [Node 1: Near ETZ]   [Node 2: Far HG Tower]
+                 [Node 1: Station A]   [Node 2: Station B]
 ```
 
 ### Detection Heuristics:
@@ -338,12 +342,12 @@ Multi-node central ingestion enables **Physical Layer RF Cross-Verification** to
 - Displays the **Multi-Receiver Sighting Profile**:
   ```
   📡 SENSOR NODE COVERAGE
-  • ETZ Sensor Node (Rooftop) : -64 dBm (Wi-Fi Ch 6)  [Strongest / Primary Fix]
-  • HG Tower Node (Antenna 2) : -82 dBm (Wi-Fi Ch 6)  [Secondary Sighting]
+  • Fixed Sensor Node 1       : -64 dBm (Wi-Fi Ch 6)  [Strongest / Primary Fix]
+  • Fixed Sensor Node 2       : -82 dBm (Wi-Fi Ch 6)  [Secondary Sighting]
   ```
 
 ### 7.3 Deep Packet Inspector Modal (`static/js/packet_modal.js`)
-- Displays node tags on individual packet rows (e.g. `[ETZ]`, `[HG]`).
+- Displays node tags on individual packet rows (e.g. `[NODE-01]`, `[NODE-02]`).
 - Allows filtering chronological packets by specific receiving nodes.
 
 ---

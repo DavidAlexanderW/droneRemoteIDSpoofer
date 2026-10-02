@@ -63,6 +63,11 @@ NODE_ID=""
 SKIP_NRF=false
 SKIP_SYS_PKGS=false
 SKIP_CAPS=false
+LATITUDE=""
+LONGITUDE=""
+ALTITUDE=""
+STATION_NAME=""
+DESCRIPTION=""
 
 # Helper for running commands with sudo if not already root
 run_sudo() {
@@ -96,7 +101,12 @@ print_usage() {
     echo "  --dashboard-config <path> Path to dashboard_config.json (default: <repo>/scanner/dashboard/dashboard_config.json)"
     echo "  --hub-url <url>           Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
     echo "  --node-id <id>            Unique sensor node identifier (e.g. sensor-node-01)"
-    echo "  --no-nrf                  Skip downloading Nordic nrfutil and ble-sniffer plugin"
+    echo "  --name <name>             Sensor station human-readable name"
+    echo "  --latitude <lat>          Sensor station latitude in degrees (e.g. 47.3769)"
+    echo "  --longitude <lon>         Sensor station longitude in degrees (e.g. 8.5417)"
+    echo "  --altitude <alt>          Sensor station altitude in meters (e.g. 450.0)"
+    echo "  --description <desc>      Sensor station description"
+    echo "  --no-nrf                  Skip downloading Nordic nrfutil and disable nRF in scanner service"
     echo "  --no-sys-pkgs             Skip apt package installation (iw, iproute2, rfkill, etc.)"
     echo "  --no-caps                 Skip Linux network capabilities (setcap)"
     echo "  -h, --help                Show this help message and exit"
@@ -143,6 +153,26 @@ while [[ $# -gt 0 ]]; do
             ;;
         --node-id)
             NODE_ID="$2"
+            shift 2
+            ;;
+        --name)
+            STATION_NAME="$2"
+            shift 2
+            ;;
+        --latitude|--lat)
+            LATITUDE="$2"
+            shift 2
+            ;;
+        --longitude|--lon)
+            LONGITUDE="$2"
+            shift 2
+            ;;
+        --altitude|--alt)
+            ALTITUDE="$2"
+            shift 2
+            ;;
+        --description|--desc)
+            DESCRIPTION="$2"
             shift 2
             ;;
         --no-nrf)
@@ -441,34 +471,16 @@ if [ "$INSTALL_SCANNER_SERVICE" = false ] && [ "$INSTALL_DASHBOARD_SERVICE" = fa
 fi
 
 if [ "$INSTALL_SCANNER_SERVICE" = true ]; then
-    # Ensure scanner_config.json exists
+    # Ensure directory and scanner_config.json exist
+    run_sudo mkdir -p "$(dirname "${SCANNER_CONFIG}")"
     if [ ! -f "${SCANNER_CONFIG}" ]; then
         if [ -f "${REPO_DIR}/scanner/scanner_config.example.json" ]; then
             echo -e "${C_CYAN}[*] Initializing ${SCANNER_CONFIG} from example template...${C_RESET}"
-            cp "${REPO_DIR}/scanner/scanner_config.example.json" "${SCANNER_CONFIG}"
+            run_sudo cp "${REPO_DIR}/scanner/scanner_config.example.json" "${SCANNER_CONFIG}"
         else
             echo -e "${C_CYAN}[*] Initializing default ${SCANNER_CONFIG}...${C_RESET}"
-            "${VENV_PYTHON}" -c "from scanner.scanner_config import load_scanner_config; load_scanner_config('${SCANNER_CONFIG}')" 2>/dev/null || true
+            "${VENV_PYTHON}" -c "from scanner.scanner_config import load_scanner_config; load_scanner_config('${SCANNER_CONFIG}', create_if_missing=True)" 2>/dev/null || true
         fi
-    fi
-
-    # Update hub_url or node_id in scanner_config.json if specified on CLI
-    if [ -n "${HUB_URL}" ] || [ -n "${NODE_ID}" ]; then
-        "${VENV_PYTHON}" -c "
-import json, os
-path = '${SCANNER_CONFIG}'
-try:
-    with open(path, 'r') as f:
-        data = json.load(f)
-except Exception:
-    data = {}
-if '${HUB_URL}':
-    data['hub_ws_url'] = '${HUB_URL}'
-if '${NODE_ID}':
-    data['node_id'] = '${NODE_ID}'
-with open(path, 'w') as f:
-    json.dump(data, f, indent=2)
-" 2>/dev/null || true
     fi
 
     # Auto-detect Wi-Fi monitor interface if not supplied
@@ -477,16 +489,70 @@ with open(path, 'w') as f:
         WIFI_IFACE="${DETECTED_IFACE:-wlan0}"
     fi
 
-    # Auto-detect nRF port if not supplied
-    if [ -z "${NRF_PORT}" ]; then
+    # Auto-detect nRF port if not supplied and not skipped
+    if [ "$SKIP_NRF" = false ] && [ -z "${NRF_PORT}" ]; then
         DETECTED_NRF=$(ls /dev/ttyACM* 2>/dev/null | head -n 1 || true)
         NRF_PORT="${DETECTED_NRF:-/dev/ttyACM0}"
     fi
 
+    # Update scanner_config.json with detected and specified hardware/network settings
+    "${VENV_PYTHON}" -c "
+import json
+path = '${SCANNER_CONFIG}'
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+if '${HUB_URL}':
+    data['hub_ws_url'] = '${HUB_URL}'
+if '${NODE_ID}':
+    data['node_id'] = '${NODE_ID}'
+if '${STATION_NAME}':
+    data['name'] = '${STATION_NAME}'
+if '${LATITUDE}':
+    try:
+        data['latitude'] = float('${LATITUDE}')
+    except ValueError:
+        pass
+if '${LONGITUDE}':
+    try:
+        data['longitude'] = float('${LONGITUDE}')
+    except ValueError:
+        pass
+if '${ALTITUDE}':
+    try:
+        data['altitude_m'] = float('${ALTITUDE}')
+    except ValueError:
+        pass
+if '${DESCRIPTION}':
+    data['description'] = '${DESCRIPTION}'
+if '${WIFI_IFACE}':
+    data['wifi_iface'] = '${WIFI_IFACE}'
+    data['enable_wifi'] = True
+
+if '${SKIP_NRF}' == 'true':
+    data['enable_nrf'] = False
+    data['nrf_port'] = None
+elif '${NRF_PORT}':
+    data['nrf_port'] = '${NRF_PORT}'
+    data['enable_nrf'] = True
+
+data.setdefault('coded', True)
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null || true
+
     echo -e "${C_CYAN}[*] Generating customized drone-scanner.service for this node...${C_RESET}"
     echo -e "    - WorkingDirectory: ${REPO_DIR}"
     echo -e "    - Wi-Fi Interface : ${WIFI_IFACE}"
-    echo -e "    - nRF Port        : ${NRF_PORT}"
+    if [ "$SKIP_NRF" = true ]; then
+        echo -e "    - nRF BLE Sniffer : Disabled (--no-nrf)"
+    else
+        echo -e "    - nRF Port        : ${NRF_PORT}"
+    fi
     echo -e "    - Scanner Config  : ${SCANNER_CONFIG}"
 
     # drone-scanner.service
@@ -503,8 +569,6 @@ Type=simple
 User=root
 WorkingDirectory=${REPO_DIR}
 ExecStart=${VENV_DIR}/bin/drone-scanner \\
-    --wifi-iface ${WIFI_IFACE} \\
-    --nrf-port ${NRF_PORT} \\
     --scanner-config ${SCANNER_CONFIG} \\
     --quiet
 

@@ -22,7 +22,7 @@ import sqlite3
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Setup sys.path for direct script execution or package import
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -73,7 +73,13 @@ from scanner.telemetry_logger import (
     C_YELLOW,
     UnifiedTelemetryLogger,
 )
-from scanner.scanner_config import load_scanner_config, save_scanner_config
+from scanner.scanner_config import (
+    load_scanner_config,
+    save_scanner_config,
+    DEFAULT_SCANNER_CONFIG,
+    get_default_config_path,
+    get_cli_defaults_from_config,
+)
 from scanner.drone_models import infer_drone_model
 from scanner.forwarder import CentralStreamForwarder
 from scanner.pcap_logger import DailyNodePcapLogger, DLT_IEEE802_11_RADIO, DLT_NORDIC_BLE
@@ -152,7 +158,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("CombinedRIDListener")
 
 
-def main():
+def parse_arguments(argv: Optional[List[str]] = None) -> Tuple[argparse.Namespace, Dict[str, Any]]:
+    """
+    Two-stage argument parsing for Drone Remote ID Combined Listener:
+    1. Pre-parses --scanner-config (and reads RID_SCANNER_CONFIG_PATH) to locate configuration file.
+    2. Loads configuration cleanly without side effects and feeds into parser.set_defaults().
+    3. Main parser resolves arguments with strict precedence:
+       CLI Flags > Environment Variables > Config File > Built-in Defaults.
+    """
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--scanner-config",
+        default=None,
+        help="Path to JSON configuration file for scanner station parameters",
+    )
+    pre_args, remaining_argv = pre_parser.parse_known_args(argv)
+
+    resolved_config_path = pre_args.scanner_config or get_default_config_path()
+    cfg_defaults = get_cli_defaults_from_config(resolved_config_path)
+
     parser = argparse.ArgumentParser(
         description="Combined Bluetooth (nRF UART) and Wi-Fi Drone Remote ID Listener and Console Logger",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -167,7 +191,9 @@ def main():
 
     # Subsystem toggles
     parser.add_argument("--no-wifi", action="store_true", help="Disable Wi-Fi sniffing and channel hopping")
-    parser.add_argument("--no-ble", action="store_true", help="Disable Bluetooth sniffing")
+    parser.add_argument(
+        "--no-nrf", "--no-ble", dest="no_ble", action="store_true", help="Disable Bluetooth / nRF sniffing and hardware probing"
+    )
     parser.add_argument("--no-wifi-setup", action="store_true", help="Skip bringing Wi-Fi interface down/up into monitor mode")
 
     # Hopping Schedule Configuration
@@ -209,52 +235,43 @@ def main():
         help="Buffer drain retention window in ms for previous channel packet attribution (default: 5.0ms)",
     )
 
-    # Distributed Hub & Forwarding Options
-    cfg = load_scanner_config()
-    default_node_id = cfg.get("node_id", "sensor-node-01")
-    default_hub_url = cfg.get("hub_ws_url")
-    default_spool_dir = cfg.get("spool_dir", "spool")
-    default_max_ram = int(cfg.get("max_ram_queue", 10000))
-    default_ble_mode = cfg.get("ble_mode", "hop")
-    default_ble_bt5_dwell = float(cfg.get("ble_bt5_dwell_s", 5.0))
-    default_ble_bt4_dwell = float(cfg.get("ble_bt4_dwell_s", 1.0))
-
     # BLE Options
     parser.add_argument("--coded", action="store_true", help="Enable Bluetooth 5 Long Range (LE Coded PHY) scanning")
     parser.add_argument(
         "--ble-mode",
         choices=["hop", "extended", "legacy", "all"],
-        default=default_ble_mode,
+        default="hop",
         help="BLE advertisement filter mode (default: hop)",
     )
     parser.add_argument(
         "--ble-bt5-dwell",
         type=float,
-        default=default_ble_bt5_dwell,
+        default=5.0,
         help="BT5 Extended / Coded dwell time in seconds (default: 5.0s)",
     )
     parser.add_argument(
         "--ble-bt4-dwell",
         type=float,
-        default=default_ble_bt4_dwell,
+        default=1.0,
         help="BT4 Legacy dwell time in seconds (default: 1.0s)",
     )
 
+    # Distributed Hub & Forwarding Options
     parser.add_argument(
         "--scanner-config",
-        default=None,
+        default=resolved_config_path,
         help="Path to JSON configuration file for scanner station parameters (default: scanner/scanner_config.json)",
     )
     parser.add_argument(
-        "--hub-url", default=default_hub_url, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
+        "--hub-url", default=None, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
     )
-    parser.add_argument("--node-id", default=default_node_id, help="Sensor node identifier")
+    parser.add_argument("--node-id", default="sensor-node-01", help="Sensor node identifier")
     parser.add_argument(
         "--standalone", action="store_true", help="Force standalone mode (disables forwarding, enables local SQLite/JSONL)"
     )
-    parser.add_argument("--spool-dir", default=default_spool_dir, help="Directory for temporary spool files during network outages")
+    parser.add_argument("--spool-dir", default="spool", help="Directory for temporary spool files during network outages")
     parser.add_argument(
-        "--max-ram-queue", type=int, default=default_max_ram, help="Max in-memory RAM queue size before spilling to disk"
+        "--max-ram-queue", type=int, default=10000, help="Max in-memory RAM queue size before spilling to disk"
     )
 
     # Storage & Logging
@@ -302,36 +319,29 @@ def main():
         help="Retroactively re-parse all raw base64 ASTM messages from rid_packets_*.jsonl files and update the SQLite database",
     )
 
-    args = parser.parse_args()
+    # Apply configuration defaults loaded from JSON config file
+    parser.set_defaults(**cfg_defaults)
 
-    if args.scanner_config:
-        try:
-            cfg = load_scanner_config(args.scanner_config)
-        except Exception as e:
-            logger.warning(f"[!] Warning: Failed to parse scanner config '{args.scanner_config}': {e}")
-            logger.warning("[!] Scanner is continuing in Standalone Local Mode with default parameters.")
-            cfg = {}
-        if args.hub_url == default_hub_url:
-            args.hub_url = cfg.get("hub_ws_url")
-        if args.node_id == default_node_id:
-            args.node_id = cfg.get("node_id", default_node_id)
-        if args.spool_dir == default_spool_dir:
-            args.spool_dir = cfg.get("spool_dir", default_spool_dir)
-        if args.max_ram_queue == default_max_ram:
-            args.max_ram_queue = int(cfg.get("max_ram_queue", default_max_ram))
-        if args.ble_mode == default_ble_mode:
-            args.ble_mode = cfg.get("ble_mode", default_ble_mode)
-        if args.ble_bt5_dwell == default_ble_bt5_dwell:
-            args.ble_bt5_dwell = float(cfg.get("ble_bt5_dwell_s", default_ble_bt5_dwell))
-        if args.ble_bt4_dwell == default_ble_bt4_dwell:
-            args.ble_bt4_dwell = float(cfg.get("ble_bt4_dwell_s", default_ble_bt4_dwell))
-        if not args.log_pcap and cfg.get("log_pcap"):
-            args.log_pcap = "pcaps"
-        if not args.pcap_dir and (cfg.get("pcap_dir") or cfg.get("log_pcap_dir")):
-            args.pcap_dir = cfg.get("pcap_dir") or cfg.get("log_pcap_dir")
+    args = parser.parse_args(remaining_argv)
+
+    # Reload station metadata dictionary without side effects for components needing node_meta
+    actual_config_path = args.scanner_config or resolved_config_path
+    try:
+        cfg = load_scanner_config(actual_config_path, create_if_missing=False)
+    except Exception as e:
+        logger.warning(f"[!] Warning: Failed to parse scanner config '{actual_config_path}': {e}")
+        logger.warning("[!] Scanner is continuing in Standalone Local Mode with default parameters.")
+        cfg = dict(DEFAULT_SCANNER_CONFIG)
+
+    return args, cfg
+
+
+def main(argv: Optional[List[str]] = None):
+    args, cfg = parse_arguments(argv)
 
     if not args.no_wifi and not args.wifi_iface:
         args.no_wifi = True
+        logger.info("[*] No Wi-Fi interface specified. Wi-Fi sniffer disabled.")
 
     if os.geteuid() != 0 and not args.no_wifi:
         logger.warning("[!] Warning: Root privileges (sudo) are recommended for Wi-Fi monitor mode and raw socket capture.")
@@ -535,6 +545,8 @@ def main():
             pcap_streamer=pcap_streamer,
         )
         threads.append(ble_thread)
+    else:
+        logger.info("[*] Bluetooth / nRF sniffer disabled (--no-nrf / --no-ble). Thread skipped.")
 
     # Signal Handling for graceful shutdown
     stop_event = threading.Event()

@@ -141,14 +141,18 @@ def get_dashboard_config_path() -> str:
     state_cfg = getattr(app.state, "dashboard_config_path", None)
     if state_cfg:
         return os.path.abspath(state_cfg)
-    env_path = os.environ.get("RID_DASHBOARD_CONFIG_PATH") or os.environ.get("RID_SCANNER_CONFIG_PATH")
+    env_path = os.environ.get("RID_DASHBOARD_CONFIG_PATH")
     if env_path:
         return os.path.abspath(env_path)
     return get_default_dashboard_config_path()
 
 
 def get_current_dashboard_config() -> Dict[str, Any]:
-    return load_dashboard_config(get_dashboard_config_path())
+    cfg = load_dashboard_config(get_dashboard_config_path(), create_if_missing=True)
+    runtime_overrides = getattr(app.state, "dashboard_config_overrides", None)
+    if runtime_overrides and isinstance(runtime_overrides, dict):
+        cfg.update(runtime_overrides)
+    return cfg
 
 
 def get_db_connection() -> sqlite3.Connection:

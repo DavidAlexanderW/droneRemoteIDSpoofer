@@ -39,6 +39,7 @@ dist/
 scratch/
 NaN/
 patches/
+scanner/legacy/
 test.txt
 *.tzt
 *.code-workspace

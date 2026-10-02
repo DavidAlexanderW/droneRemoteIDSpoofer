@@ -58,13 +58,13 @@ class TestCentralHub(unittest.TestCase):
             "transport": "wifi",
             "timestamp": t0,
             "counter": 42,
-            "node_id": "etz-node-01",
+            "node_id": "node-alpha-01",
             "rssi_dbm": -65,
         }
         is_new1, rssi_map1, primary1 = dedup.process(pkt1)
         self.assertTrue(is_new1)
-        self.assertEqual(primary1, "etz-node-01")
-        self.assertEqual(rssi_map1, {"etz-node-01": -65})
+        self.assertEqual(primary1, "node-alpha-01")
+        self.assertEqual(rssi_map1, {"node-alpha-01": -65})
 
         # Node 2 reception of the EXACT same broadcast packet (simultaneous sighting)
         pkt2 = {
@@ -72,13 +72,13 @@ class TestCentralHub(unittest.TestCase):
             "transport": "wifi",
             "timestamp": t0 + 0.05,  # within 0.5s window
             "counter": 42,
-            "node_id": "hg-tower-02",
+            "node_id": "node-bravo-02",
             "rssi_dbm": -82,
         }
         is_new2, rssi_map2, primary2 = dedup.process(pkt2)
         self.assertFalse(is_new2)  # Deduplicated!
-        self.assertEqual(primary2, "etz-node-01")  # -65 dBm was stronger
-        self.assertEqual(rssi_map2, {"etz-node-01": -65, "hg-tower-02": -82})
+        self.assertEqual(primary2, "node-alpha-01")  # -65 dBm was stronger
+        self.assertEqual(rssi_map2, {"node-alpha-01": -65, "node-bravo-02": -82})
 
     def test_multi_node_deduplicator_primary_promotion(self):
         """Test that a subsequent duplicate packet with stronger RSSI promotes that node to primary."""
@@ -332,9 +332,9 @@ class TestCentralHub(unittest.TestCase):
         self.hub.register_node(
             node_id="test-sensor-01",
             node_meta={
-                "name": "ETZ Sensor Node",
-                "latitude": 47.3774,
-                "longitude": 8.5528,
+                "name": "Sensor Node Alpha",
+                "latitude": 47.3769,
+                "longitude": 8.5417,
                 "altitude_m": 450.0,
                 "range_rings_m": [500, 1000, 2500],
             },
@@ -343,7 +343,7 @@ class TestCentralHub(unittest.TestCase):
         nodes = get_receiver_nodes(self.hub.db_conn)
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0]["node_id"], "test-sensor-01")
-        self.assertEqual(nodes[0]["name"], "ETZ Sensor Node")
+        self.assertEqual(nodes[0]["name"], "Sensor Node Alpha")
         self.assertEqual(nodes[0]["status"], "ONLINE")
 
         # 2. Watermark update
@@ -355,7 +355,7 @@ class TestCentralHub(unittest.TestCase):
         # Register a node
         self.hub.register_node(
             node_id="zurich-01",
-            node_meta={"name": "Zurich Central", "latitude": 47.37, "longitude": 8.54, "altitude_m": 420.0},
+            node_meta={"name": "Zurich Central", "latitude": 47.3769, "longitude": 8.5417, "altitude_m": 420.0},
         )
 
         # GET /api/health
@@ -429,7 +429,7 @@ class TestCentralHub(unittest.TestCase):
         # Register node
         self.hub.register_node(
             node_id="sensor-node-hb",
-            node_meta={"name": "HB Sensor", "latitude": 47.37, "longitude": 8.54},
+            node_meta={"name": "HB Sensor", "latitude": 47.3769, "longitude": 8.5417},
         )
         # Heartbeat node
         self.hub.heartbeat_node("sensor-node-hb", packets_increment=5)
@@ -444,7 +444,7 @@ class TestCentralHub(unittest.TestCase):
         # 1. Register node in DB
         self.hub.register_node(
             node_id="sensor-node-01",
-            node_meta={"name": "Zurich Node", "latitude": 47.37, "longitude": 8.54, "altitude_m": 410.0},
+            node_meta={"name": "Sensor Node 01", "latitude": 47.3769, "longitude": 8.5417, "altitude_m": 410.0},
         )
 
         # 2. Mock connected edge node websocket

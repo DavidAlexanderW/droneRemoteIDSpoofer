@@ -69,6 +69,8 @@ exclude = [
     "scenarios*",
     "scratch*",
     "tests*",
+    "scanner.tests*",
+    "scanner.legacy*",
 ]
 
 [tool.setuptools.package-data]
@@ -76,3 +78,7 @@ exclude = [
     "static/**/*",
     "static/*",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "scanner/tests"]
+norecursedirs = ["scratch", ".venv", "scanner/legacy", "build", "dist"]

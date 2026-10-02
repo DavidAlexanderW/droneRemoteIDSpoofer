@@ -576,39 +576,38 @@ class CentralStreamForwarder:
 def main():
     import argparse
 
-    from scanner.scanner_config import load_scanner_config
+    from scanner.scanner_config import (
+        load_scanner_config,
+        get_default_config_path,
+        get_cli_defaults_from_config,
+    )
 
-    cfg = load_scanner_config()
-    default_node_id = cfg.get("node_id", "sensor-node-01")
-    default_hub_url = cfg.get("hub_ws_url", "ws://127.0.0.1:8000/stream/node")
-    default_spool_dir = cfg.get("spool_dir", "spool")
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--scanner-config", default=None)
+    pre_args, remaining_argv = pre_parser.parse_known_args()
+
+    resolved_config_path = pre_args.scanner_config or get_default_config_path()
+    cfg_defaults = get_cli_defaults_from_config(resolved_config_path)
 
     parser = argparse.ArgumentParser(
         description="Tactical Drone Remote ID - Distributed Stream Forwarder & Historical Data Upload Utility",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--hub-url", default=default_hub_url, help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)")
-    parser.add_argument("--node-id", default=default_node_id, help="Sensor node identifier")
+    parser.add_argument(
+        "--hub-url", default="ws://127.0.0.1:8000/stream/node", help="Central Ingestion Hub WebSocket URL (e.g. ws://hub-ip:8000/stream/node)"
+    )
+    parser.add_argument("--node-id", default="sensor-node-01", help="Sensor node identifier")
     parser.add_argument("--files", "--backlog", "-f", nargs="*", default=None, help="Specific JSONL capture file(s) or glob patterns to upload")
-    parser.add_argument("--scanner-config", default=None, help="Path to scanner_config.json")
-    parser.add_argument("--spool-dir", default=default_spool_dir, help="Spool directory for temporary outage buffers")
+    parser.add_argument("--scanner-config", default=resolved_config_path, help="Path to scanner_config.json")
+    parser.add_argument("--spool-dir", default="spool", help="Spool directory for temporary outage buffers")
     parser.add_argument("--batch-size", type=int, default=250, help="Number of packets per catch-up batch")
     parser.add_argument("--force", action="store_true", help="Force upload of all historical records regardless of watermark")
     parser.add_argument("--sync-only", action="store_true", default=True, help="Exit cleanly after catch-up backlog synchronization finishes")
     parser.add_argument("--stream", dest="sync_only", action="store_false", help="Keep running after sync for live streaming")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose console logs")
 
-    args = parser.parse_args()
-
-    if args.scanner_config:
-        try:
-            cfg = load_scanner_config(args.scanner_config)
-            if args.hub_url == default_hub_url:
-                args.hub_url = cfg.get("hub_ws_url", default_hub_url)
-            if args.node_id == default_node_id:
-                args.node_id = cfg.get("node_id", default_node_id)
-        except Exception as e:
-            logger.warning(f"Failed to load scanner config '{args.scanner_config}': {e}")
+    parser.set_defaults(**cfg_defaults)
+    args = parser.parse_args(remaining_argv)
 
     if args.files:
         backlog_files = list(args.files)

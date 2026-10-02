@@ -31,7 +31,7 @@ from typing import Dict, Any, Optional, List, Tuple
 ASTM_OUI = b"\xFA\x0B\xBC"
 
 # Import hopper and channel state from scanner.combined_rid_listener
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 

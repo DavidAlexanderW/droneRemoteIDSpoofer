@@ -11,17 +11,19 @@ Compliant with **ASTM F3411-19**, **ASTM F3411-22**, and **ASD-STAN (OpenDroneID
 - [2. Hardware & Software Requirements](#2-hardware--software-requirements)
 - [3. Wi-Fi Channel Hopping Specification](#3-wi-fi-channel-hopping-specification)
 - [4. Dual Logging & Flight Encounter Engine](#4-dual-logging--flight-encounter-engine)
-- [5. How to Run the Scanner (`combined_rid_listener.py`)](#5-how-to-run-the-scanner-combined_rid_listenerpy)
-- [6. Querying & Exporting Flights (`query_rid_db.py`)](#6-querying--exporting-flights-query_rid_dbpy)
-- [7. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)](#7-tactical-web-dashboard--deep-packet-inspector-scannerrun_dashboardpy)
-- [8. Configurable & Lockable Sensor Geodesy (`scanner/scanner_config.json`)](#8-configurable--lockable-sensor-geodesy-scannerscanner_configjson)
-- [9. Automated Drone Make & Model Inference (`scanner/drone_models.py`)](#9-automated-drone-make--model-inference-scannerdrone_modelspy)
-- [10. Official FAA DOC Registry Lookup (`/api/faa_lookup`)](#10-official-faa-doc-registry-lookup-apifaa_lookup)
-- [11. Replaying Captured Traffic (`replay_drones.py`)](#11-replaying-captured-traffic-replay_dronespy)
-- [12. Standalone Sniffer Tools (`scanner/sniffers/`)](#12-standalone-sniffer-tools-scannersniffers)
-- [13. Decoded Message Types & Fields Reference](#13-decoded-message-types--fields-reference)
-- [14. Distributed Multi-Node Architecture Design](DISTRIBUTED_ARCHITECTURE_DESIGN.md)
-- [15. Running the Unit Tests](#15-running-the-unit-tests)
+- [5. Quick Installation & Automated Node Deployment](#5-quick-installation--automated-node-deployment)
+- [6. How to Run the Scanner (`combined_rid_listener.py`)](#6-how-to-run-the-scanner-drone-scanner--combined_rid_listenerpy)
+  - [Configuration & Argument Precedence](#configuration--argument-precedence)
+  - [CLI Arguments Reference](#cli-arguments-reference)
+- [7. Querying & Exporting Flights (`query_rid_db.py`)](#7-querying--exporting-flights-query_rid_dbpy)
+- [8. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)](#8-tactical-web-dashboard--deep-packet-inspector-scannerrun_dashboardpy)
+- [9. Configurable & Lockable Sensor Geodesy (`scanner/scanner_config.json`)](#9-configurable--lockable-sensor-geodesy-scannerscanner_configjson)
+- [10. Automated Drone Make & Model Inference (`scanner/drone_models.py`)](#10-automated-drone-make--model-inference-scannerdrone_modelspy)
+- [11. Official FAA DOC Registry Lookup (`/api/faa_lookup`)](#11-official-faa-doc-registry-lookup-apifaa_lookup)
+- [12. Replaying Captured Traffic (`replay_drones.py`)](#12-replaying-captured-traffic-replay_dronespy)
+- [13. Standalone Sniffer Tools (`scanner/sniffers/`)](#13-standalone-sniffer-tools-scannersniffers)
+- [15. Distributed Multi-Node Architecture Design](docs/DISTRIBUTED_ARCHITECTURE_DESIGN.md)
+- [16. Running the Unit Tests](#16-running-the-unit-tests)
 
 ---
 
@@ -145,6 +147,13 @@ Cycle 6: Ch 6 (1000ms) -> Ch 12, Ch 13 (200ms) -> Ch 6 (1000ms) -> Ch 149 (1000m
 
 ## 5. Quick Installation & Automated Node Deployment
 
+### Dedicated Guides (`scanner/docs/`)
+- **Distributed Multi-Node Architecture**: See [DISTRIBUTED_ARCHITECTURE_DESIGN.md](docs/DISTRIBUTED_ARCHITECTURE_DESIGN.md) for network stream topology, WebSocket schemas, and telemetry forwarding.
+- **Building Edge Sensor Nodes**: See [NODE_BUILD_INSTRUCTIONS.md](docs/NODE_BUILD_INSTRUCTIONS.md) for hardware BOM, OS optimization, nRF firmware flashing, and sensor provisioning.
+- **Deploying Central Hub & Dashboard**: See [CENTRAL_HUB_AND_VPN_DEPLOYMENT.md](docs/CENTRAL_HUB_AND_VPN_DEPLOYMENT.md) for central ingestion server setup, tactical radar dashboard, and secure network interconnect recommendations.
+- **Academic Heuristics & Research**: See [ACADEMIC_METHODOLOGY_AND_HEURISTICS.md](docs/ACADEMIC_METHODOLOGY_AND_HEURISTICS.md) for model inference heuristics and mathematical derivations.
+- **Process Lifecycle & BLE TDM**: See [PROCESS_LIFECYCLE_AND_BLE_TDM_ANALYSIS.md](docs/PROCESS_LIFECYCLE_AND_BLE_TDM_ANALYSIS.md) for detailed sniffer process lifecycle and hardware TDM benchmarks.
+
 ### Automated One-Command Node Installer (`install_scanner.sh`)
 For Debian, Ubuntu, and Raspberry Pi OS (`x86_64` and `aarch64` / `arm64`), use the automated installer:
 
@@ -158,6 +167,9 @@ For Debian, Ubuntu, and Raspberry Pi OS (`x86_64` and `aarch64` / `arm64`), use 
 #    --with-hub-service        : Install drone-central-hub.service (central ingestion hub)
 ./scanner/install_scanner.sh --with-scanner-service --wifi-iface wlan1 --nrf-port /dev/ttyACM0
 ```
+
+The installer populates detected or user-specified station metadata and hardware parameters (e.g. `--node-id`, `--name`, `--latitude`, `--longitude`, `--altitude`, `--wifi-iface`, `--nrf-port`, `--no-nrf`, `--hub-url`) directly into `scanner/scanner_config.json`. The resulting `drone-scanner.service` runs `drone-scanner --scanner-config /path/to/repo/scanner/scanner_config.json --quiet`, allowing operators to customize radio, geodesy, and networking parameters directly in `scanner_config.json` or CLI overrides without modifying systemd unit definitions.
+
 
 ### Manual Python Package Installation
 ```bash
@@ -217,14 +229,41 @@ sudo systemctl start drone-dashboard.service
 sudo journalctl -u drone-dashboard.service -f
 ```
 
+### Configuration & Argument Precedence
+
+The scanner architecture uses a deterministic two-stage configuration resolution pipeline. Configuration parameters are resolved following strict hierarchical precedence:
+
+$$\Large \mathbf{CLI\ Flags} > \mathbf{Environment\ Variables} > \mathbf{Configuration\ File\ (JSON)} > \mathbf{Built-in\ Defaults}$$
+
+```mermaid
+flowchart TD
+    CLI["1. Explicit Command-Line Arguments\n(--wifi-iface, --hub-url, --no-nrf)"] -->|Highest Priority| Resolved[Final Runtime Parameters]
+    ENV["2. Environment Variables\n(RID_SCANNER_CONFIG_PATH)"] --> Resolved
+    CFG["3. Station Configuration File\n(scanner_config.json)"] --> Resolved
+    DEF["4. Built-in Hardcoded Defaults\n(Fallback Baseline)"] -->|Lowest Priority| Resolved
+```
+
+#### How Resolution Works
+1. **Stage 1 (Pre-parsing)**: Before full argument evaluation, a lightweight pre-parser resolves `--scanner-config` and `RID_SCANNER_CONFIG_PATH` to locate the target configuration file (defaulting to `scanner/scanner_config.json`).
+2. **Pure In-Memory Loading**: The JSON file is read cleanly without creating unwanted files on disk. Keys are automatically normalized (e.g. `hub_ws_url` $\to$ `hub_url`, `wifi_interface` $\to$ `wifi_iface`).
+3. **Stage 2 (Parser Defaults Injection)**: Config file values are injected as defaults into `argparse` using `parser.set_defaults(**cfg_defaults)`.
+4. **CLI Flag Overrides**: Any argument passed explicitly on the CLI automatically overrides the value loaded from `scanner_config.json`.
+5. **Clean Hardware Disabling**:
+   - If `--no-nrf` or `--no-ble` is passed (or `"enable_nrf": false` in JSON), Bluetooth serial probing on `/dev/ttyACM*` and the `BleNrfSnifferThread` subprocess are completely suppressed (preventing 3-second `killall -9 nrfutil` retry loops).
+   - If `--no-wifi` is passed (or `"enable_wifi": false` in JSON, or no Wi-Fi interface is specified), the Wi-Fi sniffer and channel hopping threads are suppressed.
+6. **Minimal Systemd Units**: Because hardware and RF parameters can be set in `scanner_config.json`, background deployments in `drone-scanner.service` remain clean and minimal:
+   ```ini
+   ExecStart=/path/to/.venv/bin/drone-scanner --scanner-config /path/to/scanner_config.json --quiet
+   ```
+
 ### CLI Arguments Reference
 
 | Argument | Default | Description |
 | :--- | :--- | :--- |
-| `--wifi-iface`, `-i` | `None` | Wi-Fi monitor-mode interface (e.g. `wlan1` or `wlan0mon`) |
-| `--nrf-port`, `-p` | `None` (auto) | nRF Sniffer UART port (e.g. `/dev/ttyACM0`). Auto-reconnects on USB disconnect. |
+| `--wifi-iface`, `-i` | `None` (or from config) | Wi-Fi monitor-mode interface (e.g. `wlan1` or `wlan0mon`) |
+| `--nrf-port`, `-p` | `None` (auto / from config) | nRF Sniffer UART port (e.g. `/dev/ttyACM0`). Auto-detected if omitted. |
 | `--no-wifi` | `False` | Disable Wi-Fi sniffing and channel hopping |
-| `--no-ble` | `False` | Disable Bluetooth sniffing |
+| `--no-nrf`, `--no-ble` | `False` | Disable Bluetooth / nRF sniffing and hardware probing |
 | `--no-wifi-setup` | `False` | Skip bringing Wi-Fi interface down/up into monitor mode |
 | `--wifi-channel`, `-c` | `None` | Lock Wi-Fi sniffer to a single fixed channel (e.g. 6 or 149) |
 | `--no-hop` | `False` | Disable Wi-Fi channel hopping (listen on initial channel) |
@@ -233,26 +272,30 @@ sudo journalctl -u drone-dashboard.service -f
 | `--non-social-dwell-ms` | `200` | 2.4 GHz non-social channel dwell time in milliseconds (5 Hz) |
 | `--non-social-dwell-5g-ms` | `250` | 5.8 GHz non-social channel dwell time in ms (extended to offset negative lead time) |
 | `--drain-retention-ms` | `5.0` | Buffer drain retention window in ms for previous channel attribution |
-| `--coded` | `False` | Enable BLE 5 Long Range (LE Coded PHY) scanning |
-| `--ble-mode` | `extended` | Filter BLE advertisements: `extended` (BLE 5 Extended Advertising), `legacy` (BLE 4), `all` |
+| `--coded` | `True` | Enable BLE 5 Long Range (LE Coded PHY) scanning |
+| `--ble-mode` | `hop` | Filter BLE advertisements: `hop` (cycles BT5/BT4), `extended` (BT5), `legacy` (BT4), `all` |
+| `--ble-bt5-dwell` | `5.0` | Extended BLE dwell time in seconds |
+| `--ble-bt4-dwell` | `1.0` | Legacy BLE dwell time in seconds |
+| `--hub-url` | `None` (or from config) | Central Ingestion Hub WebSocket URL (`ws://hub-ip:8000/stream/node`) |
+| `--node-id` | `sensor-node-01` | Unique sensor node identifier |
+| `--spool-dir` | `spool` | Directory for temporary spool files during network outages |
+| `--max-ram-queue` | `10000` | Max in-memory RAM queue size before spilling to disk |
+| `--standalone` | `False` | Force standalone mode (disables forwarding, enables local SQLite/JSONL) |
 | `--db-file` | `rid_detections.db` | SQLite database path for flight encounters (`''` to disable) |
 | `--encounter-timeout-s` | `300.0` | Inactivity timeout in seconds before closing an encounter (5 min) |
 | `--persist-interval` | `2.0` | Max frequency in seconds to persist active encounters to SQLite |
 | `--rehydrate` | `False` | Retroactively re-decode raw base64 frames from `.jsonl` files and rehydrate SQLite DB |
-| `--scanner-config` | `scanner/scanner_config.json` | Path to JSON scanner station configuration file for client-side geodesy |
-| `--receiver-lat`, `--receiver-lon`, `--receiver-alt` | `None` | Ground station coordinates override (decimal degrees and meters MSL) |
-| `--receiver-name` | `None` | Ground station identification name override |
-| `--receiver-lock` | `False` | Write-protect receiver station parameters directly on disk (`"locked": true`) |
-| `--receiver-unlock` | `False` | Remove write-protection from receiver station config file on disk |
+| `--scanner-config` | `scanner/scanner_config.json` | Path to JSON scanner station configuration file |
 | `--log-jsonl` | `None` | Optional output JSONL replay file path |
 | `--rotate-daily` | `False` | Automatically split JSONL log file daily (`<path>_YYYYMMDD.jsonl`) |
 | `--log-pcap` | `None` | Enable daily PCAP logging with optional output directory or path prefix (default: `pcaps`) |
 | `--pcap-dir` | `pcaps` | Directory to store daily PCAP log files (1 for Wi-Fi, 1 for Bluetooth per node) |
 | `--quiet`, `-q` | `False` | Quiet mode: suppress per-packet terminal banner and print 30s status heartbeat |
+| `--sync-only` | `False` | Synchronize pending spool files and historical backlog to Central Hub and exit |
 
 ---
 
-## 6. Querying & Exporting Flights (`query_rid_db.py`)
+## 7. Querying & Exporting Flights (`query_rid_db.py`)
 
 The companion tool [`query_rid_db.py`](query_rid_db.py) provides instant search, table formatting, and GeoJSON export for all flights in the SQLite database:
 
@@ -305,7 +348,7 @@ python3 scanner/query_rid_db.py stats
 
 ---
 
-## 7. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)
+## 8. Tactical Web Dashboard & Deep Packet Inspector (`scanner/run_dashboard.py`)
 
 A full-featured, zero-build tactical SPA dashboard providing real-time airspace monitoring, radar visualization, timeline flight replay, and deep ASTM F3411 packet inspection.
 
@@ -348,21 +391,33 @@ A full-featured, zero-build tactical SPA dashboard providing real-time airspace 
 
 ---
 
-## 8. Configurable & Lockable Sensor Geodesy (`scanner/scanner_config.json`)
+## 9. Configurable & Lockable Sensor Geodesy (`scanner/scanner_config.json`)
 
-Ground station parameters and range rings are persisted directly to [`scanner/scanner_config.json`](scanner/scanner_config.json) (template provided in [`scanner/scanner_config.example.json`](scanner/scanner_config.example.json)):
+Ground station parameters, hardware interfaces, and range rings are persisted directly to [`scanner/scanner_config.json`](scanner/scanner_config.json) (template provided in [`scanner/scanner_config.example.json`](scanner/scanner_config.example.json)):
 
 ```json
 {
-  "name": "Zurich Airspace Tactical Sensor Node",
-  "latitude": 47.377417,
-  "longitude": 8.552832,
+  "node_id": "sensor-node-01",
+  "name": "Tactical Airspace Sensor Node",
+  "latitude": 47.3769,
+  "longitude": 8.5417,
   "altitude_m": 450.0,
   "range_rings_m": [500.0, 1000.0, 2500.0, 5000.0],
   "show_range_rings": true,
   "enabled": true,
   "locked": false,
-  "description": "Configurable Ground Receiver & Radar Station for Drone Remote ID Monitoring"
+  "description": "Ground Receiver & Radar Station for Drone Remote ID Monitoring",
+  "hub_ws_url": "ws://127.0.0.1:8000/stream/node",
+  "spool_dir": "spool",
+  "max_ram_queue": 10000,
+  "wifi_iface": "wlan0",
+  "nrf_port": "/dev/ttyACM0",
+  "enable_wifi": true,
+  "enable_nrf": true,
+  "coded": true,
+  "ble_mode": "hop",
+  "ble_bt5_dwell_s": 5.0,
+  "ble_bt4_dwell_s": 1.0
 }
 ```
 
@@ -371,11 +426,14 @@ Ground station parameters and range rings are persisted directly to [`scanner/sc
   - Web modifications via `POST /api/config/scanner` return `HTTP 403 Forbidden`.
   - Leaflet map marker dragging and map-click repositioning are disabled.
   - The UI displays a red 🔒 `LOCKED ON DISK` badge and write-protection advisory banner.
-- To modify or reposition a locked station, set `"locked": false` directly in `scanner/scanner_config.json` or pass `--receiver-unlock` via CLI.
+- To modify or reposition a locked station, set `"locked": false` directly in `scanner/scanner_config.json`.
+
+> [!NOTE]
+> **Configuration Precedence**: Parameters specified in `scanner_config.json` act as baseline settings for station geodesy, networking, and hardware interfaces. Any setting can be dynamically overridden at runtime using command-line arguments (e.g., `--wifi-iface`, `--hub-url`, `--no-nrf`) without modifying the file on disk. See [Configuration & Argument Precedence](#configuration--argument-precedence) for full details.
 
 ---
 
-## 9. Automated Drone Make & Model Inference (`scanner/drone_models.py`)
+## 10. Automated Drone Make & Model Inference (`scanner/drone_models.py`)
 
 The scanner features a built-in offline ANSI/CTA-2063-A decoding engine:
 - **Manufacturer Identification**: Decodes 4-character ICAO/CTA manufacturer codes (`1581` $\to$ DJI, `1596` $\to$ Autel, `1668` $\to$ Skydio, `1748` $\to$ Parrot, `1714` $\to$ Dronetag, `1686` $\to$ Wingtra, `1716` $\to$ Flyability).
@@ -384,7 +442,7 @@ The scanner features a built-in offline ANSI/CTA-2063-A decoding engine:
 
 ---
 
-## 10. Official FAA DOC Registry Lookup (`/api/faa_lookup`)
+## 11. Official FAA DOC Registry Lookup (`/api/faa_lookup`)
 
 - Operators can query the official **FAA Declaration of Compliance (DOC) Registry** (`https://uasdoc.faa.gov/api/v1/serialNumbers`) for any selected aircraft via the **`🦅 Query FAA DOC`** button in the dashboard.
 - Displays official approval status (`ACCEPTED`), registered applicant entity, official model name, and tracking number.
@@ -392,7 +450,7 @@ The scanner features a built-in offline ANSI/CTA-2063-A decoding engine:
 
 ---
 
-## 11. Replaying Captured Traffic (`replay_drones.py`)
+## 12. Replaying Captured Traffic (`replay_drones.py`)
 
 Any JSONL file recorded with `--log-jsonl <capture.jsonl>` can be replayed over the air using the spoofer's replay engine:
 
@@ -403,7 +461,7 @@ sudo python3 replay/replay_drones.py capture.jsonl --wifi-iface wlan1 --ble-adap
 
 ---
 
-## 12. Standalone Sniffer Tools (`scanner/sniffers/`)
+## 13. Standalone Sniffer Tools (`scanner/sniffers/`)
 
 For targeted debugging or single-transport analysis, dedicated standalone sniffers are available under `scanner/sniffers/`:
 
@@ -413,7 +471,7 @@ For targeted debugging or single-transport analysis, dedicated standalone sniffe
 
 ---
 
-## 13. Decoded Message Types & Fields Reference
+## 14. Decoded Message Types & Fields Reference
 
 The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenDroneID message types:
 
@@ -429,13 +487,13 @@ The scanner comprehensively extracts and decodes all standard ASTM F3411 / OpenD
 
 ---
 
-## 14. Distributed Ingestion & Multi-Node Sensor Network
+## 15. Distributed Ingestion & Multi-Node Sensor Network
 
 The system supports scaling from standalone listeners into an integrated sensor grid with a **Central Ingestion Hub** (`scanner/central_hub.py` / `drone-central-hub`).
 
 ```
 +-----------------------------------------------------------------------------------+
-|  [Edge Node 1: ETZ Rooftop]    [Edge Node 2: HG Tower]     [Edge Node 3: Mobile]  |
+|  [Edge Node 1: Fixed Site A]  [Edge Node 2: Fixed Site B]  [Edge Node 3: Mobile]  |
 |   • Tier 1: Live WS Stream      • Tier 1: Live WS Stream    • Tier 1: Live WS     |
 |   • Tier 2: RAM Buffer (10k)    • Tier 2: RAM Buffer (10k)  • Tier 2: RAM Buffer  |
 |   • Tier 3: Temp Disk Spool     • Tier 3: Temp Disk Spool   • Tier 3: Temp Spool  |
@@ -450,19 +508,19 @@ The system supports scaling from standalone listeners into an integrated sensor 
 +-----------------------------------------------------------------------------------+
 ```
 
-### 14.1 3-Tier Edge Reliability Pipeline
+### 15.1 3-Tier Edge Reliability Pipeline
 - **Tier 1 (Connected / Happy Path)**: Live packets stream over WebSockets with **zero continuous disk writes**, protecting SD cards and flash storage.
 - **Tier 2 (Transient Outages < 5-10 min)**: Packets accumulate in a bounded in-memory RAM queue (`max_ram_queue: 10000`).
 - **Tier 3 (Extended Outages / Offline)**: Overflow packets spill over into timestamped local spool files (`spool/spool_*.jsonl`).
 - **Catch-Up Burst & Auto-Purge**: On reconnect, the node executes a high-speed batch stream to the Hub. Upon server commit ACK, the node immediately unlinks/deletes the spool files (`os.remove()`).
 
-### 14.2 Running the Central Hub
+### 15.2 Running the Central Hub
 ```bash
 # Launch Central Hub on server (requires zero radio hardware)
 drone-central-hub --host 0.0.0.0 --port 8000 --db-file rid_detections_central.db --log-dir central_logs
 ```
 
-### 14.3 Transitioning Existing Scanners to Central Mode
+### 15.3 Transitioning Existing Scanners to Central Mode
 To transition an existing standalone scanner node:
 1. Edit `scanner/scanner_config.json`:
    ```json
@@ -477,7 +535,7 @@ To transition an existing standalone scanner node:
    ```
 3. The node automatically streams any historical `.jsonl` or spool backlog to the Central Hub, deletes them upon confirmation, and switches to live zero-disk streaming.
 
-### 14.4 Concurrent Dual-Pipeline Streaming (Live JSON Telemetry + Full Unfiltered PCAPs)
+### 15.4 Concurrent Dual-Pipeline Streaming (Live JSON Telemetry + Full Unfiltered PCAPs)
 The edge sensor node and Central Ingestion Hub concurrently run two independent, parallel streaming pipelines:
 
 1. **Pipeline 1: Live Real-Time JSON Telemetry (`/stream/node`)**:
@@ -494,14 +552,26 @@ The edge sensor node and Central Ingestion Hub concurrently run two independent,
    - Fully compatible with `tcpdump`, `wireshark`, and `tshark`.
    - Bounded by a 50MB in-memory ring buffer with oldest-drop backpressure, preventing SD card / flash wear during network disruptions.
 
+### 15.5 Secure Multi-Node Interconnect (VPN & Private Networks)
+
+> [!CAUTION]
+> **No Built-in Authentication or Encryption**:
+> The Central Hub WebSockets (`/stream/node`, `/stream/pcap`) and Dashboard REST APIs do not implement native authentication or encryption. In multi-node field deployments, **all node-to-hub and dashboard communication must be routed through an encrypted Virtual Private Network (such as WireGuard or Tailscale), private APN, or isolated network**.
+>
+> Never expose ports 8000 (Central Hub) or 8080 (Dashboard) directly to the public internet. See [docs/CENTRAL_HUB_AND_VPN_DEPLOYMENT.md](docs/CENTRAL_HUB_AND_VPN_DEPLOYMENT.md#5-secure-network-interconnect) for interconnect architecture options and firewall hardening recommendations.
+
 ---
 
-## 15. Running the Unit Tests
+## 16. Running the Unit Tests
 
 Automated test suites verify ASTM decoding, hopping schedule math, SQLite persistence, make/model inference, forwarder 3-tier buffering, central hub deduplication, receiver geodesy, and dashboard APIs:
 
 ```bash
-# Run all unit tests across the scanner module
-.venv/bin/python3 -m unittest discover -s scanner
+# Run all scanner unit and integration tests via pytest
+pytest scanner/tests
+
+# Or run using Python's built-in unittest discovery
+python3 -m unittest discover -s scanner/tests
 ```
+
 

@@ -1,6 +1,6 @@
 {
   "node_id": "sensor-node-01",
-  "name": "Zurich HB Sensor Node",
+  "name": "Tactical Sensor Node",
   "latitude": 47.3769,
   "longitude": 8.5417,
   "altitude_m": 410.0,
@@ -17,9 +17,14 @@
   "hub_ws_url": "ws://127.0.0.1:8000/stream/node",
   "spool_dir": "spool",
   "max_ram_queue": 10000,
+  "wifi_iface": "wlan0",
+  "nrf_port": "/dev/ttyACM0",
+  "enable_wifi": true,
+  "enable_nrf": true,
+  "coded": true,
   "ble_mode": "hop",
   "ble_bt5_dwell_s": 5.0,
   "ble_bt4_dwell_s": 1.0,
-  "log_pcap": false,
+  "log_pcap": null,
   "pcap_dir": "pcaps"
 }

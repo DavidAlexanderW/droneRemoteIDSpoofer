@@ -123,7 +123,6 @@ def main():
 
     if updates:
         dash_config.update(updates)
-        save_dashboard_config(dash_config, config_path)
 
     # Resolve database path (explicit flag > central DB on disk > standard DB)
     scanner_dir = os.path.abspath(os.path.dirname(__file__))
@@ -157,6 +156,7 @@ def main():
         app.state.jsonl_path = os.path.abspath(args.log_jsonl)
         app.state.timeout_s = float(args.timeout)
         app.state.dashboard_config_path = config_path
+        app.state.dashboard_config_overrides = updates
     except Exception:
         pass
 

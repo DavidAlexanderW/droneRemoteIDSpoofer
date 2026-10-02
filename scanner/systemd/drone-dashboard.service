@@ -4,7 +4,7 @@
 #
 # Installation Instructions:
 # 1. Copy or link this service file to /etc/systemd/system/:
-#      sudo cp scanner/drone-dashboard.service /etc/systemd/system/
+#      sudo cp scanner/systemd/drone-dashboard.service /etc/systemd/system/
 #
 # 2. (Optional) Adjust the WorkingDirectory and ExecStart paths below if the
 #    repo is located at a different path on the target machine (e.g. /home/user/droneRemoteIDSpoofer).
