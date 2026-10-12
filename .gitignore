@@ -48,17 +48,17 @@ test.txt
 *.pcap
 evaluation/data/
 evaluation/plots/
+evaluation/comparison_plots/
 plots_*/
 evaluation/*_results.json
 evaluation/*.png
 evaluation/cts_inject
 attacks/takeover/cts_inject
-rid_detections.db
-rid_detections.db-shm
-rid_detections.db-wal
+*.db
+*.db-shm
+*.db-wal
+:memory:
 rid_packets*.jsonl
-scanner/scanner_config.json
-scanner/dashboard/dashboard_config.json
 
 
 *.bak*

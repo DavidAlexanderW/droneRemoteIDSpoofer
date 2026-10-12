@@ -48,7 +48,6 @@ evaluation/                             # Benchmarking & capacity plotting suite
 ├── plot_common.py, plot_capacity.py, plot_ble_comparisons.py
 └── data/, plots/, comparison_plots/
 
-scanner/                                # Combined receiver, query_rid_db, and dedicated sniffers/ (nrf, bt, wifi)
 scenarios/                              # Pre-configured scenario JSON files
 replay/                                 # PCAP capture replay engine (replay_drones.py, pcap_to_replay.py)
 NaN_Bridge/                             # Android app source for Android Wi-Fi Aware broadcasting

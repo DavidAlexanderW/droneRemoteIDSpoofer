@@ -48,11 +48,6 @@ dev = [
 ]
 
 [project.scripts]
-drone-scanner = "scanner.combined_rid_listener:main"
-drone-forwarder = "scanner.forwarder:main"
-drone-dashboard = "scanner.run_dashboard:main"
-drone-central-hub = "scanner.central_hub:main"
-drone-query = "scanner.query_rid_db:main"
 drone-spoofer = "drone_rid_spoofer.cli:main"
 drone-replay = "replay.replay_drones:main"
 
@@ -60,7 +55,6 @@ drone-replay = "replay.replay_drones:main"
 where = ["."]
 include = [
     "drone_rid_spoofer*",
-    "scanner*",
     "replay*",
 ]
 exclude = [
@@ -69,16 +63,9 @@ exclude = [
     "scenarios*",
     "scratch*",
     "tests*",
-    "scanner.tests*",
-    "scanner.legacy*",
-]
-
-[tool.setuptools.package-data]
-"scanner.dashboard" = [
-    "static/**/*",
-    "static/*",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "scanner/tests"]
-norecursedirs = ["scratch", ".venv", "scanner/legacy", "build", "dist"]
+testpaths = ["tests"]
+pythonpath = ["."]
+norecursedirs = ["scratch", ".venv", "build", "dist"]
